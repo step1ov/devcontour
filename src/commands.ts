@@ -1272,7 +1272,6 @@ async function main() {
           }));
         else if (operation === 'decision-confirm' || operation === 'decision-reverse') {
           const messageId = option('--message', '');
-          const row = service.standIns(500, true).find((r) => r.message.id === messageId);
           const text = args.includes('--text') ? option('--text', '') : undefined;
           result = service.rule(
             {
@@ -1283,7 +1282,7 @@ async function main() {
               // версии проверяет сама операция (исправленное — 409).
               expectedVersion: args.includes('--version')
                 ? Number(option('--version', '0'))
-                : (row?.version ?? 0),
+                : (service.standInVersion(messageId) ?? 0),
               idempotencyKey: args.includes('--key') ? option('--key', '') : 'cli-' + randomUUID(),
             },
             'operator',

@@ -2,7 +2,7 @@ import { test } from 'node:test';
 import assert from 'node:assert/strict';
 import { AttentionService } from '../src/application/attention.ts';
 import { DiscussionService } from '../src/application/discussion.ts';
-import { AgentService } from '../src/application/agent.ts';
+import { AgentService, capabilities } from '../src/application/agent.ts';
 import { DomainError } from '../src/core/model.ts';
 import type { AttentionItem } from '../src/core/attention-model.ts';
 import { byKey } from './attention-fixture.ts';
@@ -154,12 +154,14 @@ test('F21: подтверждать и отменять может только 
       }),
     );
     // Операции решения нет в каталоге агентского API.
-    assert.throws(() =>
-      w.agent.execute({
-        operation: 'discussion_rule' as 'discussion_post',
-        input: { messageId: posted.message.id, ruling: 'confirmed' },
-      }),
+    // В каталоге агентского API нет операции решения и нет поля ruling.
+    const catalog = capabilities();
+    assert.equal(
+      catalog.tools.some((t) => /rule|ruling|confirm|revers/i.test(t.name)),
+      false,
     );
+    for (const tool of catalog.tools)
+      assert.doesNotMatch(JSON.stringify(tool.inputSchema ?? {}), /"ruling"/, tool.name);
     // Ведущий видит карточку владельца в attention_list, но действий у агента нет.
     const service = new AttentionService(w.store, w.h);
     const lead = service.agentList({ actor: 'operator' });
@@ -241,6 +243,15 @@ test('F21: отмена владельцем — обращение в очер�
       }),
     );
     assert.equal(done.resolved, true);
+    // Повтор с тем же ключом после обрыва связи — прежняя запись, не 409.
+    const again = await service.act(
+      act(card, 'reverse', {
+        input: { text: 'В заказе несколько позиций, порядок задаю я.' },
+        idempotencyKey: key(2),
+      }),
+    );
+    assert.equal((again.result as { replayed?: boolean }).replayed, true);
+    assert.equal(w.d.standIns(10, true).filter((r) => r.ruling).length, 1);
     const [ruled] = w.d.standIns(10, true);
     assert.equal(ruled.ruling?.ruling, 'reversed');
     assert.equal(ruled.ruling?.kind, 'change-request');
@@ -270,14 +281,32 @@ test('F21: отмена владельцем — обращение в очер�
         ),
       refused(409, 'ruling-final'),
     );
-    // Ведущий обрабатывает отмену обычным discussion_resolve.
+    // Ведущий не отклоняет отмену владельца молча.
+    assert.throws(
+      () =>
+        w.agent.execute({
+          operation: 'discussion_resolve',
+          input: {
+            requestId: ruled.ruling?.id,
+            outcome: 'rejected',
+            reason: 'Оставлю как было.',
+            idempotencyKey: key(4),
+            expectedVersion: w.d.read({ taskId: w.task.id }).version,
+          },
+        }),
+      refused(403, 'owner-ruling'),
+    );
+    assert.equal(w.d.inbox({}).requests.length, 1, 'отмена всё ещё ждёт ведущего');
+    // Принимает новой задачей — обычный discussion_resolve.
+    const redo = w.h.addTask(w.board.id, input('Заказ из нескольких позиций'));
     w.agent.execute({
       operation: 'discussion_resolve',
       input: {
         requestId: ruled.ruling?.id,
-        outcome: 'rejected',
-        reason: 'Нужна новая постановка задачи; заведу её отдельно.',
-        idempotencyKey: key(4),
+        outcome: 'accepted',
+        reason: 'Новая задача на несколько позиций.',
+        refs: { taskIds: [redo.id] },
+        idempotencyKey: key(5),
         expectedVersion: w.d.read({ taskId: w.task.id }).version,
       },
     });
@@ -398,6 +427,7 @@ test('F21: CLI — список ждущих решений, подтвержд�
     assert.match(host.stderr, /только владелец/);
     const noText = await cli('decision-reverse', '--message', ids[1]);
     assert.notEqual(noText.code, 0);
+    assert.match(noText.stderr, /что сделать взамен/);
     assert.equal((await cli('decision-confirm', '--message', ids[0])).code, 0);
     const reversed = await cli('decision-reverse', '--message', ids[1], '--text', 'Иначе');
     assert.equal(reversed.code, 0, reversed.stderr);

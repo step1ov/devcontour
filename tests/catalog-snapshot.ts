@@ -140,5 +140,9 @@
 // standIn {question, impact} (решение ведущего за владельца, которое владелец
 // подтверждает или отменяет вне агентского API); описания discussion_post и
 // attention_list называют это; прочие операции байтово прежние.
-export const CATALOG_DIGEST = 'c85fa7f3ad80f1affe0a5c6d995b49a039338bf3e1c09e466fdba7f92b41313f';
+// Намеренное изменение: описание discussion_resolve называет отказ
+// owner-ruling для отмены решения за владельца, описание discussion_post —
+// запись решения за владельца самим инструментом; прочие операции байтово
+// прежние.
+export const CATALOG_DIGEST = '4dc4b46d98628f5f7bd8fceedfb1a8327ac86831b0ed45d60b6508ab4381da17';
 export const SNAPSHOT_VERSION = '0.4.0-alpha.7';

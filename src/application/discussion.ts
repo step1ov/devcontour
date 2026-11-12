@@ -9,6 +9,7 @@ import { InputService } from './input.ts';
 import {
   DISCUSSION_PAGE_BYTES,
   DISCUSSION_TEXT_BYTES,
+  STAND_IN_FIELD_BYTES,
   clipText,
   discussionInputs,
   discussionMessage,
@@ -21,6 +22,8 @@ type Author = DiscussionMessage['author'];
 
 /** Байт JSON-вида выдержки текста в очереди ведущего: полный текст — `discussion_read`. */
 export const INBOX_EXCERPT_BYTES = 1000;
+/** Байт JSON-вида цитаты прежнего решения в обращении-отмене. */
+const REVERSAL_QUOTE_BYTES = 4000;
 
 /**
  * Запись очереди ведущего — ограниченная проекция обращения: выдержка
@@ -227,18 +230,65 @@ export class DiscussionService {
     if (v.ruling === 'reversed' && !comment)
       throw new DomainError('Отмена решения называет, что сделать взамен (text)', 400);
     const question = target.standIn?.question ?? '';
+    // Цитата прежнего решения — выдержка: обращение остаётся в пределе
+    // текста сообщения, полный текст — по ссылке replyTo.
+    const quoted = clipText(target.text, REVERSAL_QUOTE_BYTES);
+    const decision = quoted.excerpt + (quoted.truncated ? `… (полностью: ${target.id})` : '');
+    const text =
+      v.ruling === 'reversed'
+        ? `Владелец отменил решение за него. Вопрос: ${question}\nРешение было: ${decision}\nВзамен: ${comment}`
+        : comment || 'Владелец подтвердил решение.';
+    // Обращение-отмена — в пределе текста сообщения, как любое обращение.
+    if (Buffer.byteLength(text, 'utf8') > DISCUSSION_TEXT_BYTES)
+      throw new DomainError(
+        `Отмена с вопросом и цитатой решения больше ${DISCUSSION_TEXT_BYTES} байт UTF-8: сократите вариант взамен`,
+        413,
+      );
     return this.append(target.taskId, 'operator', {
       kind: v.ruling === 'reversed' ? 'change-request' : 'note',
-      text:
-        v.ruling === 'reversed'
-          ? `Владелец отменил решение за него. Вопрос: ${question}\nРешение было: ${target.text}\nВзамен: ${comment}`
-          : comment || 'Владелец подтвердил решение.',
+      text,
       replyTo: target.id,
       ruling: v.ruling,
       idempotencyKey: v.idempotencyKey,
       expectedVersion: v.expectedVersion,
       check: (owner) => this.assertRulable(owner, target.id),
     });
+  }
+
+  /** Версия треда задачи решения за владельца `id` (`expectedVersion` его решения). */
+  standInVersion(id: string) {
+    const message = this.find(id);
+    if (!message || message.kind !== 'stand-in') return undefined;
+    const task = this.h.store.read().tasks.find((t) => t.id === message.taskId);
+    return task ? this.h.store.discussionVersion(taskOwner(task), task.id) : undefined;
+  }
+
+  /**
+   * Решение за владельца, которое записывает сам инструмент, когда ведущий
+   * решил за владельца через вопрос исполнителя (ответ с изменением
+   * требований, принятое допущение follow-up). Автор — ведущий: решение его.
+   * Ключ повтора выводится из запроса, поэтому повтор не дублирует запись;
+   * задачи нет — записи нет.
+   */
+  recordStandIn(
+    taskId: string,
+    value: { text: string; question: string; impact: string },
+    idempotencyKey: string,
+  ) {
+    const state = this.h.store.read();
+    const task = state.tasks.find((t) => t.id === taskId);
+    if (!task) return undefined;
+    const owner = taskOwner(task);
+    const field = (t: string) => clipText(t.trim() || '—', STAND_IN_FIELD_BYTES).excerpt;
+    return this.h.store.atomic(() =>
+      this.append(taskId, 'lead', {
+        kind: 'stand-in',
+        text: clipText(value.text.trim() || '—', DISCUSSION_TEXT_BYTES).excerpt,
+        standIn: { question: field(value.question), impact: field(value.impact) },
+        idempotencyKey,
+        expectedVersion: this.h.store.discussionVersion(owner, taskId),
+      }),
+    );
   }
 
   /** Решение за владельца ещё ждёт его: последняя версия и без решения. */
@@ -248,7 +298,7 @@ export class DiscussionService {
         code: 'stand-in-superseded',
       });
     if (this.h.store.discussionRuling(owner, id))
-      throw new DomainError('Владелец уже решил по этому решению', 409, {
+      throw new DomainError('Владелец уже подтвердил или отменил это решение', 409, {
         code: 'already-ruled',
       });
   }
@@ -258,9 +308,9 @@ export class DiscussionService {
    * последние версии; без `all` — только неподтверждённые (без решения
    * владельца). У решённых — его решение.
    */
-  standIns(limit: number, all = false) {
+  standIns(limit: number, all = false, newestFirst = false) {
     return this.schemaOwners().flatMap((owner) =>
-      this.h.store.discussionStandIns(owner, limit, all).map((row) => {
+      this.h.store.discussionStandIns(owner, limit, all, newestFirst).map((row) => {
         const message = this.parse(row.message);
         return {
           owner,
@@ -283,6 +333,15 @@ export class DiscussionService {
     const request = this.find(v.requestId);
     if (!request || request.kind !== 'change-request')
       throw new DomainError('Обращение не найдено', 404);
+    // Отмену решения за владельца ведущий не отклоняет: владелец уже решил.
+    // Остаются принятие (новая ревизия или задача) и «нужен ответ» —
+    // владелец отвечает в панели.
+    if (request.ruling === 'reversed' && v.outcome === 'rejected')
+      throw new DomainError(
+        'Отмену решения владельцем нельзя отклонить: примите её новой ревизией или задачей или попросите ответа владельца (needs-answer)',
+        403,
+        { code: 'owner-ruling' },
+      );
     const state = this.h.store.read();
     if (v.refs.revision !== undefined && !v.refs.boardId)
       throw new DomainError('Ревизия указывается вместе с доской (refs.boardId)', 400);
@@ -710,7 +769,7 @@ export class DiscussionService {
           );
         if (target.kind === 'stand-in' && this.h.store.discussionRuling(owner, target.id))
           throw new DomainError(
-            'Владелец уже решил по этому решению: запишите новое решение за владельца',
+            'Владелец уже подтвердил или отменил это решение: запишите новое решение за владельца',
             409,
             { code: 'already-ruled' },
           );

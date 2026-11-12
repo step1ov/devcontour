@@ -66,6 +66,13 @@ const kindNames: Record<Exclude<Kind, 'disposition'>, string> = {
   answer: 'ответ',
   'stand-in': 'решение за вас',
 };
+/** Состояние отмены по исходу её обработки ведущим (отклонить отмену он не может). */
+function reversalState(handled: DiscussionMessage | undefined) {
+  const outcome = handled?.disposition?.outcome;
+  if (outcome === 'accepted') return 'Отменено вами — ведущий агент внёс изменение';
+  if (outcome === 'needs-answer') return 'Отменено вами — ведущий агент просит ответа';
+  return 'Отменено вами — ждёт обработки ведущим агентом';
+}
 const rulingNames: Record<'confirmed' | 'reversed', string> = {
   confirmed: 'вы подтвердили решение',
   reversed: 'вы отменили решение',
@@ -545,9 +552,9 @@ export function TaskDiscussion({
                           jump(ruled.id);
                         }}
                       >
-                        {ruled.ruling === 'reversed'
-                          ? 'Отменено вами — ведущий агент переделывает'
-                          : 'Подтверждено вами'}
+                        {ruled.ruling !== 'reversed'
+                          ? 'Подтверждено вами'
+                          : reversalState(dispositions.get(ruled.id))}
                       </a>
                     ) : (
                       <span data-stand-in-pending>

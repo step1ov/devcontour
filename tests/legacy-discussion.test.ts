@@ -318,6 +318,8 @@ for (const kind of ['central', 'component'] as const) {
           setupProposals: 0,
           expansions: 0,
           discussions: messages,
+          standIns: 0,
+          rulings: 0,
           attentionMarks: 0,
           inputRequests: 0,
           openInputRequests: 0,

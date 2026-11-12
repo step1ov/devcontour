@@ -635,6 +635,8 @@ test('Ревью плана и контракта: с hintLocale ru ревьюе
       assert.equal(prompts.length, 2);
       assert.match(prompts[0], /^Independently review this contract \/ architecture decision\./);
       assert.match(prompts[1], /^Independently review this task plan\./);
+      // F21: ревьюер называет продуктовые решения без источника и без stand-in.
+      for (const prompt of prompts) assert.match(prompt, /recorded stand-in decision/);
       return prompts;
     };
     const none = await at();

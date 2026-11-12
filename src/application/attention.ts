@@ -1697,6 +1697,20 @@ const discussionNeedsAnswerSource: AttentionSourceRule = {
  * владельца (подтвердить или отменить) снимает карточку; отмена становится
  * обращением к ведущему — карточкой `discussion-request`.
  */
+/**
+ * Полный текст решения для подтверждения: вопрос и влияние сокращаются
+ * первыми, решение — только сверх предела подсказки, и тогда подсказка
+ * говорит, где полный текст.
+ */
+function decisionPrompt(question: string, decision: string, impact: string) {
+  const limit = ATTENTION_LIMITS.prompt;
+  const head = `Вопрос: ${clip(question, 300)}\nВлияние: ${clip(impact, 300)}\nРешение ведущего: `;
+  const room = limit - head.length;
+  if (decision.length <= room) return head + decision;
+  const tail = '… Полный текст — в обсуждении задачи.';
+  return head + decision.slice(0, room - tail.length) + tail;
+}
+
 const standInSource: AttentionSourceRule = {
   id: 'stand-in',
   engine: true,
@@ -1715,7 +1729,7 @@ const standInSource: AttentionSourceRule = {
         source: 'stand-in',
         category: 'decision',
         actor: 'operator',
-        title: `Решение за вас ждёт подтверждения: ${clip(one(question), 100)}`,
+        title: `Ведущий решил за вас — подтвердите или отмените: ${clip(one(question), 100)}`,
         reason: clip(`Решено: ${one(decision)}. Влияние: ${one(impact)}`, ATTENTION_LIMITS.reason),
         since: message.createdAt,
         subject: {
@@ -1726,27 +1740,22 @@ const standInSource: AttentionSourceRule = {
         evidence: [
           { kind: 'message', id: message.id, href: hrefs.message(message.taskId, message.id) },
         ],
-        covered: [message.taskId],
+        // Решение за владельца ничего не держит: задачу карточка не
+        // захватывает и ждущих не считает (предмет — сообщение задачи).
         actions: [
           {
             id: 'confirm',
             kind: 'domain',
             label: 'Подтвердить',
             input: 'confirm',
-            prompt: clip(
-              `Вопрос: ${question}\nРешение ведущего: ${decision}\nВлияние: ${impact}`,
-              ATTENTION_LIMITS.prompt,
-            ),
+            prompt: decisionPrompt(question, decision, impact),
           },
           {
             id: 'reverse',
             kind: 'domain',
             label: 'Отменить решение',
+            // Полный текст решения — в подсказке подтверждения (одна на карточку).
             input: 'text',
-            prompt: clip(
-              `Что сделать взамен? Вопрос: ${question}\nРешение ведущего: ${decision}`,
-              ATTENTION_LIMITS.prompt,
-            ),
           },
         ],
         basis: { taskId: message.taskId, messageId: message.id, threadVersion: version },
@@ -1757,7 +1766,7 @@ const standInSource: AttentionSourceRule = {
     const { h } = engineOf(ctx);
     const service = new DiscussionService(h);
     return service
-      .standIns(HISTORY_DISPOSITIONS, true)
+      .standIns(HISTORY_DISPOSITIONS, true, true)
       .filter((row) => row.ruling)
       .map(({ owner, message, ruling }): Resolved => {
         const root = service.chain(owner, message.id)?.rootId ?? message.id;
@@ -2942,7 +2951,7 @@ export class AttentionService {
       } catch {
         return undefined;
       }
-    else if (v.sourceKey.startsWith('discussion:na:')) {
+    else if (v.sourceKey.startsWith('discussion:na:') || v.sourceKey.startsWith('discussion:si:')) {
       const root = v.sourceKey.slice('discussion:na:'.length);
       for (const owner of owners) {
         const row = h.store.discussionById(owner, root) as { taskId?: string } | undefined;
@@ -2970,7 +2979,12 @@ export class AttentionService {
    * (на что отвечали) берётся из сохранённой записи: карточка уже решена.
    */
   private sameReplay(
-    v: { sourceKey: string; idempotencyKey: string; input?: ActContext['input'] },
+    v: {
+      sourceKey: string;
+      idempotencyKey: string;
+      action?: string;
+      input?: ActContext['input'];
+    },
     replayed: { taskId: string; message: ReplayedMessage },
   ) {
     const h = this.h!;
@@ -2998,6 +3012,22 @@ export class AttentionService {
           ...(input.kind ? { kind: input.kind } : {}),
           ...(message.replyTo ? { replyTo: message.replyTo } : {}),
           ...(message.supersedes ? { supersedes: message.supersedes } : {}),
+        },
+        'operator',
+      );
+      return;
+    }
+    // Решение владельца по решению за него: та же операция с тем же ключом —
+    // прежняя запись или 409 idempotency-conflict.
+    if (v.sourceKey.startsWith('discussion:si:') && message.replyTo) {
+      const text = (input.text ?? input.comment ?? '').trim();
+      discussion.rule(
+        {
+          messageId: message.replyTo,
+          ruling: v.action === 'reverse' ? 'reversed' : 'confirmed',
+          ...(text ? { text } : {}),
+          idempotencyKey: v.idempotencyKey,
+          expectedVersion: 0,
         },
         'operator',
       );

@@ -632,6 +632,14 @@ export class InputService {
         },
         input.expectedVersion,
       );
+      // Ведущий изменил требования за владельца — решение за владельца
+      // записывает сам инструмент, не полагаясь на ведущего.
+      if (actor !== 'operator' && result.answer.kind === 'requirement-change' && result.changed)
+        this.recordStandIn(
+          request,
+          `Ведущий ответил на вопрос исполнителя изменением требований: ${input.text}`,
+          `si-${request.id}-r${result.answer.revision}`,
+        );
       return {
         requestId: request.id,
         lifecycle: result.request.lifecycle,
@@ -670,6 +678,18 @@ export class InputService {
         { by: actor, reason: input.reason },
         input.expectedVersion,
       );
+      // Ведущий принял допущение исполнителя (follow-up) — решение за
+      // владельца записывает сам инструмент.
+      if (actor !== 'operator' && request.kind === 'follow-up' && result.changed) {
+        const q = request.question;
+        const chosen =
+          q.options.find((o) => o.id === q.recommended)?.label ?? q.options[0]?.label ?? '—';
+        this.recordStandIn(
+          request,
+          `Ведущий принял допущение исполнителя: ${chosen}. Основание исполнителя: ${q.rationale || '—'}. Ведущий: ${input.reason}`,
+          `si-${request.id}-accepted`,
+        );
+      }
       return {
         requestId: request.id,
         lifecycle: result.request.lifecycle,
@@ -679,6 +699,26 @@ export class InputService {
     } catch (error) {
       throw toDomain(error);
     }
+  }
+
+  /** Решение за владельца по вопросу исполнителя `request` (см. `DiscussionService.recordStandIn`). */
+  private recordStandIn(request: InputRequest, text: string, key: string) {
+    const task = this.h.store.read().tasks.find((t) => t.id === request.workId);
+    const affects = request.question.affects;
+    new DiscussionService(this.h).recordStandIn(
+      request.workId,
+      {
+        text,
+        question: request.question.question,
+        impact:
+          `Постановка и результат задачи «${task?.title ?? request.workId}»` +
+          (affects.length ? `; затронуто: ${affects.join(', ')}` : '') +
+          (request.criticalHits.length
+            ? `; критические пути: ${request.criticalHits.slice(0, 5).join(', ')}`
+            : ''),
+      },
+      key,
+    );
   }
 
   /**

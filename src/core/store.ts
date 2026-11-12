@@ -919,6 +919,22 @@ export class Store {
         ).n;
     return count;
   }
+  /** Решения за владельца и решения владельца по ним во всех схемах (опись doctor). */
+  standInCounts(): { standIns: number; rulings: number } {
+    const schemas = ['main', ...(this.components?.locations.map((l) => l.schema) ?? [])];
+    const out = { standIns: 0, rulings: 0 };
+    for (const schema of schemas)
+      if (this.discussionTable(schema, false)) {
+        const row = this.db
+          .prepare(
+            `SELECT sum(kind='stand-in') AS s, sum(json_extract(data,'$.ruling') IS NOT NULL) AS r FROM ${schema}.discussion`,
+          )
+          .get() as { s: number | null; r: number | null };
+        out.standIns += row.s ?? 0;
+        out.rulings += row.r ?? 0;
+      }
+    return out;
+  }
   private discussionRows(sql: string, owner: string | undefined, ...args: (string | number)[]) {
     const schema = this.syncSchema(owner);
     if (!this.discussionTable(schema, false)) return [];
@@ -1026,9 +1042,9 @@ export class Store {
   }
   /**
    * Решения за владельца схемы: последние версии (без исправления), старые
-   * первыми; без `all` — только без решения владельца. Не больше `limit`.
+   * первыми (`newestFirst` — новые первыми, для истории); без `all` — только без решения владельца. Не больше `limit`.
    */
-  discussionStandIns(owner: string | undefined, limit: number, all: boolean) {
+  discussionStandIns(owner: string | undefined, limit: number, all: boolean, newestFirst = false) {
     const schema = this.syncSchema(owner);
     if (!this.discussionTable(schema, false)) return [];
     const ruled = (alias: string) =>
@@ -1041,7 +1057,7 @@ export class Store {
          WHERE d.kind='stand-in'
            AND NOT EXISTS (SELECT 1 FROM ${schema}.discussion s WHERE json_extract(s.data,'$.supersedes')=d.id)
            AND (? = 1 OR NOT EXISTS (${ruled('n')}))
-         ORDER BY d.seq LIMIT ?`,
+         ORDER BY d.seq ${newestFirst ? 'DESC' : 'ASC'} LIMIT ?`,
       )
       .all(all ? 1 : 0, limit) as {
       seq: number;
