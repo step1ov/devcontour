@@ -278,7 +278,7 @@ test('Amendments registered without an operation are not carried with open work 
 });
 
 test('A pinned artifact of a contract registered without an operation is carried at its pinned blob and mode', async () => {
-  for (const variant of ['carried', 'mode'] as const) {
+  for (const variant of ['carried', 'mode', 'open-task'] as const) {
     const s = await stage();
     try {
       const before = s.sh('rev-parse', 'devcontour/accepted');
@@ -286,19 +286,24 @@ test('A pinned artifact of a contract registered without an operation is carried
       await writeFile(join(s.repo, 'payments.schema.json'), '{"amount":"number"}\n');
       s.sh('add', '.');
       s.sh('commit', '-qm', 'payments contract');
-      await reviewContract(
-        s.h,
-        s.root,
-        {
-          title: 'Payments',
-          file: 'docs/contracts/payments.md',
-          artifacts: [{ path: 'payments.schema.json', purpose: 'Схема' }],
-        },
-        'codex',
-        reviewers([]),
-        () => {},
-        s.sh('rev-parse', 'HEAD'),
-      );
+      const payments = (artifacts = [{ path: 'payments.schema.json', purpose: 'Схема' }]) =>
+        reviewContract(
+          s.h,
+          s.root,
+          { title: 'Payments', file: 'docs/contracts/payments.md', artifacts },
+          'codex',
+          reviewers([]),
+          () => {},
+          s.sh('rev-parse', 'HEAD'),
+        );
+      if (variant === 'open-task') {
+        // Открытая задача прежней редакции (без схемы): поправка, закрепившая
+        // схему без операции, не переносится — ни документ, ни артефакт.
+        await payments([]);
+        const v0 = s.store.read().contracts.at(-1)!;
+        s.h.addTask(s.h.createBoard('Payments').id, { ...input('Payments'), contracts: [v0.id] });
+      }
+      await payments();
       if (variant === 'mode') {
         s.sh('update-index', '--chmod=+x', 'payments.schema.json');
         s.sh('commit', '-qm', 'schema made executable');
@@ -316,8 +321,8 @@ test('A pinned artifact of a contract registered without an operation is carried
         assert.match(detail, /payments\.schema\.json/);
         assert.equal(s.sh('rev-parse', 'devcontour/accepted'), s.sh('rev-parse', 'HEAD'));
       } else {
-        assert.equal(result.status, 'failed');
-        assert.match(result.error ?? '', /не годные[^:]*: payments\.schema\.json\./);
+        assert.equal(result.status, 'failed', variant);
+        assert.match(result.error ?? '', /не годные[^:]*: (?:\S+, )*payments\.schema\.json\./);
         assert.equal(s.sh('rev-parse', 'devcontour/accepted'), before);
       }
     } finally {
