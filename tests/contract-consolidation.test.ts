@@ -211,13 +211,20 @@ test('F20: sync carries consolidates; a record of an older peer without it still
 });
 
 /** Экспорт состояния и импорт в пустой клон после правки записей `patch`. */
-function reimport(f: ReturnType<typeof registry>, patch: (records: Record<string, any>) => void) {
+type Records = Record<string, { kind: string; data: ContractData }>;
+type ContractData = {
+  id: string;
+  content: string;
+  digest: string;
+  consolidates?: { from: string; review: string };
+};
+function reimport(f: ReturnType<typeof registry>, patch: (records: Records) => void) {
   const empty = { ...f.store.read(), contracts: [], tasks: [], boards: [] };
   const exported = recordsFromState(f.h, f.store.read());
-  for (const records of exported.values()) patch(records);
+  for (const records of exported.values()) patch(records as unknown as Records);
   return stateFromRecords(f.h, empty, exported, new Map());
 }
-const contractRecord = (records: Record<string, any>, id: string) =>
+const contractRecord = (records: Records, id: string) =>
   Object.values(records).find((r) => r.kind === 'contract' && r.data.id === id);
 
 test('F20 M1: import re-checks a consolidation: the immediately preceding redaction, shorter text, ids kept', () => {
