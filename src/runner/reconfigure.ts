@@ -2,7 +2,13 @@ import { readFileSync, renameSync, statSync, writeFileSync } from 'node:fs';
 import { join } from 'node:path';
 import { randomUUID } from 'node:crypto';
 import { ZodError, z } from 'zod';
-import { DevContour, loadedDigest, operationalKeys, type OperationalKey } from '../core/service.ts';
+import {
+  DevContour,
+  applyKeys,
+  applyKeyValue,
+  loadedDigest,
+  type ApplyKey,
+} from '../core/service.ts';
 import { DomainError, type Config, type DevContourState } from '../core/model.ts';
 import { Store } from '../core/store.ts';
 import { repositories } from '../core/repositories.ts';
@@ -43,7 +49,7 @@ export function applyConfig(
   h: DevContour,
   path: string,
   expected: string,
-  keys?: readonly OperationalKey[],
+  keys?: readonly ApplyKey[],
 ) {
   const text = readFileSync(path, 'utf8');
   const next = loadConfig(path, text);
@@ -121,13 +127,13 @@ export function serveReconfigure(h: DevContour, path: string, by: string) {
 /* config-apply: бюджеты и тарифы без перезапуска                      */
 /* ------------------------------------------------------------------ */
 
-const configApplyPrefix = 'config-apply:';
+export const configApplyPrefix = 'config-apply:';
 
 /** Ключи запроса `config-apply`; у запроса другой операции — `undefined`. */
-export function configApplyKeys(operation: string): OperationalKey[] | undefined {
+export function configApplyKeys(operation: string): ApplyKey[] | undefined {
   if (!operation.startsWith(configApplyPrefix)) return undefined;
   const keys = operation.slice(configApplyPrefix.length).split(':')[0].split(',');
-  return keys.every((k): k is OperationalKey => (operationalKeys as readonly string[]).includes(k))
+  return keys.every((k): k is ApplyKey => (applyKeys as readonly string[]).includes(k))
     ? keys
     : undefined;
 }
@@ -150,30 +156,33 @@ export function reconfigureSlotBusy(request: DevContourState['reconfigure']) {
  * его. Поэтому `stallSweep` отправляется только названным явно: такой
  * запрос старый сервер не применит, а запрос без флага остаётся прежним.
  */
-export const defaultOperationalKeys = ['budgets', 'prices'] as const satisfies OperationalKey[];
+export const defaultOperationalKeys = ['budgets', 'prices'] as const satisfies ApplyKey[];
 
 /**
- * Ключи `--keys`: подмножество `operationalKeys`; без флага —
- * `budgets,prices`. `stallSweep`, `inputPolicy` и `gateTimeoutFloorMs` —
- * только названными явно: прежний сервер этих ключей не знает.
+ * Ключи `--keys`: подмножество `applyKeys`; без флага —
+ * `budgets,prices`. `stallSweep`, `inputPolicy`, `gateTimeoutFloorMs` и
+ * `models` — только названными явно: прежний сервер этих ключей не знает.
+ * `models` (runtime, модель и effort привязок) входит в утверждение плана:
+ * после применения открытые утверждённые задачи требуют повторного
+ * утверждения.
  */
-export function parseOperationalKeys(value?: string): OperationalKey[] {
+export function parseOperationalKeys(value?: string): ApplyKey[] {
   if (value === undefined) return [...defaultOperationalKeys];
   const keys = [...new Set(value.split(',').map((k) => k.trim()))].filter(Boolean);
-  const unknown = keys.filter((k) => !(operationalKeys as readonly string[]).includes(k));
+  const unknown = keys.filter((k) => !(applyKeys as readonly string[]).includes(k));
   if (!keys.length || unknown.length)
     throw new Error(
-      `config-apply применяет без перезапуска только ${operationalKeys.join(', ')}` +
+      `config-apply применяет без перезапуска только ${applyKeys.join(', ')}` +
         (unknown.length ? `; не поддерживается: ${unknown.join(', ')}` : '') +
         '. Прочие ключи применяет перезапуск serve',
     );
-  return operationalKeys.filter((k) => keys.includes(k));
+  return applyKeys.filter((k) => keys.includes(k));
 }
 
-const operationalValues = (config: Config, keys: readonly OperationalKey[]) =>
-  Object.fromEntries(keys.map((k) => [k, config[k] ?? null])) as Record<OperationalKey, unknown>;
+const operationalValues = (config: Config, keys: readonly ApplyKey[]) =>
+  Object.fromEntries(keys.map((k) => [k, applyKeyValue(config, k)])) as Record<ApplyKey, unknown>;
 
-const failure = (error: unknown) =>
+export const failure = (error: unknown) =>
   error instanceof ZodError
     ? error.issues.map((i) => `${i.path.join('.') || 'config'}: ${i.message}`).join('; ')
     : error instanceof Error
@@ -181,19 +190,19 @@ const failure = (error: unknown) =>
       : String(error);
 
 export type ConfigApplyResult =
-  | { status: 'unchanged' | 'deferred'; keys: OperationalKey[]; digest: string; detail: string }
+  | { status: 'unchanged' | 'deferred'; keys: ApplyKey[]; digest: string; detail: string }
   | {
       status: 'applied';
-      keys: OperationalKey[];
+      keys: ApplyKey[];
       digest: string;
       operation: string;
-      changed: OperationalKey[];
+      changed: ApplyKey[];
       after: Record<string, unknown>;
     }
-  | { status: 'refused'; keys: OperationalKey[]; digest: string; operation: string; error: string }
+  | { status: 'refused'; keys: ApplyKey[]; digest: string; operation: string; error: string }
   | {
       status: 'pending';
-      keys: OperationalKey[];
+      keys: ApplyKey[];
       digest: string;
       operation: string;
       waitingFor: string[];
@@ -212,7 +221,7 @@ export type ConfigApplyResult =
  */
 export async function requestConfigApply(
   root: string,
-  keys: OperationalKey[],
+  keys: ApplyKey[],
   options: { waitMs?: number; workspaceRoot?: string } = {},
 ): Promise<ConfigApplyResult> {
   const waitMs = options.waitMs ?? 30000;
@@ -281,7 +290,7 @@ export async function requestConfigApply(
         seen = event.id;
         const data = event.data as {
           operation?: string;
-          changed?: OperationalKey[];
+          changed?: ApplyKey[];
           after?: Record<string, unknown>;
           error?: string;
         } | null;

@@ -88,6 +88,7 @@ import { contractEvals } from './runner/contract-evals.ts';
 import { contractImpact } from './runner/contract-impact.ts';
 import { ContractChanges } from './runner/contract-change.ts';
 import { parseOperationalKeys, requestConfigApply } from './runner/reconfigure.ts';
+import { recoverConfigWrite } from './runner/model-settings.ts';
 import { writeSelfCheck } from './runner/checks.ts';
 import { CheckCorpus } from './core/check-store.ts';
 import { propertySeed } from 'devcontour-harness';
@@ -663,6 +664,15 @@ async function main() {
     console.log(JSON.stringify(result, null, 2));
     if (result.status === 'refused') process.exitCode = 1;
     return;
+  }
+  // Запись моделей из панели, оборванная сбоем процесса, откатывается до
+  // загрузки: иначе serve загрузил бы наполовину новый набор файлов.
+  if (operation === 'serve' || operation === 'demo') {
+    const recovered = recoverConfigWrite(root);
+    if (recovered)
+      console.error(
+        `Незавершённая запись конфигурации откатилась: возвращены ${recovered.restored.join(', ') || 'нет'}; уже прежние ${recovered.skipped.join(', ') || 'нет'}`,
+      );
   }
   const config = loadConfig(join(root, 'config.json'));
   if (workspacePath && config.workspaceRoot !== (await realpath(workspacePath)))

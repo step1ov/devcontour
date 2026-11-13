@@ -485,6 +485,11 @@ test('Handoff files are served from docs only, with their own type, and never fr
       assert.match(page.headers.get('content-type')!, /^text\/html/);
       // A page keeps its own stylesheet; isolation is the sandboxed frame.
       assert.match(page.headers.get('content-security-policy')!, /style-src 'self'/);
+      // Opened on its own the page is still a sandbox with an opaque origin:
+      // scripts run, but same-origin access to the panel API is not granted.
+      const policy = page.headers.get('content-security-policy')!;
+      assert.match(policy, /(^|; )sandbox allow-scripts($|;)/);
+      assert.doesNotMatch(policy, /allow-same-origin/);
       assert.equal(await page.text(), '<p>Экран</p>');
       const style = await get('docs/design/sketches/screen.css');
       assert.equal(style.status, 200);

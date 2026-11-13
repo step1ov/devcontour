@@ -40,6 +40,7 @@ import {
   ArrowLeft,
   Folder,
   SquareKanban,
+  Settings2,
 } from 'lucide-react';
 import type { Task, Run } from '../core/model.ts';
 import {
@@ -64,6 +65,9 @@ import type { PanelEvidence, PanelRun, PanelSummary } from '../application/panel
 const GraphPanel = lazy(() => import('./GraphPanel.tsx'));
 const CheckPanel = lazy(() =>
   import('./CheckPanel.tsx').then((module) => ({ default: module.CheckPanel })),
+);
+const SettingsScreen = lazy(() =>
+  import('./Settings.tsx').then((module) => ({ default: module.SettingsScreen })),
 );
 const ProgressPanel = lazy(() =>
   import('./ProgressPanel.tsx').then((module) => ({ default: module.ProgressPanel })),
@@ -790,6 +794,7 @@ const workspaceScreens = [
   { key: 'workspace', label: 'Общий граф', icon: Network },
   { key: 'changesets', label: 'Изменения', icon: GitPullRequestArrow },
   { key: 'contracts', label: 'Контракты', icon: FileSignature },
+  { key: 'settings', label: 'Настройки', icon: Settings2 },
 ] as const;
 const isBoardTab = (tab: string) => boardTabs.some((t) => t.key === tab);
 function readAppLocation() {
@@ -881,6 +886,7 @@ const workspaceNotes: Record<string, string> = {
     'Одна возможность продукта, несколько репозиториев. Приёмка фиксирует проверенную комбинацию SHA.',
   contracts:
     'Новая версия создаётся отдельным контрактом. Задачи закрепляют его содержимое при утверждении.',
+  settings: 'Модели ролей и порог вопросов исполнителя. Меняет только владелец, не агенты.',
 };
 // Описание задачи в инспекторе — три строки, целиком по запросу: длинная
 // постановка отодвигала «что нужно» и доказательства за сгиб.
@@ -2260,12 +2266,16 @@ export function App() {
                     </p>
                     <ProgressPanel
                       state={data}
-                      onConfigChanged={() => void refresh()}
                       onSelect={(id) => {
                         setSelected(id);
                         setTab('list');
                       }}
                     />
+                  </div>
+                )}
+                {tab === 'settings' && (
+                  <div className="min-w-0 px-8 pt-4 pb-6 max-[760px]:px-4">
+                    <SettingsScreen revision={data?.revision} />
                   </div>
                 )}
                 {tab === 'attention' && (

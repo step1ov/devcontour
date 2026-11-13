@@ -1,3 +1,4 @@
+import { pendingConfigWrite } from './model-settings.ts';
 import { access, mkdir, readFile, readdir, realpath, rm, writeFile } from 'node:fs/promises';
 import { constants, existsSync, statSync } from 'node:fs';
 import { delimiter, dirname, isAbsolute, join, resolve } from 'node:path';
@@ -685,6 +686,9 @@ export async function doctor(
     validateWorkflow(config);
     return 'Графы и профили согласованы';
   });
+  // Оборванная запись моделей из панели: файлы могут быть наполовину новыми.
+  const leftover = pendingConfigWrite(root);
+  if (leftover) checks.push({ id: 'config-write', status: 'blocked', detail: leftover });
   // config.json прежней версии хранил рядом со ссылкой на файл компонента
   // полную копию его полей. Теперь действует только файл, и значение, которое
   // раньше молча бралось из копии, оператор должен увидеть.
