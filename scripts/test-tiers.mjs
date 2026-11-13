@@ -26,6 +26,8 @@ export const fileSeconds = {
   'contract-change': 342,
   intent: 341,
   'check-sync': 329,
+  // Оценка по отдельному прогону (~110 с) с запасом на нагрузку полной проверки.
+  'contract-change-siblings': 328,
   'quick-route-e2e': 325,
   'check-sync-storage': 325,
   'git-sync-artifacts': 320,
@@ -65,8 +67,6 @@ export const fileSeconds = {
   'handoff-rank': 102,
   'integration-review-scope': 101,
   proof: 100,
-  // Оценка по отдельному прогону (~35 с) с запасом на нагрузку полной проверки.
-  'contract-change-siblings': 100,
   'stall-sweep': 99,
   'idle-controller': 92,
   'start-context-commit': 90,
@@ -167,7 +167,14 @@ export const slowTests = {
   ],
   'contract-change-siblings': [
     'A sibling document fixed after its operation started does not make the',
-    'Unreviewed content does not move with a sibling: an edited approved',
+    'A sibling document or artifact changed after its approval is not',
+    'A waited-for sibling abandoned after review: the waiting operation',
+    'A sibling revised after review: its successor is waited for',
+    'A newer redaction of the sibling document, registered meanwhile',
+    'An artifact pinned differently by another contract of open work',
+    'No adoption when HEAD is rewritten or after the base move',
+    'A sibling of another component is neither waited for nor carried',
+    'Two operations moving the same base: the one that loses the ref race',
   ],
   'contract-change-staleness': [
     'C-F01: a repin retry accepts only the planned result; an edit',
