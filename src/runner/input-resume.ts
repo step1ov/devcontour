@@ -193,7 +193,7 @@ export class InputResumer {
     const { engine } = executionOf(this.h);
     const request = engine.inputRequest(requestId);
     const answer = latestAnswer(request);
-    const task = this.h.store.read().tasks.find((t) => t.id === request.workId);
+    const task = this.h.store.view().tasks.find((t) => t.id === request.workId);
     if (!answer || !task) return;
     // Состояние — свежее, а не прочитанное при отборе.
     const summary = service
