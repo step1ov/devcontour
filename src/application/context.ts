@@ -46,6 +46,9 @@ import {
 
 const id = z.string().regex(/^[A-Za-z0-9_-]{1,80}$/);
 
+/** Проверка источника требований, которую попытка добавляет к области (harness). */
+const REQUIREMENT_GATE = 'requirement-source';
+
 const gateView = (repo: Repository, ids: string[]) =>
   ids.map((id) => {
     const g = repo.gates.find((g) => g.id === id)!;
@@ -60,10 +63,15 @@ const gateView = (repo: Repository, ids: string[]) =>
  * шаблоны, иначе записывается как `not-applicable`. `outsideScope` — gates
  * профиля вне области задачи: их исполняет другая задача доски или, если
  * ни одна, приёмка доски один раз на итоговом SHA (`coverageGaps`).
+ * У задачи с требованиями попытка добавляет проверку источника требований
+ * (`requirement-source`, вид `requirement`) — последней, как harness.
  * `consumerGates` — проверки потребителей в их компонентах. Область,
  * которую профиль уже не раскрывает, — `gatesError` вместо списков.
  */
-export function taskGates(config: Config, t: Pick<Task, 'repositoryId' | 'gates' | 'consumers'>) {
+export function taskGates(
+  config: Config,
+  t: Pick<Task, 'repositoryId' | 'gates' | 'consumers' | 'requirements'>,
+) {
   const repo = repository(config, t.repositoryId);
   const gateScope: 'task' | 'profile' = t.gates?.length ? 'task' : 'profile';
   try {
@@ -75,7 +83,10 @@ export function taskGates(config: Config, t: Pick<Task, 'repositoryId' | 'gates'
     });
     return {
       gateScope,
-      gates: gateView(repo, own),
+      gates: [
+        ...gateView(repo, own),
+        ...(t.requirements?.length ? [{ id: REQUIREMENT_GATE, kind: 'requirement' }] : []),
+      ],
       ...(outside.length ? { outsideScope: outside } : {}),
       ...(consumers.length ? { consumerGates: consumers } : {}),
     };

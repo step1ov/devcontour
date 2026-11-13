@@ -2104,7 +2104,10 @@ const actionHandlers: Record<string, (a: ActContext) => ActOutcome> = {
         revision: number;
         taskIds: string[];
         tasks: Record<string, string>;
-        /** Карточки до закрепления области — без него. */
+        /**
+         * Основание пересчитывается при действии; область закрепляет окно
+         * между проверкой версии карточки и утверждением.
+         */
         scopes?: Record<string, string>;
         reason: string;
       };

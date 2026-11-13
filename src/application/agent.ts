@@ -94,7 +94,15 @@ export const agentInputs = {
     .strict(),
   task_create: z.object({ boardId: id, task: taskIngest }).strict(),
   task_edit: z
-    .object({ taskId: id, expectedDigest: z.string().regex(/^[a-f0-9]{64}$/), task: taskIngest })
+    .object({
+      taskId: id,
+      expectedDigest: z.string().regex(/^[a-f0-9]{64}$/),
+      expectedScopeDigest: z
+        .string()
+        .regex(/^[a-f0-9]{64}$/)
+        .optional(),
+      task: taskIngest,
+    })
     .strict(),
   task_retry: z.object({ taskId: id }).strict(),
   task_assign: z
@@ -268,7 +276,7 @@ export const descriptions: Record<AgentOperation, string> = {
   project_overview:
     'Read bounded summaries of the common workspace or one repository; follow nextCursor.',
   task_briefing:
-    'Read all pages of the task requirements, contracts, execution policy and blocking reasons. execution.gates are the gates an attempt of this task runs: its own gates (groups expanded, gateScope task) or, without them, the whole profile (gateScope profile); a gate with when.paths runs only when the diff touches its paths. outsideScope lists profile gates outside the task scope (another task or board acceptance runs them), consumerGates the checks of its consumers. Optional repositoryId (multi-repository workspace): the task must belong to that component, otherwise the call is refused.',
+    'Read all pages of the task requirements, contracts, execution policy and blocking reasons. execution.gates are the gates an attempt of this task runs: its own gates (groups expanded, gateScope task) or, without them, the whole profile (gateScope profile); a gate with when.paths runs only when the diff touches its paths; a task with requirements also runs the requirement-source check (kind requirement). outsideScope lists profile gates outside the task scope (another task or board acceptance runs them), consumerGates the checks of its consumers. Optional repositoryId (multi-repository workspace): the task must belong to that component, otherwise the call is refused.',
   checkpoint_save:
     'Save an immutable Git-portable context note in the selected owner, requiring the current overview revision. This does not approve work.',
   checkpoint_changes:
@@ -279,7 +287,7 @@ export const descriptions: Record<AgentOperation, string> = {
   task_create:
     "Add a draft task to an active board; DAG and component ownership are validated. In a product change the task is bound to task.preparation.changeId when given (changeId alone is enough; supplied digests must equal the current approved ones), otherwise to the change of the board's tasks, otherwise to the active change; a change other than that of the board's live tasks is refused; the response names the binding. An accepted board takes no tasks: open the next stage with plan_import and its boardId; board_correct only changes accepted results.",
   task_edit:
-    "Edit a draft task using the specDigest read from task_briefing. Stale edits are rejected. gates and consumers are not part of specDigest: they are pinned separately as scopeDigest (returned here and by task_briefing) by plan review and approval, so a gates-only edit returns the same specDigest and a new scopeDigest, and a plan reviewed before the edit is not approved. task.preparation.changeId rebinds the task to that product change (changeId alone is enough; stale supplied digests are refused, as is a change other than that of the board's other live tasks); without it the task keeps its own change. The response names the binding.",
+    "Edit a draft task using the specDigest read from task_briefing. Stale edits are rejected. gates and consumers are not part of specDigest: they are pinned separately as scopeDigest (returned here and by task_briefing) by plan review and approval, so a gates-only edit returns the same specDigest and a new scopeDigest, and a plan reviewed before the edit is not approved. Pass expectedScopeDigest (from task_briefing) whenever the edit carries gates or consumers: a mismatch is refused like a stale specDigest, otherwise an edit from a stale view could silently revert another gates edit. A gates-only edit counts as a draft edit for discussion_resolve. task.preparation.changeId rebinds the task to that product change (changeId alone is enough; stale supplied digests are refused, as is a change other than that of the board's other live tasks); without it the task keeps its own change. The response names the binding.",
   task_retry:
     'Explicitly retry a failed or cancelled task within the attempt budget. Diagnose the failure first.',
   task_assign: 'Assign a task to a team member. Assignment is not a distributed lease.',
@@ -739,7 +747,12 @@ export class AgentService {
       }
       case 'task_edit': {
         const value = agentInputs.task_edit.parse(input),
-          task = h.editTask(value.taskId, value.task, value.expectedDigest);
+          task = h.editTask(
+            value.taskId,
+            value.task,
+            value.expectedDigest,
+            value.expectedScopeDigest,
+          );
         return {
           taskId: task.id,
           status: task.status,

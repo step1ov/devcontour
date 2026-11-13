@@ -174,5 +174,9 @@
 // (gateScope, outsideScope, consumerGates, when.paths), описание task_edit —
 // scopeDigest (gates и consumers вне specDigest, закреплены отдельно);
 // прочие операции байтово прежние.
-export const CATALOG_DIGEST = '0b796f71d16a55a8078d942a531f9643d60064653f9a665d578ee1bdef834f81';
+// Намеренное изменение: task_edit принимает необязательный expectedScopeDigest,
+// описание task_edit называет его и правку gates для discussion_resolve,
+// описание task_briefing — проверку requirement-source; прочие операции
+// байтово прежние.
+export const CATALOG_DIGEST = '0b677f75fda6de8f03e8957bbe0496dedf8178ac255e10032363e3caaef6181a';
 export const SNAPSHOT_VERSION = '0.4.0-alpha.7';

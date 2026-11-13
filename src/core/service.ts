@@ -1514,7 +1514,12 @@ export class DevContour {
     if (added.length)
       throw new DomainError(label + ': ' + roleScopeAdvice(this.config, task, added), 400);
   }
-  editTask(id: string, input: unknown, expectedDigest: string) {
+  /**
+   * `expectedScopeDigest` — область проверок (gates, потребители), которую
+   * видел правящий: она вне digest постановки, и без неё правка со
+   * старыми gates молча вернула бы чужую правку одних gates.
+   */
+  editTask(id: string, input: unknown, expectedDigest: string, expectedScopeDigest?: string) {
     const parsed = taskIngest.parse(input);
     repository(this.config, parsed.repositoryId);
     validateTaskContext(this.config, { ...parsed, preparation: undefined });
@@ -1524,7 +1529,10 @@ export class DevContour {
         throw new DomainError(
           'Изменять можно только черновик. Для принятой задачи создайте корректировку.',
         );
-      if (specDigest(t) !== expectedDigest)
+      if (
+        specDigest(t) !== expectedDigest ||
+        (expectedScopeDigest !== undefined && scopeDigest(t) !== expectedScopeDigest)
+      )
         throw new DomainError('Задача изменилась. Обновите страницу.');
       // Новые пути — только в области роли; прежние (записанные до этого
       // правила или до сужения роли) правка не отвергает.
@@ -1538,7 +1546,9 @@ export class DevContour {
       // Отметка правки — только при изменённой постановке: правка без
       // изменений не вносит изменения и не принимает обращение к черновику
       // (`discussion_resolve`). Перепривязка к подготовке правкой не считается.
-      const unbound = (x: Task) => specDigest({ ...x, preparation: undefined });
+      // Область проверок (gates, потребители) вне digest постановки, но её
+      // правка — тоже правка черновика (принятие обращения о gates).
+      const unbound = (x: Task) => specDigest({ ...x, preparation: undefined }) + scopeDigest(x);
       const before = unbound(t);
       // Правка с preparation перепривязывает к названному изменению; без неё
       // задача остаётся в своём изменении (его действующие digests).

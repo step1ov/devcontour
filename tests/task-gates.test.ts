@@ -10,8 +10,12 @@ import { join } from 'node:path';
 import { AgentContext } from '../src/application/context.ts';
 import { AgentService } from '../src/application/agent.ts';
 import { AttentionService } from '../src/application/attention.ts';
-import { DevContour, scopeDigest, specDigest } from '../src/core/service.ts';
+import { DevContour, digest, scopeDigest, specDigest } from '../src/core/service.ts';
 import { Store } from '../src/core/store.ts';
+import { DiscussionService } from '../src/application/discussion.ts';
+import { DomainError } from '../src/core/model.ts';
+import { executionOf } from '../src/harness/execution.ts';
+import { taskGates } from '../src/application/context.ts';
 import { config, input } from './helpers.ts';
 
 const report = { type: 'junit' as const, path: '.reports/junit.xml' };
@@ -160,6 +164,8 @@ test('Карточка утверждения плана оператором: �
         expectedVersion: shown.sourceVersion,
         action: 'approve',
       }),
+      (e: unknown) =>
+        e instanceof DomainError && e.status === 409 && e.details?.code === 'attention-stale',
     );
     assert.equal(f.store.read().tasks[0].status, 'draft');
     await new AttentionService(f.store, f.h).act({
@@ -171,6 +177,139 @@ test('Карточка утверждения плана оператором: �
     const approved = f.store.read().tasks[0];
     assert.equal(approved.status, 'ready');
     assert.equal(approved.approvedScope, scopeDigest(approved));
+  } finally {
+    f.cleanup();
+  }
+});
+
+test('Карточка утверждения плана: черновики без gates и потребителей сохраняют версию карточки', async () => {
+  const f = gatesFixture();
+  try {
+    f.h.config.approvalMode = 'operator';
+    const board = f.h.createBoard('Board');
+    const task = f.h.addTask(board.id, input('Plain task'));
+    const items = (await new AttentionService(f.store, f.h).active()).items;
+    const card = items.find((i) => i.sourceKey === `plan:${board.id}`)!;
+    // Формула версии до закрепления области: digest постановки каждого черновика.
+    const before = digest({
+      taskIds: [task.id],
+      drafts: [[task.id, specDigest(task)]],
+      stale: [],
+      blocked: [],
+      unverified: [],
+    }).slice(0, 32);
+    assert.equal(card.sourceVersion, before);
+  } finally {
+    f.cleanup();
+  }
+});
+
+test('discussion_resolve: правка одних gates черновика после обращения — принятие по этой задаче', async () => {
+  const f = gatesFixture();
+  try {
+    const board = f.h.createBoard('Board');
+    const task = f.h.addTask(board.id, { ...input('Scoped task'), gates: ['@fast'] });
+    const d = new DiscussionService(f.h);
+    await new Promise((r) => setTimeout(r, 5));
+    const request = d.post(
+      {
+        taskId: task.id,
+        kind: 'change-request',
+        text: 'Add the e2e gate',
+        idempotencyKey: 'idem-key-0001',
+        expectedVersion: 0,
+      },
+      'operator',
+    );
+    await new Promise((r) => setTimeout(r, 5));
+    f.h.editTask(
+      task.id,
+      { ...input('Scoped task'), gates: ['@fast', 'e2e'] },
+      specDigest(task),
+      scopeDigest(task),
+    );
+    const done = d.resolve({
+      requestId: request.message.id,
+      outcome: 'accepted',
+      reason: 'The e2e gate is in the task scope',
+      refs: { taskIds: [task.id] },
+      idempotencyKey: 'idem-key-0002',
+      expectedVersion: request.version,
+    });
+    assert.equal(done.message.kind, 'disposition');
+  } finally {
+    f.cleanup();
+  }
+});
+
+test('task_edit: expectedScopeDigest — правка с устаревшей областью отклоняется', () => {
+  const f = gatesFixture();
+  try {
+    const api = new AgentService(f.h);
+    const board = f.h.createBoard('Board');
+    const task = f.h.addTask(board.id, { ...input('Scoped task'), gates: ['@fast'] });
+    const seen = { spec: specDigest(task), scope: scopeDigest(task) };
+    // Другой правящий меняет одни gates.
+    f.h.editTask(task.id, { ...input('Scoped task'), gates: ['unit'] }, seen.spec, seen.scope);
+    const edit = (expectedScopeDigest?: string) =>
+      api.execute({
+        operation: 'task_edit',
+        input: {
+          taskId: task.id,
+          expectedDigest: seen.spec,
+          ...(expectedScopeDigest ? { expectedScopeDigest } : {}),
+          task: { ...input('Scoped task'), gates: ['@fast'] },
+        },
+      });
+    assert.throws(() => edit(seen.scope), /Задача изменилась/);
+    assert.deepEqual(f.store.read().tasks[0].gates, ['unit'], 'чужая правка gates сохранена');
+    const current = scopeDigest(f.store.read().tasks[0]);
+    assert.equal((edit(current) as { scopeDigest: string }).scopeDigest, seen.scope);
+    // Без поля — прежнее поведение: сверяется только specDigest.
+    f.h.editTask(task.id, { ...input('Scoped task'), gates: ['unit'] }, seen.spec);
+    edit();
+    assert.deepEqual(f.store.read().tasks[0].gates, ['@fast']);
+  } finally {
+    f.cleanup();
+  }
+});
+
+test('task_briefing: gates совпадают с requiredGates выданной попытки; требования добавляют requirement-source', () => {
+  const f = gatesFixture();
+  try {
+    const board = f.h.createBoard('Board');
+    const scoped = f.h.addTask(board.id, { ...input('Scoped task'), gates: ['@fast'] });
+    f.h.addTask(board.id, input('Profile task'));
+    f.h.approve(board.id);
+    f.h.pause(false);
+    const { store } = executionOf(f.h);
+    for (let i = 0; i < 2; i++) {
+      const run = f.h.claim('test')!;
+      const required = store.read((v) => v.attempts(run.taskId).at(-1)!.requiredGates);
+      assert.deepEqual(
+        briefing(f.h, run.taskId).execution.gates.map((g) => g.id),
+        required,
+        run.taskId === scoped.id ? 'область задачи' : 'весь профиль',
+      );
+    }
+    const withRequirements = taskGates(f.h.config, {
+      repositoryId: 'main',
+      gates: ['unit'],
+      requirements: [
+        {
+          source: 'docs/spec.md',
+          id: 'REQ-a',
+          text: 'A',
+          digest: 'a'.repeat(64),
+          gate: 'unit',
+          scenario: 'A',
+        },
+      ] as never,
+    });
+    assert.deepEqual('gates' in withRequirements ? withRequirements.gates.map((g) => g.id) : [], [
+      'unit',
+      'requirement-source',
+    ]);
   } finally {
     f.cleanup();
   }
