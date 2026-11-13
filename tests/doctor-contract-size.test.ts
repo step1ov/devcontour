@@ -172,3 +172,25 @@ test('F20 R2-M1: doctor names a fork of a contract document with both amendments
     /редакции C-m1, C-m2 параллельно поправили одну редакцию C-p; действует C-m2/,
   );
 });
+
+test('F20 R3-M1: the merging redaction doctor asks for clears the fork warning', () => {
+  const source = 'docs/contracts/api.md';
+  const p = contract('C-p', 1000, { source });
+  const m1 = contract('C-m1', 1000, {
+    source,
+    previous: 'C-p',
+    approvedAt: '2026-11-02T00:00:00.000Z',
+  });
+  const m2 = contract('C-m2', 1000, {
+    source,
+    previous: 'C-p',
+    approvedAt: '2026-11-03T00:00:00.000Z',
+  });
+  assert.equal(contractForkChecks([p, m1, m2]).length, 1);
+  const merged = contract('C-merge', 1000, {
+    source,
+    previous: 'C-m2',
+    approvedAt: '2026-11-04T00:00:00.000Z',
+  });
+  assert.deepEqual(contractForkChecks([p, m1, m2, merged]), []);
+});

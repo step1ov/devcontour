@@ -484,3 +484,40 @@ test('F20 R2-L2: a consolidation record without previous is not an equivalent re
   assert.equal(supersededBy([p, linked], p.id), undefined);
   assert.equal(supersededBy([p, bare], p.id)?.id, bare.id);
 });
+
+test('F20 R3-M1: a redaction on top of the winner resolves a fork; a consolidation of the winner does not', () => {
+  const p = record('C-p');
+  const m1 = record('C-m1', { previous: p.id, approvedAt: '2026-01-02T00:00:00.000Z' });
+  const m2 = record('C-m2', { previous: p.id, approvedAt: '2026-01-03T00:00:00.000Z' });
+  assert.equal(contractForks([p, m1, m2]).length, 1);
+  const f = record('C-f2', {
+    previous: m2.id,
+    consolidates: { from: m2.id, review: 'R' },
+    approvedAt: '2026-01-04T00:00:00.000Z',
+  });
+  assert.equal(contractForks([p, m1, m2, f]).length, 1, 'консолидация действующей не сводит');
+  const merge = record('C-merge', { previous: f.id, approvedAt: '2026-01-05T00:00:00.000Z' });
+  assert.deepEqual(contractForks([p, m1, m2, f, merge]), []);
+  assert.deepEqual(contractForks([p, m1, m2, record('C-n', { previous: m2.id })]), []);
+});
+
+test('F20 R3: a peer cannot add consolidates to a contract record this clone already knows', () => {
+  const f = registry();
+  try {
+    const m = f.h.contract('API', 'Rule REQ-1 REQ-2, short', agent, undefined, SOURCE);
+    assert.throws(
+      () =>
+        reimport(
+          f,
+          (r) => {
+            const rec = contractRecord(r, m.id);
+            if (rec) rec.data.consolidates = { from: f.c1.id, review: 'R-x' };
+          },
+          true,
+        ),
+      /Утверждённый контракт неизменяем/,
+    );
+  } finally {
+    f.cleanup();
+  }
+});

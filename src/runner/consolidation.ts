@@ -45,7 +45,19 @@ export class StaleConsolidation extends DomainError {}
 const INCOMPLETE = 'Неполное отображение старого текста в новый';
 
 /** Текст заголовка без явного якоря `{#id}`. */
-const headingText = (h: string) => h.replace(/\{#[^}]*\}\s*$/, '').trim();
+/**
+ * Текст без разметки Markdown для сравнения заголовков: ссылки `[x](y)` →
+ * `x`, без `` ` ``, `*`, `_`, пробелы схлопнуты. Ревьюер пишет заголовок
+ * `` `GET /items` `` как «GET /items» — это тот же заголовок.
+ */
+const plain = (text: string) =>
+  text
+    .replace(/\[([^\]]*)\]\([^)]*\)/g, '$1')
+    .replace(/[`*_]/g, '')
+    .replace(/\s+/g, ' ')
+    .trim();
+/** Текст заголовка без явного якоря `{#id}` и без разметки. */
+const headingText = (h: string) => plain(h.replace(/\{#[^}]*\}\s*$/, ''));
 const escape = (x: string) => x.replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
 /** `phrase` в `text` целым словом или фразой, без учёта регистра. */
 const whole = (text: string, phrase: string) =>
@@ -53,32 +65,43 @@ const whole = (text: string, phrase: string) =>
 
 /**
  * Пропуски отображения в итоге ревью. Отображение — строки «старое → новое»
- * (`→` или `->`): правая часть называет ID, заголовок или якорь нового
+ * (`→` или `->`). Строка годна, если в её левой части не больше одного
+ * заголовка прежнего текста, а у каждого ID прежнего текста слева своя цель
+ * справа: тот же ID нового текста или отдельный заголовок либо якорь нового
  * текста. Каждый ID правил и каждый заголовок прежнего текста (целым словом
- * или якорем) должен стоять в левой части такой строки. Перечисление ID и
- * разделов без стрелок, ссылка в никуда и совпадение по части слова
- * отображением не считаются.
+ * или якорем, без разметки) должен стоять в левой части годной строки.
+ * Перечисление без стрелок, ссылка в никуда, одна строка на всё и совпадение
+ * по части слова отображением не считаются.
  */
 export function mappingGaps(previous: string, next: string, summary: string) {
-  const ids = new Set(idTokens(next));
-  const heads = headings(next).map(headingText).filter(Boolean);
-  const targets = anchors(next);
-  const names = (right: string) =>
-    idTokens(right).some((id) => ids.has(id)) ||
-    heads.some((h) => whole(right, h)) ||
-    [...targets].some((a) => whole(right, '#' + a) || whole(right, a));
-  const lefts = summary
-    .split('\n')
-    .map((line) => /^(.*?)(?:→|->)(.*)$/u.exec(line))
-    .filter((m): m is RegExpExecArray => !!m && names(m[2]))
-    .map((m) => m[1]);
-  const mapped = (test: (left: string) => boolean) => lefts.some(test);
+  const newIds = new Set(idTokens(next));
+  const newHeads = headings(next).map(headingText).filter(Boolean);
+  const newAnchors = [...anchors(next)];
+  const oldIds = idTokens(previous);
+  const oldHeads = headings(previous).map(headingText).filter(Boolean);
+  const mentions = (left: string, h: string) => whole(left, h) || whole(left, slug(h));
+  const covered = { ids: new Set<string>(), heads: new Set<string>() };
+  for (const raw of summary.split('\n')) {
+    const m = /^(.*?)(?:→|->)(.*)$/u.exec(plain(raw));
+    if (!m) continue;
+    const [, left, right] = m;
+    const heads = oldHeads.filter((h) => mentions(left, h));
+    if (heads.length > 1) continue;
+    const ids = idTokens(left).filter((id) => oldIds.includes(id));
+    const sameIds = ids.filter((id) => newIds.has(id) && idTokens(right).includes(id));
+    const places =
+      newHeads.filter((h) => whole(right, h)).length +
+      newAnchors.filter((a) => whole(right, a)).length;
+    // Остальным ID нужна своя цель — заголовок или якорь, по одному на ID.
+    const rest = ids.length - sameIds.length;
+    if (!places && !sameIds.length) continue;
+    if (rest > places) continue;
+    for (const id of ids) covered.ids.add(id);
+    for (const h of heads) covered.heads.add(h);
+  }
   return [
-    ...idTokens(previous).filter((id) => !mapped((left) => idTokens(left).includes(id))),
-    ...headings(previous)
-      .map(headingText)
-      .filter((h) => h && !mapped((left) => whole(left, h) || whole(left, slug(h))))
-      .map((h) => `«${h}»`),
+    ...oldIds.filter((id) => !covered.ids.has(id)),
+    ...oldHeads.filter((h) => !covered.heads.has(h)).map((h) => `«${h}»`),
   ];
 }
 

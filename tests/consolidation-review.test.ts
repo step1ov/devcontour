@@ -233,3 +233,49 @@ test('F20 R2-M2: the mapping needs "old → new" lines pointing into the new tex
     ['«Prices»'],
   );
 });
+
+test('F20 R3-L1/L2: one bulk line is not a mapping, identity lines are, and Markdown markup in headings does not matter', () => {
+  // Одна строка на всё: три заголовка слева.
+  assert.deepEqual(
+    mappingGaps(AMENDED, CONSOLIDATED, 'REQ-1, REQ-2, REQ-3, Catalog, Prices, Listing → REQ-1'),
+    ['REQ-1', 'REQ-2', 'REQ-3', '«Catalog»', '«Prices»', '«Listing»'],
+  );
+  // Несколько заголовков в одной строке.
+  assert.deepEqual(
+    mappingGaps(
+      AMENDED,
+      CONSOLIDATED,
+      'REQ-1 → REQ-1\nREQ-2 → REQ-2\nREQ-3 → REQ-3\nCatalog, Prices, Listing → Catalog',
+    ),
+    ['«Catalog»', '«Prices»', '«Listing»'],
+  );
+  // Три ID на одну цель — не хватает целей.
+  assert.deepEqual(
+    mappingGaps(
+      AMENDED,
+      CONSOLIDATED,
+      'Catalog → Catalog\nPrices → Prices\nListing → Listing\nREQ-1, REQ-2, REQ-3 → Listing',
+    ),
+    ['REQ-1', 'REQ-2', 'REQ-3'],
+  );
+  // Строки тождества и по заголовку на строку.
+  assert.deepEqual(
+    mappingGaps(
+      AMENDED,
+      CONSOLIDATED,
+      'REQ-1 → REQ-1\nREQ-2 → REQ-2\nREQ-3 -> REQ-3\nCatalog → Catalog\nPrices → Prices\nListing → Listing',
+    ),
+    [],
+  );
+  // Разметка заголовка: код и полужирный — тот же заголовок.
+  const old = '# API\n\n## `GET /items` — ошибки\n\nREQ-1 old.\n\n## **Prices**\n\nREQ-2 old.\n';
+  const next = '# API\n\n## `GET /items` — ошибки\n\nREQ-1.\n\n## **Prices**\n\nREQ-2.\n';
+  assert.deepEqual(
+    mappingGaps(
+      old,
+      next,
+      'API → API\nGET /items — ошибки: REQ-1 → GET /items — ошибки: REQ-1\nPrices: REQ-2 → **Prices**: REQ-2',
+    ),
+    [],
+  );
+});
