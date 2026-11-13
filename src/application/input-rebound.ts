@@ -93,7 +93,15 @@ export const reboundOnly = (
  */
 export type ContractChangeTrace = Pick<
   ContractChange,
-  'id' | 'status' | 'contractId' | 'rebound' | 'held' | 'startedAt' | 'finishedAt' | 'history'
+  | 'id'
+  | 'status'
+  | 'version'
+  | 'contractId'
+  | 'rebound'
+  | 'held'
+  | 'startedAt'
+  | 'finishedAt'
+  | 'history'
 >;
 
 /** Операция ещё идёт: её перепривязка и утверждение не закончены. */

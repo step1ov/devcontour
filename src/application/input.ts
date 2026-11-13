@@ -535,15 +535,16 @@ export class InputService {
 
   /**
    * Причина ожидания исходной остановки (`pending`), называющая операцию
-   * изменения контракта, которую она ждёт, и выход: идущая завершится сама,
-   * упавшую продолжают или отменяют (после отмены вопрос заменяют).
+   * изменения контракта, которую она ждёт, и выход. Ответ переносит не
+   * завершение операции, а `input_target`/`input_apply` или проход сервера.
    */
   private waitingProblem(taskId: string) {
     const op = waitingOperation(this.operations(), taskId);
     if (!op) return undefined;
+    const carry = 'затем input_target и input_apply или проход сервера';
     return op.status === 'failed'
-      ? `исходная остановка ждёт упавшую операцию изменения контракта ${op.id}: продолжите её (contract-change --id ${op.id}) или отмените (contract-change --id ${op.id} --abandon), после отмены вопрос заменяют той же задачей`
-      : `исходная остановка ждёт операцию изменения контракта ${op.id} (${op.status}): ответ перенесётся, когда она завершится`;
+      ? `исходная остановка ждёт упавшую операцию изменения контракта ${op.id}: продолжите (contract-change --id ${op.id}), пересмотрите (contract-change --id ${op.id} --revise --expected-version ${op.version ?? 0}) или отмените (contract-change --id ${op.id} --abandon, затем вопрос заменяют); ${carry}`
+      : `исходная остановка ждёт операцию изменения контракта ${op.id} (${op.status}): она продолжится сама или командой contract-change --id ${op.id}; ${carry}`;
   }
 
   /** Исходная остановка открытого блокирующего вопроса не держится: применение откажет (F39). */
@@ -571,10 +572,12 @@ export class InputService {
       ...proposed,
       origin,
       rebound,
+      // Ожидание операции заменяет совет движка заменить вопрос: путь
+      // rebound ещё открыт, и причина ожидания идёт первой.
       problems: rebound
         ? proposed.problems.filter((p) => !p.startsWith(ORIGIN_PROBLEM))
         : waiting
-          ? [...proposed.problems, waiting]
+          ? [waiting, ...proposed.problems.filter((p) => !p.startsWith(ORIGIN_PROBLEM))]
           : proposed.problems,
     };
   }
