@@ -5,7 +5,7 @@ import {
   type Task,
   type TaskStatus,
 } from '../core/model.ts';
-import { contractDigest, samePin, type DevContour } from '../core/service.ts';
+import { contractDigest, orderRedactions, samePin, type DevContour } from '../core/service.ts';
 import { repository } from '../core/repositories.ts';
 import {
   artifactGuard,
@@ -103,7 +103,8 @@ export async function contractImpact(h: DevContour, input: unknown) {
   const same = (c: Contract) =>
     (c.repositoryId ?? undefined) === (parsed.repositoryId ?? undefined) &&
     (parsed.file ? c.source === parsed.file : !c.source && c.title === parsed.title);
-  const revisions = s.contracts.filter(same);
+  // Порядок утверждения — по ссылкам редакций, а не по позиции в реестре.
+  const revisions = orderRedactions(s.contracts.filter(same));
   const current = revisions.at(-1);
   // Тот же файл, зарегистрированный под другим компонентом, — почти всегда
   // пропущенный repositoryId в предложении, а не новый договор. Молча назвать

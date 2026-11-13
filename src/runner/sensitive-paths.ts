@@ -1,6 +1,11 @@
 import { execFileSync } from 'node:child_process';
 import { isAbsolute, relative } from 'node:path';
-import { contractRedactionsOf, latestRedaction, type DevContour } from '../core/service.ts';
+import {
+  contractRedactionsOf,
+  latestRedaction,
+  supersededBy,
+  type DevContour,
+} from '../core/service.ts';
 import type { Approval, Config, DevContourState } from '../core/model.ts';
 import { independentReviewer } from '../harness/policy.ts';
 import { repository } from '../core/repositories.ts';
@@ -170,7 +175,17 @@ export function reviewedRedaction(
   const latest = latestRedaction(s.contracts, path, repositoryId);
   if (!latest || !liftableContractApproval(config, latest.approval)) return undefined;
   const open = s.tasks.filter((t) => !['done', 'cancelled'].includes(t.status));
-  if (records.some((c) => c.id !== latest.id && open.some((t) => t.contracts.includes(c.id))))
+  // Открытая задача прежней редакции держит перенос, если эта редакция
+  // заменена по смыслу. Задача редакции, которую последняя лишь
+  // консолидирует, сохраняет свой договор: перенос текста его не меняет.
+  if (
+    records.some(
+      (c) =>
+        c.id !== latest.id &&
+        supersededBy(s.contracts, c.id) &&
+        open.some((t) => t.contracts.includes(c.id)),
+    )
+  )
     return undefined;
   return latest;
 }

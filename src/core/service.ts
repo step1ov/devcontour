@@ -224,9 +224,20 @@ export function samePin(
   checks?: CheckDeclaration,
   underTest?: string[],
 ) {
+  return c.content === content && sameObligations(c, artifacts, checks, underTest);
+}
+/**
+ * Те же закреплённые файлы, договор проверки и реализация под тестом —
+ * всё, кроме текста документа. Консолидация обязана их сохранить.
+ */
+export function sameObligations(
+  c: Contract,
+  artifacts: ContractArtifact[],
+  checks?: CheckDeclaration,
+  underTest?: string[],
+) {
   const pinned = c.artifacts ?? [];
   return (
-    c.content === content &&
     JSON.stringify(c.checks ?? null) === JSON.stringify(checks ?? null) &&
     JSON.stringify(c.underTest?.length ? c.underTest : null) ===
       JSON.stringify(underTest?.length ? underTest : null) &&
@@ -243,34 +254,213 @@ export function samePin(
   );
 }
 /**
- * Более поздняя утверждённая редакция того же контракта. Каждое утверждение
- * создаёт новый id, и задача, привязанная к прежнему, проходила утверждение и
- * запускалась на старом тексте, хотя в дереве уже лежала новая редакция того
- * же файла. Редакции одного контракта — один источник в одном репозитории.
+ * Более поздняя утверждённая редакция того же контракта, меняющая его смысл.
+ * Каждое утверждение создаёт новый id, и задача, привязанная к прежнему,
+ * проходила утверждение и запускалась на старом тексте, хотя в дереве уже
+ * лежала новая редакция того же файла. Редакции одного контракта — один
+ * источник в одном репозитории.
+ *
+ * Консолидация (`consolidates`, D-решение «равносильная редакция сохраняет
+ * привязки») переписывает текст без изменения смысла: редакция, за которой
+ * следуют только консолидации её цепочки, не заменена — привязанные к ней
+ * задачи сохраняют digests и утверждение. Любая другая более поздняя
+ * редакция заменяет её вместе со всеми её консолидациями; возвращается
+ * последняя редакция документа.
  */
-export function supersededBy(contracts: Contract[], id: string): Contract | undefined {
-  const at = contracts.findIndex((x) => x.id === id);
-  const c = contracts[at];
+export function supersededBy(contracts: readonly Contract[], id: string): Contract | undefined {
+  const c = contracts.find((x) => x.id === id);
   if (!c?.source) return undefined;
-  const latest = latestRedaction(contracts, c.source, c.repositoryId);
-  return latest && contracts.indexOf(latest) > at ? latest : undefined;
+  const { latest, current } = equivalenceChain(contracts, c);
+  return current.id === latest.id ? undefined : latest;
 }
-/** Редакции документа контракта `source` компонента в порядке реестра. */
+/**
+ * Есть ли у документа контракта более поздняя редакция любого рода, включая
+ * консолидацию. Отличается от `supersededBy`: годится там, где важен
+ * действующий текст документа (размер, замыкание артефактов), а не привязка.
+ */
+export function newerRedaction(contracts: readonly Contract[], id: string): Contract | undefined {
+  const c = contracts.find((x) => x.id === id);
+  if (!c?.source) return undefined;
+  const redactions = contractRedactionsOf(contracts, c.source, c.repositoryId);
+  const latest = redactions.at(-1);
+  return latest && redactions.indexOf(latest) > redactions.indexOf(c) ? latest : undefined;
+}
+/**
+ * Цепочка равносильных редакций от `c`: каждая следующая редакция документа
+ * консолидирует предыдущую звено за звеном. `current` — последнее звено,
+ * `latest` — последняя редакция документа (равна `current`, если цепочку не
+ * прервала смысловая редакция).
+ */
+function equivalenceChain(contracts: readonly Contract[], c: Contract) {
+  const redactions = c.source ? contractRedactionsOf(contracts, c.source, c.repositoryId) : [c];
+  let current = c;
+  for (const r of redactions.slice(redactions.indexOf(c) + 1)) {
+    if (!consolidatesDirectly(r, current)) break;
+    current = r;
+  }
+  return { current, latest: redactions.at(-1) ?? c };
+}
+/** `r` консолидирует именно `before` и зарегистрирована сразу после неё. */
+const consolidatesDirectly = (r: Contract, before: Contract) =>
+  r.consolidates?.from === before.id && r.previous === before.id;
+/**
+ * Действующий текст договора, к которому привязан `id`: последняя
+ * консолидация в его цепочке равносильных редакций или он сам. Исполнитель
+ * задачи, привязанной к редакции до консолидации, читает текущий текст того
+ * же смысла.
+ */
+export function currentText(contracts: readonly Contract[], id: string): Contract | undefined {
+  const c = contracts.find((x) => x.id === id);
+  return c && equivalenceChain(contracts, c).current;
+}
+/**
+ * Действующие тексты контрактов задачи: каждая привязка — через
+ * `currentText`. Context pack после консолидации закрепляет её текст, а
+ * задача остаётся привязанной к прежней редакции: сверка закрепления с
+ * текстом прежней редакции блокировала бы каждый её запуск.
+ */
+export function currentContracts(contracts: readonly Contract[], ids: readonly string[]) {
+  const out: Contract[] = [];
+  for (const id of ids) {
+    const c = currentText(contracts, id);
+    if (c && !out.includes(c)) out.push(c);
+  }
+  return out;
+}
+/**
+ * Поправки документа: смысловые редакции после последней консолидации, а
+ * без неё — после первой регистрации. Каждая добавляет к тексту, и после
+ * нескольких подряд документ пора переписать начисто.
+ */
+export function meaningRedactionsSinceConsolidation(
+  contracts: readonly Contract[],
+  source: string,
+  repositoryId: string | undefined,
+) {
+  const all = contractRedactionsOf(contracts, source, repositoryId);
+  const equivalent = (i: number) => i > 0 && consolidatesDirectly(all[i], all[i - 1]);
+  const last = all.findLastIndex((_, i) => equivalent(i));
+  // Первая регистрация документа — не поправка.
+  const from = Math.max(last + 1, 1);
+  return all.slice(from).filter((_, i) => !equivalent(from + i)).length;
+}
+/** Редакции документа контракта `source` компонента в порядке утверждения (`orderRedactions`). */
 export function contractRedactionsOf(
   contracts: readonly Contract[],
   source: string,
   repositoryId: string | undefined,
 ): Contract[] {
-  return contracts.filter(
-    (x) => x.source === source && (x.repositoryId ?? 'main') === (repositoryId ?? 'main'),
+  return orderRedactions(
+    contracts.filter(
+      (x) => x.source === source && (x.repositoryId ?? 'main') === (repositoryId ?? 'main'),
+    ),
   );
 }
 /**
+ * Порядок утверждения редакций одного документа. Позиция в реестре его не
+ * доказывает: Git sync собирает записи в порядке ключей, а id — UUID, и
+ * «последней» становилась случайная редакция. Порядок задают ссылки
+ * `previous` (предыдущая редакция при регистрации) и `consolidates.from`:
+ * редакция идёт после той, на которую ссылается. Записи прежних версий без
+ * ссылок упорядочиваются временем утверждения, при равенстве — id.
+ * Консолидация встаёт сразу за редакцией, которую консолидирует:
+ * параллельная ей поправка того же предшественника идёт после и заменяет
+ * обе (её текст несёт поправку, а смысл консолидации прежний).
+ */
+export function orderRedactions(list: readonly Contract[]): Contract[] {
+  // Время, затем id: позиция в реестре на разных клонах разная, и при равном
+  // времени клоны иначе выбрали бы разные «последние» редакции.
+  const fallback = [...list].sort((a, b) =>
+    a.approvedAt < b.approvedAt
+      ? -1
+      : a.approvedAt > b.approvedAt
+        ? 1
+        : a.id < b.id
+          ? -1
+          : a.id > b.id
+            ? 1
+            : 0,
+  );
+  const ids = new Set(list.map((c) => c.id));
+  const parents = (c: Contract) =>
+    [c.previous, c.consolidates?.from].filter((p): p is string => !!p && p !== c.id && ids.has(p));
+  const out: Contract[] = [];
+  const placed = new Set<string>();
+  const ready = (c: Contract) => !placed.has(c.id) && parents(c).every((p) => placed.has(p));
+  while (out.length < fallback.length) {
+    const last = out.at(-1);
+    const next =
+      fallback.find((c) => ready(c) && !!last && c.consolidates?.from === last.id) ??
+      fallback.find(ready);
+    // Цикл ссылок (повреждённая запись): остаток — по времени утверждения.
+    if (!next) {
+      out.push(...fallback.filter((c) => !placed.has(c.id)));
+      break;
+    }
+    out.push(next);
+    placed.add(next.id);
+  }
+  return out;
+}
+/**
+ * Развилки истории документа: две и больше смысловых редакций (не прямые
+ * консолидации) с одной и той же действующей предшественницей — её
+ * `previous`, приведённой через прямые консолидации к смысловой редакции.
+ * Так бывает, когда два клона поправили одну редакцию параллельно: после sync
+ * действует последняя по порядку (`winner`), а поправка другой выпадает из
+ * текущего договора без сигнала. `branches` — редакции развилки по порядку.
+ */
+export function contractForks(contracts: readonly Contract[]) {
+  const forks: {
+    source: string;
+    repositoryId?: string;
+    base: string;
+    branches: string[];
+    winner: string;
+  }[] = [];
+  const documents = new Map<string, Contract>();
+  for (const c of contracts)
+    if (c.source) documents.set(`${c.repositoryId ?? 'main'}\0${c.source}`, c);
+  for (const sample of documents.values()) {
+    const all = contractRedactionsOf(contracts, sample.source!, sample.repositoryId);
+    const byId = new Map(all.map((c) => [c.id, c]));
+    // Смысловая редакция за цепочкой прямых консолидаций.
+    const meaning = (id: string) => {
+      let c = byId.get(id);
+      for (let guard = 0; c && guard < all.length; guard++) {
+        const from = c.consolidates && byId.get(c.consolidates.from);
+        if (!from || !consolidatesDirectly(c, from)) break;
+        c = from;
+      }
+      return c?.id ?? id;
+    };
+    const groups = new Map<string, Contract[]>();
+    for (const c of all) {
+      if (!c.previous) continue;
+      const from = c.consolidates && byId.get(c.consolidates.from);
+      if (from && consolidatesDirectly(c, from)) continue;
+      const base = meaning(c.previous);
+      groups.set(base, [...(groups.get(base) ?? []), c]);
+    }
+    for (const [base, branches] of groups)
+      // Развилка открыта, пока действует одна из её ветвей (с точностью до её
+      // прямых консолидаций). Смысловая редакция поверх действующей
+      // зарегистрирована клоном, видевшим обе ветви, — она и есть сводящая.
+      if (branches.length > 1 && branches.some((b) => b.id === meaning(all.at(-1)!.id)))
+        forks.push({
+          source: sample.source!,
+          ...(sample.repositoryId ? { repositoryId: sample.repositoryId } : {}),
+          base,
+          branches: branches.map((c) => c.id),
+          winner: all.at(-1)!.id,
+        });
+  }
+  return forks;
+}
+/**
  * Последняя редакция документа контракта — единое определение для
- * `supersededBy` и снятия переноса базы по доказательству ревью. Реестр
- * только дополняется, поэтому порядок в нём — порядок утверждения; отметки
- * времени в пределах миллисекунды совпадают, а после Git sync приходят
- * чужими, поэтому по ним не сортируется.
+ * `supersededBy` и снятия переноса базы по доказательству ревью. Порядок —
+ * `orderRedactions`, а не позиция в реестре.
  */
 export function latestRedaction(
   contracts: readonly Contract[],
@@ -1380,6 +1570,8 @@ export class DevContour {
     artifacts?: ContractArtifact[],
     checks?: CheckDeclaration,
     underTest?: string[],
+    /** Консолидация последней редакции того же документа (`Contract.consolidates`). */
+    consolidates?: { from: string; review: string },
   ) {
     if (repositoryId) repository(this.config, repositoryId);
     if (underTest?.length && !artifacts?.length)
@@ -1390,6 +1582,23 @@ export class DevContour {
     if (!title.trim() || !content.trim() || content.length > CONTRACT_CONTENT_MAX)
       throw new DomainError('Укажите название и содержимое контракта (до 60 000 символов)', 400);
     return this.store.change('contract.approved', (s) => {
+      // Консолидация относится к действующей редакции документа и меняет
+      // только текст: иначе задачи прежней редакции сохранили бы привязку к
+      // другому договору.
+      const previous = source ? latestRedaction(s.contracts, source, repositoryId)?.id : undefined;
+      if (consolidates) {
+        const from = source ? latestRedaction(s.contracts, source, repositoryId) : undefined;
+        if (!from || from.id !== consolidates.from)
+          throw new DomainError(
+            `Консолидация относится к действующей редакции ${source ?? title}: ${from?.id ?? 'её нет'}, а не ${consolidates.from}`,
+            409,
+          );
+        if (!sameObligations(from, artifacts ?? [], checks, underTest))
+          throw new DomainError(
+            'Консолидация меняет только текст: artifacts, checks и underTest должны совпадать с действующей редакцией',
+            400,
+          );
+      }
       const c = {
         id: entityId(s, 'C'),
         repositoryId,
@@ -1406,6 +1615,8 @@ export class DevContour {
           checks,
           underTest,
         ),
+        ...(consolidates ? { consolidates } : {}),
+        ...(previous ? { previous } : {}),
         approvedAt: now(),
         approval,
       };
@@ -2225,7 +2436,8 @@ export class DevContour {
         t.contracts = [
           ...new Set(
             source.contracts.flatMap((id) => {
-              const c = supersededBy(s.contracts, id) ?? s.contracts.find((x) => x.id === id);
+              // Действующая редакция того же смысла — последняя консолидация.
+              const c = supersededBy(s.contracts, id) ?? currentText(s.contracts, id);
               return c ? [c.id] : [];
             }),
           ),

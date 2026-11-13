@@ -3,8 +3,15 @@ import assert from 'node:assert/strict';
 import { mkdtempSync, rmSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
-import { CONTRACT_CONTENT_MAX, CONTRACT_CONTENT_WARN, type Contract } from '../src/core/model.ts';
-import { contractSizeChecks, doctor } from '../src/runner/doctor.ts';
+import {
+  CONTRACT_CONSOLIDATE_MIN,
+  CONTRACT_CONTENT_CONSOLIDATE,
+  CONTRACT_CONTENT_MAX,
+  CONTRACT_CONTENT_WARN,
+  type Contract,
+} from '../src/core/model.ts';
+import { contractSize } from '../src/runner/agent-control.ts';
+import { contractForkChecks, contractSizeChecks, doctor } from '../src/runner/doctor.ts';
 import { config } from './helpers.ts';
 
 const contract = (id: string, chars: number, extra: Partial<Contract> = {}): Contract => ({
@@ -18,7 +25,8 @@ const contract = (id: string, chars: number, extra: Partial<Contract> = {}): Con
 
 test('doctor предупреждает о действующем контракте у предела размера, готовность не снимает', () => {
   const contracts = [
-    contract('C-small', CONTRACT_CONTENT_WARN - 1),
+    contract('C-small', CONTRACT_CONTENT_CONSOLIDATE - 1),
+    contract('C-mid', CONTRACT_CONTENT_CONSOLIDATE),
     contract('C-near', CONTRACT_CONTENT_WARN, { source: 'docs/contracts/api.md' }),
     contract('C-full', CONTRACT_CONTENT_MAX),
   ];
@@ -26,15 +34,21 @@ test('doctor предупреждает о действующем контрак
   assert.deepEqual(
     checks.map((c) => [c.id, c.status]),
     [
+      ['contract-size:C-mid', 'passed'],
       ['contract-size:C-near', 'degraded'],
       ['contract-size:C-full', 'degraded'],
     ],
   );
-  const near = checks[0];
+  // От 75 % предела — совет консолидировать, без продолжения.
+  assert.match(checks[0].detail, /45 000 знаков из 60 000 допустимых, больше 75 % предела/);
+  assert.match(checks[0].detail, /contract-change --consolidate/);
+  assert.doesNotMatch(checks[0].detail, /файл-продолжение/);
+  const near = checks[1];
   assert.match(near.detail, /^Контракт C-near \(Контракт C-near, docs\/contracts\/api\.md\): /);
   assert.match(near.detail, /54 000 знаков из 60 000 допустимых \(осталось 6 000\)/);
-  assert.match(near.detail, /файл-продолжение/);
-  assert.match(checks[1].detail, /осталось 0/);
+  // Сначала консолидация, затем продолжение.
+  assert.match(near.detail, /--consolidate[\s\S]*файл-продолжение/);
+  assert.match(checks[2].detail, /осталось 0/);
 });
 
 test('doctor не предупреждает о заменённой редакции контракта', () => {
@@ -42,11 +56,18 @@ test('doctor не предупреждает о заменённой редак�
   // только по действующей.
   const source = 'docs/contracts/api.md';
   const old = contract('C-api-1', CONTRACT_CONTENT_WARN + 100, { source });
-  const current = contract('C-api-2', 1000, { source });
+  // Порядок редакций — по ссылке previous, а не по позиции в реестре.
+  const current = contract('C-api-2', 1000, { source, previous: old.id });
   assert.deepEqual(contractSizeChecks([old, current]), []);
+  assert.deepEqual(contractSizeChecks([current, old]), []);
+  // Записи без ссылок — по времени утверждения: более поздняя действует.
+  const later = contract('C-api-0', CONTRACT_CONTENT_WARN + 100, {
+    source,
+    approvedAt: '2026-11-02T00:00:00.000Z',
+  });
   assert.deepEqual(
-    contractSizeChecks([current, old]).map((c) => c.id),
-    ['contract-size:C-api-1'],
+    contractSizeChecks([later, contract('C-api-3', 1000, { source })]).map((c) => c.id),
+    ['contract-size:C-api-0'],
   );
 });
 
@@ -59,6 +80,52 @@ test('уже зарегистрированный контракт сверх п
     /зарегистрирован и действует, но следующая его редакция будет отклонена до ревью/,
   );
   assert.doesNotMatch(check.detail, /не будет зарегистрирован|ревью не начато/);
+  assert.match(check.detail, /--consolidate[\s\S]*файл-продолжение/);
+});
+
+test('F20: the size refusal of a proposal names consolidation first, continuation second; 75 % gives a hint', () => {
+  const over = contractSize('x'.repeat(CONTRACT_CONTENT_MAX + 1));
+  assert.match(
+    over.refusal ?? '',
+    /не будет зарегистрирован[\s\S]*--consolidate[\s\S]*файл-продолжение/,
+  );
+  const mid = contractSize('x'.repeat(CONTRACT_CONTENT_CONSOLIDATE));
+  assert.equal(mid.warning, undefined);
+  assert.match(mid.hint ?? '', /--consolidate/);
+  assert.equal(contractSize('x'.repeat(CONTRACT_CONTENT_CONSOLIDATE - 1)).hint, undefined);
+});
+
+test('F20: doctor suggests a consolidation after six amendments of a large document since the first registration or the last consolidation', () => {
+  const source = 'docs/contracts/api.md';
+  const redactions = (n: number, prefix = 'C-', chars = CONTRACT_CONSOLIDATE_MIN) =>
+    Array.from({ length: n }, (_, i) => contract(`${prefix}${i + 1}`, chars, { source }));
+  const ids = (cs: Contract[]) => contractSizeChecks(cs).map((c) => c.id);
+  // Первая регистрация — не поправка: шесть редакций — пять поправок.
+  assert.deepEqual(ids(redactions(6)), []);
+  const seven = redactions(7);
+  const [check] = contractSizeChecks(seven);
+  assert.equal(check?.id, 'contract-consolidate:C-7');
+  assert.equal(check.status, 'degraded');
+  assert.match(check.detail, /6 поправок документа с последней консолидации/);
+  assert.match(check.detail, /contract-change --consolidate/);
+  // Короткий документ с поправками на месте — без совета.
+  assert.deepEqual(ids(redactions(7, 'S-', CONTRACT_CONSOLIDATE_MIN - 1)), []);
+  // Консолидация обнуляет счёт; дальше считаются только смысловые редакции.
+  const consolidated = contract('C-8', CONTRACT_CONSOLIDATE_MIN, {
+    source,
+    previous: 'C-7',
+    consolidates: { from: 'C-7', review: 'R' },
+  });
+  assert.deepEqual(ids([...seven, consolidated]), []);
+  assert.deepEqual(ids([...seven, consolidated, ...redactions(5, 'D-')]), []);
+  assert.deepEqual(ids([...seven, consolidated, ...redactions(6, 'D-')]), [
+    'contract-consolidate:D-6',
+  ]);
+  // Другой документ того же компонента не входит в счёт.
+  const other = Array.from({ length: 4 }, (_, i) =>
+    contract(`O-${i}`, CONTRACT_CONSOLIDATE_MIN, { source: 'docs/contracts/other.md' }),
+  );
+  assert.deepEqual(ids([...redactions(4), ...other]), []);
 });
 
 test('doctor() показывает contract-size по состоянию и готовность не снимает', async () => {
@@ -81,4 +148,49 @@ test('doctor() показывает contract-size по состоянию и г�
   } finally {
     rmSync(root, { recursive: true, force: true });
   }
+});
+
+test('F20 R2-M1: doctor names a fork of a contract document with both amendments and the winner', () => {
+  const source = 'docs/contracts/api.md';
+  const p = contract('C-p', 1000, { source });
+  const m1 = contract('C-m1', 1000, {
+    source,
+    previous: 'C-p',
+    approvedAt: '2026-11-02T00:00:00.000Z',
+  });
+  const m2 = contract('C-m2', 1000, {
+    source,
+    previous: 'C-p',
+    approvedAt: '2026-11-03T00:00:00.000Z',
+  });
+  assert.deepEqual(contractForkChecks([p, m1]), []);
+  const [check] = contractForkChecks([p, m1, m2]);
+  assert.equal(check?.id, 'contract-fork:main:docs/contracts/api.md');
+  assert.equal(check.status, 'degraded');
+  assert.match(
+    check.detail,
+    /редакции C-m1, C-m2 параллельно поправили одну редакцию C-p; действует C-m2/,
+  );
+});
+
+test('F20 R3-M1: the merging redaction doctor asks for clears the fork warning', () => {
+  const source = 'docs/contracts/api.md';
+  const p = contract('C-p', 1000, { source });
+  const m1 = contract('C-m1', 1000, {
+    source,
+    previous: 'C-p',
+    approvedAt: '2026-11-02T00:00:00.000Z',
+  });
+  const m2 = contract('C-m2', 1000, {
+    source,
+    previous: 'C-p',
+    approvedAt: '2026-11-03T00:00:00.000Z',
+  });
+  assert.equal(contractForkChecks([p, m1, m2]).length, 1);
+  const merged = contract('C-merge', 1000, {
+    source,
+    previous: 'C-m2',
+    approvedAt: '2026-11-04T00:00:00.000Z',
+  });
+  assert.deepEqual(contractForkChecks([p, m1, m2, merged]), []);
 });

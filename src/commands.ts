@@ -68,7 +68,7 @@ import { InputService } from './application/input.ts';
 import { DiscussionService } from './application/discussion.ts';
 import { randomUUID } from 'node:crypto';
 import { acceptBoard, reviewContract, reviewPlan } from './runner/agent-control.ts';
-import { specDigest } from './core/service.ts';
+import { currentContracts, specDigest } from './core/service.ts';
 import { WorkspaceRunner } from './runner/workspace.ts';
 import { setupWorkspace } from './runner/workspace-setup.ts';
 import { Workspace } from './core/workspace.ts';
@@ -1146,7 +1146,7 @@ async function main() {
         result = await taskContext(
           config,
           task,
-          store.read().contracts.filter((c) => task.contracts.includes(c.id)),
+          currentContracts(store.read().contracts, task.contracts),
         );
       } else if (operation === 'resources' || operation === 'resource-release') {
         const pool = new ResourcePool(resourceDatabase(config));
@@ -1221,10 +1221,12 @@ async function main() {
           result = await changes.advance(revised.operation.id);
         } else if (args.includes('--id')) result = await changes.advance(option('--id', ''));
         else {
+          // --consolidate: переписать документ без изменения смысла (F20).
           const started = await changes.start(
             await readAgentJson(resolve(option('--file', 'contract.json'))),
             authorRuntime(),
             include,
+            args.includes('--consolidate') ? 'consolidate' : undefined,
           );
           for (const w of 'warnings' in started ? (started.warnings ?? []) : [])
             console.error('Предупреждение: ' + w.message);
