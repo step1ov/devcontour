@@ -30,6 +30,7 @@ import { parseOperationalKeys, serveReconfigure } from '../src/runner/reconfigur
 import {
   modelSettingsView,
   previewModels,
+  pendingConfigWrite,
   recoverConfigWrite,
   requestModels,
 } from '../src/runner/model-settings.ts';
@@ -555,13 +556,16 @@ test('A failed multi-file write returns every file byte for byte; a crash journa
         ],
       }),
     );
-    writeFileSync(file, '{"half": true}');
+    writeFileSync(file, '{}');
     // Пока журнал лежит, новая запись не начинается.
     assert.throws(
       () => requestModels(s.server, s.root, body),
       (e: Error & { status?: number }) => e.status === 409 || /не завершена/.test(e.message),
     );
-    assert.deepEqual(recoverConfigWrite(s.root)?.restored, [realpathSync(file), s.path]);
+    assert.deepEqual(recoverConfigWrite(s.root), {
+      restored: [realpathSync(file)],
+      skipped: [s.path],
+    });
     assert.equal(readFileSync(file, 'utf8'), before.component);
     assert.equal(readFileSync(s.path, 'utf8'), before.config);
     assert.equal(recoverConfigWrite(s.root), undefined, 'журнала больше нет');
@@ -711,27 +715,128 @@ test('Committing the edited component file is a contour change of the run base: 
   }
 });
 
-test('A profile upgrade keeps model choices of top-level roles and reports what it kept', () => {
+test('A profile upgrade keeps only model choices made in the panel and never brings back a removed reviewer', () => {
   const declared = {
-    qa: { runtime: 'claude', writePaths: ['tests/'], reviewer: { runtime: 'codex' } },
-    backend: { runtime: 'claude' },
+    qa: {
+      runtime: 'claude',
+      writePaths: ['tests/'],
+      reviewer: { runtime: 'codex', model: 'EXAMPLE_Y' },
+    },
+    backend: { runtime: 'claude', model: 'EXAMPLE_NEW' },
+    docs: { runtime: 'claude' },
   };
   const existing = {
-    qa: { runtime: 'codex', model: 'EXAMPLE_CODEX_B', reviewer: { runtime: 'claude' } },
-    gone: { runtime: 'codex' },
+    qa: {
+      runtime: 'codex',
+      model: 'EXAMPLE_CODEX_B',
+      reviewer: { runtime: 'codex', model: 'EXAMPLE_X' },
+    },
+    // Значение прежнего профиля, а не выбор оператора: профиль его обновляет.
+    backend: { runtime: 'claude', model: 'EXAMPLE_OLD' },
+    docs: { runtime: 'codex', reviewer: { runtime: 'claude' } },
   };
-  const { roles, kept } = withModelChoices(declared, existing);
+  const chosen = {
+    qa: { writer: { runtime: 'codex', model: 'EXAMPLE_CODEX_B' } },
+    // Ревьюер, которого новый профиль у роли убрал, не возвращается.
+    docs: { writer: { runtime: 'codex' }, reviewer: { runtime: 'claude' } },
+    // Выбор, который config.json уже не держит (правка руками после панели), не переносится.
+    backend: { writer: { runtime: 'codex' } },
+  };
+  const { roles, kept } = withModelChoices(declared, existing, chosen);
   assert.deepEqual(roles.qa, {
     runtime: 'codex',
     writePaths: ['tests/'],
+    reviewer: { runtime: 'codex', model: 'EXAMPLE_Y' },
     model: 'EXAMPLE_CODEX_B',
-    reviewer: { runtime: 'claude' },
   });
-  assert.deepEqual(roles.backend, { runtime: 'claude' }, 'роль без прежнего выбора — из профиля');
-  assert.equal(
-    'gone' in roles,
-    false,
-    'роль, которой профиль больше не объявляет, не возвращается',
-  );
-  assert.deepEqual(kept, ['qa']);
+  assert.deepEqual(roles.backend, { runtime: 'claude', model: 'EXAMPLE_NEW' });
+  assert.deepEqual(roles.docs, { runtime: 'codex' });
+  assert.deepEqual(kept.sort(), ['docs', 'qa']);
+  assert.deepEqual(withModelChoices(declared, existing).kept, [], 'без выбора панели — профиль');
+});
+
+test('The panel records top-level model choices for profile upgrades', () => {
+  const s = served({ prices: [price('codex', 'EXAMPLE_CODEX_B')] });
+  try {
+    requestModels(s.server, s.root, {
+      changes: [
+        { slot: 'writer:main:qa', binding: { runtime: 'codex', model: 'EXAMPLE_CODEX_B' } },
+      ],
+      expectedConfigDigest: s.server.configDigest,
+    });
+    assert.deepEqual(JSON.parse(readFileSync(join(s.root, 'model-choices.json'), 'utf8')), {
+      roles: { qa: { writer: { runtime: 'codex', model: 'EXAMPLE_CODEX_B' } } },
+    });
+  } finally {
+    s.cleanup();
+  }
+});
+
+test('Recovery restores only files still holding the panel text; a later edit refuses start and changes nothing', () => {
+  const s = served({}, component({ qa: { runtime: 'demo' } }));
+  try {
+    const file = realpathSync(join(s.repository, 'devcontour.component.json'));
+    const before = { config: readFileSync(s.path, 'utf8'), component: readFileSync(file, 'utf8') };
+    const journal = join(s.root, 'config-write.json');
+    const temp = join(s.repository, '.devcontour.component.json.crash001.tmp');
+    const write = () =>
+      writeFileSync(
+        journal,
+        JSON.stringify({
+          operation: 'config-apply:models:crash001',
+          files: [
+            { path: file, before: before.component, after: '{"panel": 1}\n', temp },
+            {
+              path: s.path,
+              before: before.config,
+              after: '{"panel": 2}\n',
+              temp: s.path + '.x.tmp',
+            },
+          ],
+        }),
+      );
+    // Сбой: файл компонента уже новый (и рядом — недописанный временный), config.json — прежний.
+    write();
+    writeFileSync(file, '{"panel": 1}\n');
+    writeFileSync(temp, 'partial');
+    assert.deepEqual(recoverConfigWrite(s.root), { restored: [file], skipped: [s.path] });
+    assert.equal(readFileSync(file, 'utf8'), before.component);
+    assert.equal(existsSync(temp), false, 'свой временный файл убран');
+    assert.equal(existsSync(journal), false);
+    // Сбой, затем правка руками (или workspace-init): ничего не трогается, запуск отказывает.
+    write();
+    writeFileSync(file, '{"panel": 1}\n');
+    writeFileSync(s.path, '{"hand": true}\n');
+    assert.throws(
+      () => recoverConfigWrite(s.root),
+      new RegExp(
+        `изменены: ${s.path.replace(/[.*+?^${}()|[\]\\]/g, '\\$&')}.*Ничего не изменено.*config-write\\.json`,
+      ),
+    );
+    assert.equal(
+      readFileSync(file, 'utf8'),
+      '{"panel": 1}\n',
+      'файл с текстом панели тоже не тронут',
+    );
+    assert.equal(readFileSync(s.path, 'utf8'), '{"hand": true}\n');
+    assert.ok(existsSync(journal), 'журнал оставлен');
+    assert.match(pendingConfigWrite(s.root) ?? '', /не завершена/);
+    // Повреждённый журнал — понятный отказ, без изменений.
+    writeFileSync(journal, '{"operation": "config-apply:mo');
+    assert.throws(() => recoverConfigWrite(s.root), /повреждён.*удалите журнал/);
+    assert.equal(readFileSync(s.path, 'utf8'), '{"hand": true}\n');
+    // Пока журнал лежит, панель не пишет и чужой журнал не удаляет.
+    writeFileSync(s.path, before.config);
+    assert.throws(
+      () =>
+        requestModels(s.server, s.root, {
+          changes: [{ slot: 'writer:app:qa', binding: { runtime: 'codex' } }],
+          expectedConfigDigest: s.server.configDigest,
+        }),
+      (e: Error & { status?: number }) => e.status === 409,
+    );
+    assert.ok(existsSync(journal));
+  } finally {
+    s.cleanup();
+  }
 });

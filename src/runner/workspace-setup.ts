@@ -200,16 +200,24 @@ const withComponentReviewer = <T>(top: T, repos: { reviewer?: T }[]): T =>
   repos.length === 1 && repos[0].reviewer ? repos[0].reviewer : top;
 const differs = (a: unknown, b: unknown) => JSON.stringify(a) !== JSON.stringify(b);
 const modelFields = ['runtime', 'model', 'effort'] as const;
+type Choice = { runtime?: unknown; model?: unknown; effort?: unknown };
+const sameModel = (a: Choice | undefined, b: Choice | undefined) =>
+  !!a && !!b && modelFields.every((k) => a[k] === b[k]);
 /**
- * Роли профиля с выбором моделей прежних ролей того же id: runtime, модель и
- * effort исполнителя и его ревьюера. Прочие поля роли — из профиля.
+ * Роли профиля с выбором моделей, который оператор сделал в панели
+ * (`model-choices.json`): runtime, модель и effort исполнителя и его
+ * ревьюера переносятся, только если роль того же id в config.json всё ещё
+ * держит именно этот выбор. Значения, пришедшие из прежнего профиля, профиль
+ * обновляет как раньше; ревьюера, которого новый профиль у роли убрал, перенос
+ * не возвращает. Прочие поля роли — из профиля.
  */
 export function withModelChoices(
   declared: Record<string, Record<string, unknown>>,
   existing: Record<string, Record<string, unknown>>,
+  chosen: Record<string, { writer?: Choice; reviewer?: Choice }> = {},
 ) {
   const kept: string[] = [];
-  const choice = (to: Record<string, unknown>, from: Record<string, unknown>) => {
+  const choice = (to: Record<string, unknown>, from: Choice) => {
     const next = { ...to };
     for (const k of modelFields) {
       if (from[k] === undefined) delete next[k];
@@ -220,17 +228,13 @@ export function withModelChoices(
   const roles = Object.fromEntries(
     Object.entries(declared).map(([id, role]) => {
       const was = existing[id];
-      if (!was?.runtime) return [id, role];
-      let next = choice(role, was);
-      const wasReviewer = was.reviewer as Record<string, unknown> | undefined;
-      if (wasReviewer?.runtime)
-        next = {
-          ...next,
-          reviewer: choice(
-            (role.reviewer as Record<string, unknown> | undefined) ?? {},
-            wasReviewer,
-          ),
-        };
+      const pick = chosen[id];
+      if (!was || !pick) return [id, role];
+      let next = role;
+      if (pick.writer && sameModel(was, pick.writer)) next = choice(next, pick.writer);
+      const reviewer = role.reviewer as Record<string, unknown> | undefined;
+      if (pick.reviewer && reviewer && sameModel(was.reviewer as Choice, pick.reviewer))
+        next = { ...next, reviewer: choice(reviewer, pick.reviewer) };
       if (differs(next, role)) kept.push(id);
       return [id, next];
     }),
@@ -582,15 +586,18 @@ export async function setupWorkspace(file: string, data?: string) {
         true,
       );
       const profileRoles = withComponentRoles(declaredTop, repos);
-      // Модели ролей верхнего уровня выбирает оператор (панель «Настройки»,
-      // правка config.json): обновление профиля задаёт роли заново, но
-      // runtime, модель и effort прежней роли с тем же id сохраняет, если
-      // конфигурация с ними загружается. Иначе действует профиль, и ответ
+      // Модели ролей верхнего уровня, выбранные оператором в панели
+      // «Настройки» (model-choices.json): обновление профиля задаёт роли
+      // заново, но этот выбор сохраняет, если роль всё ещё его держит и
+      // конфигурация с ним загружается. Иначе действует профиль, и ответ
       // называет роли, чей выбор не сохранился. Копия роли единственного
       // компонента по-прежнему следует файлу компонента.
       const carried = withModelChoices(
         declaredTop,
         (raw as { roles?: Record<string, Record<string, unknown>> }).roles ?? {},
+        await readFile(join(root, 'model-choices.json'), 'utf8')
+          .then((t) => (JSON.parse(t) as { roles?: Record<string, never> }).roles ?? {})
+          .catch(() => ({})),
       );
       const carriedRoles = withComponentRoles(carried.roles, repos);
       const keptModels = carried.kept.filter(

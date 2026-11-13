@@ -667,11 +667,11 @@ async function main() {
   }
   // Запись моделей из панели, оборванная сбоем процесса, откатывается до
   // загрузки: иначе serve загрузил бы наполовину новый набор файлов.
-  if (operation === 'serve') {
+  if (operation === 'serve' || operation === 'demo') {
     const recovered = recoverConfigWrite(root);
     if (recovered)
       console.error(
-        `Незавершённая запись конфигурации откатилась: ${recovered.restored.join(', ')}`,
+        `Незавершённая запись конфигурации откатилась: возвращены ${recovered.restored.join(', ') || 'нет'}; уже прежние ${recovered.skipped.join(', ') || 'нет'}`,
       );
   }
   const config = loadConfig(join(root, 'config.json'));

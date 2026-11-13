@@ -1,5 +1,6 @@
 import {
   existsSync,
+  linkSync,
   readFileSync,
   realpathSync,
   renameSync,
@@ -492,6 +493,8 @@ type Planned = {
   nextConfig: string;
   nextComponents: Map<string, string>;
   changes: Change[];
+  /** Правки ролей верхнего уровня config.json: их выбор переносит обновление профиля. */
+  topLevel: { role: string; part: 'writer' | 'reviewer'; after: Binding | null }[];
 };
 
 const slotLabel = (s: ModelSlot) =>
@@ -545,6 +548,7 @@ function plan(h: DevContour, root: string, input: z.infer<typeof modelsRequest>)
   const seen = new Set<string>();
   const places = new Map<string, string>();
   const changes: Change[] = [];
+  const topLevel: Planned['topLevel'] = [];
   const removedProfiles: string[] = [];
   for (const change of input.changes) {
     if (seen.has(change.slot)) throw new DomainError(`Привязка ${change.slot} названа дважды`, 400);
@@ -590,6 +594,12 @@ function plan(h: DevContour, root: string, input: z.infer<typeof modelsRequest>)
     if (!after && slot.toolProfile)
       removedProfiles.push(`${slotLabel(slot)} (${slot.toolProfile})`);
     setAt(doc(slot.location), slot.location.path, after as BindingInput | null);
+    if (slot.location.file === 'config' && slot.location.path[0] === 'roles')
+      topLevel.push({
+        role: slot.location.path[1],
+        part: slot.location.path.length > 2 ? 'reviewer' : 'writer',
+        after,
+      });
     changes.push({
       slot: slot.id,
       kind: slot.kind,
@@ -667,7 +677,7 @@ function plan(h: DevContour, root: string, input: z.infer<typeof modelsRequest>)
           400,
         );
   }
-  return { current, candidate, sources, nextConfig, nextComponents, changes };
+  return { current, candidate, sources, nextConfig, nextComponents, changes, topLevel };
 }
 
 const openStatuses = (t: Task) => !['draft', 'done', 'cancelled'].includes(t.status);
@@ -822,17 +832,28 @@ export function previewModels(h: DevContour, root: string, raw: unknown) {
 /* ------------------------------------------------------------------ */
 
 const JOURNAL = 'config-write.json';
-type Journal = { operation: string; files: { path: string; before: string; after: string }[] };
+/** Выбор моделей ролей верхнего уровня, сделанный в панели: его переносит обновление профиля. */
+export const MODEL_CHOICES = 'model-choices.json';
+type JournalFile = { path: string; before: string; after: string; temp: string };
+type Journal = { operation: string; files: JournalFile[] };
 
-function replaceFile(path: string, content: string) {
+const tempFor = (path: string) =>
+  join(resolve(path, '..'), `.${basename(path)}.${randomUUID().slice(0, 8)}.tmp`);
+
+/** Заменить файл целиком через временный файл; несостоявшаяся замена не оставляет его. */
+function replaceFile(path: string, content: string, temp = tempFor(path)) {
   const mode = statSync(path).mode & 0o777;
-  const temp = join(resolve(path, '..'), `.${basename(path)}.${randomUUID().slice(0, 8)}.tmp`);
-  writeFileSync(temp, content, { mode, flag: 'wx' });
-  renameSync(temp, path);
+  try {
+    writeFileSync(temp, content, { mode, flag: 'wx' });
+    renameSync(temp, path);
+  } catch (error) {
+    rmSync(temp, { force: true });
+    throw error;
+  }
 }
 
 /** Вернуть файлы к прежнему тексту; сбой одного не останавливает остальные. */
-function restore(files: Journal['files']) {
+function restore(files: JournalFile[]) {
   const errors: unknown[] = [];
   for (const file of [...files].reverse())
     try {
@@ -843,22 +864,117 @@ function restore(files: Journal['files']) {
   return errors;
 }
 
+/** Журнал появляется целиком или не появляется: временный файл и жёсткая ссылка без замены. */
+function createJournal(path: string, journal: Journal) {
+  const temp = `${path}.${randomUUID().slice(0, 8)}.tmp`;
+  writeFileSync(temp, JSON.stringify(journal), { mode: 0o600, flag: 'wx' });
+  try {
+    linkSync(temp, path);
+  } catch (error) {
+    if ((error as NodeJS.ErrnoException).code === 'EEXIST')
+      throw new DomainError(
+        'Другая запись конфигурации ещё не завершена (журнал config-write.json): дождитесь её или перезапустите serve',
+        409,
+      );
+    throw error;
+  } finally {
+    rmSync(temp, { force: true });
+  }
+}
+
+function readJournal(path: string): Journal {
+  try {
+    const journal = JSON.parse(readFileSync(path, 'utf8')) as Journal;
+    if (!Array.isArray(journal.files)) throw new Error('нет списка файлов');
+    return journal;
+  } catch (error) {
+    throw new Error(
+      `Журнал записи конфигурации ${path} повреждён (${failure(error)}): ничего не изменено. Проверьте config.json и файлы компонентов вручную и удалите журнал, затем запустите serve`,
+    );
+  }
+}
+
+const textOf = (path: string) => {
+  try {
+    return readFileSync(path, 'utf8');
+  } catch {
+    return null;
+  }
+};
+
 /**
  * Незавершённая запись моделей после сбоя процесса: журнал лежит, пока
- * транзакция с запросом применения не зафиксирована. Файлы возвращаются к
- * прежнему тексту — набор не остаётся наполовину новым. Если запрос всё же
- * успел зафиксироваться, сервер отклонит его по digest (`config.apply-refused`).
- * Вызывается при запуске `serve` до загрузки конфигурации.
+ * запись не завершилась. Файл, в котором лежит записанный панелью текст,
+ * возвращается к прежнему; уже прежний — не трогается. Если какой-то файл
+ * изменили после сбоя (рукой, workspace-init, переключением ветки), ничего
+ * не меняется: запуск отказывает и называет файл и журнал. Если запрос
+ * применения успел зафиксироваться, сервер отклонит его по digest
+ * (`config.apply-refused`). Вызывается при запуске `serve` и `demo` до
+ * загрузки конфигурации.
  */
-export function recoverConfigWrite(root: string): { restored: string[] } | undefined {
+export function recoverConfigWrite(
+  root: string,
+): { restored: string[]; skipped: string[] } | undefined {
   const path = join(root, JOURNAL);
   if (!existsSync(path)) return undefined;
-  const journal = JSON.parse(readFileSync(path, 'utf8')) as Journal;
-  const errors = restore(journal.files);
+  const journal = readJournal(path);
+  const restoring: JournalFile[] = [];
+  const skipped: string[] = [];
+  const changed: string[] = [];
+  for (const file of journal.files) {
+    const current = textOf(file.path);
+    if (current === file.after) restoring.push(file);
+    else if (current === file.before) skipped.push(file.path);
+    else changed.push(file.path);
+  }
+  if (changed.length)
+    throw new Error(
+      `Запись конфигурации ${journal.operation} оборвалась, а после неё изменены: ${changed.join(', ')}. Ничего не изменено. Проверьте эти файлы, затем удалите журнал ${path} и запустите serve снова`,
+    );
+  const errors = restore(restoring);
   if (errors.length)
-    throw new AggregateError(errors, 'Незавершённая запись конфигурации не откатилась');
+    throw new AggregateError(
+      errors,
+      `Незавершённая запись конфигурации не откатилась целиком; журнал ${path} оставлен, повторите запуск`,
+    );
+  // Временные файлы оборванной замены — свои, записанные в журнал заранее.
+  for (const file of journal.files) if (file.temp) rmSync(file.temp, { force: true });
   rmSync(path, { force: true });
-  return { restored: journal.files.map((f) => f.path) };
+  return { restored: restoring.map((f) => f.path), skipped };
+}
+
+/** Оставшийся журнал записи конфигурации — для doctor. */
+export function pendingConfigWrite(root: string): string | undefined {
+  const path = join(root, JOURNAL);
+  if (!existsSync(path)) return undefined;
+  try {
+    const journal = readJournal(path);
+    return `Запись конфигурации ${journal.operation} не завершена: журнал ${path} (файлы: ${journal.files.map((f) => f.path).join(', ')}). Запуск serve вернёт файлы, в которых лежит записанный панелью текст, а при посторонней правке откажет`;
+  } catch (error) {
+    return failure(error);
+  }
+}
+
+/** Запомнить выбор моделей ролей верхнего уровня, сделанный в панели. */
+function recordChoices(root: string, planned: Planned) {
+  if (!planned.topLevel.length) return;
+  const path = join(root, MODEL_CHOICES);
+  const raw = readJson(path) as { roles?: Record<string, Record<string, unknown>> };
+  const roles = raw.roles ?? {};
+  for (const { role, part, after } of planned.topLevel) {
+    const entry = (roles[role] ??= {});
+    if (after) entry[part] = after;
+    else delete entry[part];
+    if (!Object.keys(entry).length) delete roles[role];
+  }
+  const temp = tempFor(path);
+  try {
+    writeFileSync(temp, JSON.stringify({ roles }, null, 2) + '\n', { mode: 0o600, flag: 'wx' });
+    renameSync(temp, path);
+  } catch {
+    // Запись — подсказка обновлению профиля, не часть применения.
+    rmSync(temp, { force: true });
+  }
 }
 
 /**
@@ -871,7 +987,7 @@ export function requestModels(h: DevContour, root: string, raw: unknown) {
   const journal = join(root, JOURNAL);
   if (existsSync(journal))
     throw new DomainError(
-      'Прежняя запись конфигурации не завершена: перезапустите serve, он вернёт файлы',
+      'Прежняя запись конфигурации не завершена: перезапустите serve, он вернёт файлы (doctor называет журнал)',
       409,
     );
   const planned = plan(h, root, input);
@@ -891,14 +1007,20 @@ export function requestModels(h: DevContour, root: string, raw: unknown) {
   const digestNext = loadedDigest(planned.candidate);
   const operation = `${configApplyPrefix}models:${randomUUID().slice(0, 8)}`;
   // Файлы компонентов — первыми, config.json — последним.
-  const files: Journal['files'] = [
+  const files: JournalFile[] = [
     ...[...planned.nextComponents].map(([id, after]) => {
       const source = planned.sources.components.get(id)!;
-      return { path: source.real, before: source.text, after };
+      return { path: source.real, before: source.text, after, temp: tempFor(source.real) };
     }),
-    { path: planned.sources.path, before: planned.sources.text, after: planned.nextConfig },
+    {
+      path: planned.sources.path,
+      before: planned.sources.text,
+      after: planned.nextConfig,
+      temp: tempFor(planned.sources.path),
+    },
   ];
-  const written: Journal['files'] = [];
+  const written: JournalFile[] = [];
+  let created = false;
   try {
     h.store.atomic(() => {
       const busy = h.store.read().reconfigure;
@@ -908,23 +1030,23 @@ export function requestModels(h: DevContour, root: string, raw: unknown) {
           409,
         );
       if (busy) h.clearReconfigure(busy.operation);
-      writeFileSync(journal, JSON.stringify({ operation, files } satisfies Journal), {
-        mode: 0o600,
-        flag: 'wx',
-      });
+      createJournal(journal, { operation, files });
+      created = true;
       for (const file of files) {
-        replaceFile(file.path, file.after);
+        replaceFile(file.path, file.after, file.temp);
         written.push(file);
       }
       h.requestReconfigure(operation, digestNext);
     });
   } catch (error) {
     const errors = restore(written);
-    if (!errors.length) rmSync(journal, { force: true });
+    // Чужой журнал (его создал другой процесс) не удаляется никогда.
+    if (created && !errors.length) rmSync(journal, { force: true });
     throw errors.length
       ? new AggregateError([error, ...errors], 'Запись моделей не удалась и не откатилась целиком')
       : error;
   }
   rmSync(journal, { force: true });
+  recordChoices(root, planned);
   return { status: 'requested' as const, operation, digest: digestNext, ...effects };
 }
