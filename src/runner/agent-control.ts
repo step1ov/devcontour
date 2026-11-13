@@ -332,6 +332,24 @@ const feasibilityReview = [
   `Assess every obligation of the contract for feasibility. For each, check that the contract states: the input domain and size limits; exactness or optimality (or the allowed approximation); the worst case; allowed refusals or failures; the resource model (time, memory, environment); and how the obligation is measured. An obligation that cannot be met in general under the stated limits, or cannot be measured as written, is a blocking finding with rule "${FEASIBILITY}" — name the obligation, the missing or contradictory bound and a concrete input that shows it. Hardness alone is not infeasibility: an exact answer for a hard problem is acceptable when the contract bounds the input, justifies the assumptions or allows a documented fallback. Do not block an obligation only for its wording.`,
 ];
 
+/** Класс находки ревью консолидации: смысл контракта изменился. */
+export const CONSOLIDATION = 'consolidation';
+/** Предмет ревью равносильности: история раундов отдельно от ревью контракта. */
+export const CONSOLIDATION_SUBJECT = 'contract consolidation';
+/**
+ * Ревью консолидации (F20). Контракт, переписанный из накопленных поправок в
+ * чистый текст, не должен изменить смысл: ревьюер получает прежний и новый
+ * текст, закреплённые файлы, ID-токены, выдержки соседних контрактов и
+ * открытые вопросы и строит полное отображение старого текста в новый.
+ * Выполнимость и проверяемость неизменных правил — не предмет этого ревью:
+ * иначе консолидация отклонялась бы за давно утверждённое.
+ */
+const consolidationReview = [
+  `This is a consolidation of a registered contract: "content" rewrites the current registered text "previous.content" of the same file into a clean description of the current behaviour. It must mean exactly the same: no rule dropped, weakened, widened or added; no wording that a later amendment replaced brought back (a replaced rule stays replaced, read the old text as a whole, later amendments override earlier ones); every token in "ids" keeps its meaning; headings and anchors that sibling contracts reference ("siblings") stay. Pinned "artifacts", "checks" and "underTest" are byte-identical to the current redaction: read them as context, they are not the subject.`,
+  `Build the complete mapping from the old text to the new one: for every section and every normative rule of the old text, where it is in the new text (heading or anchor) or which rule it was merged into as a duplicate, and why the meaning is the same. Write the whole mapping into the summary, one line per item, "old → new". "inputs" are open questions of implementers about this contract: the new text must not answer them differently from the old one.`,
+  `Return approved=false with a blocking finding with rule "${CONSOLIDATION}" for each dropped, weakened, widened or added rule, each resurrected pre-amendment wording, each changed meaning of an id, each sibling reference that no longer resolves, or when you cannot complete the mapping. Do not judge feasibility, verifiability or wording quality of rules that did not change and do not ask for improvements: a consolidation that keeps the meaning is approved even if the contract itself could be better.`,
+];
+
 /**
  * Независимая принимаемость задачи. Гейт первой задачи цепочки включал
  * сценарии следующих, и она не могла пройти; общий файл тестов сам по себе
@@ -382,18 +400,26 @@ async function review(
   if (h.config.mode !== 'local')
     throw new DomainError('AI-согласование доступно только для local mode');
   const kind = subject === 'task plan' ? 'plan' : 'contract';
+  const consolidation = subject === CONSOLIDATION_SUBJECT;
   const title = (proposal as { title?: string }).title ?? subject;
   const artifact = join(root, 'decisions', randomUUID());
   await mkdir(artifact, { recursive: true });
   const instructions = [
     `Independently review this ${subject}. The author runtime is ${author}.`,
     'Read repo AGENTS.md and docs/spec.md (or the specification referenced in the proposal). Do not edit files, approve work yourself, or run implementation agents.',
-    'Reject contradictions with requirements, unclear public interfaces, missing error/UI states, weak acceptance criteria, changes to scope or test policy that conceal failures. A proposal is not proof of implemented functionality.',
-    'For a plan, check dependencies, the first complete user scenario, requirement references, required real tests, and agreed API/design contracts. For architecture, assess the chosen stack and bootstrap verification evidence.',
-    'For plans, check writePaths, selected library contextPacks, device resources, consumer verification and separation of proposed discoveries from validated knowledge. Findings should include rule, consequence and evidence; do not invent violations to fill the report.',
-    'Declared context packs: ' + JSON.stringify(h.config.contextPacks),
-    ...(kind === 'contract' ? [...feasibilityReview, ...verifiabilityReview] : []),
+    ...(consolidation
+      ? consolidationReview
+      : [
+          'Reject contradictions with requirements, unclear public interfaces, missing error/UI states, weak acceptance criteria, changes to scope or test policy that conceal failures. A proposal is not proof of implemented functionality.',
+          'For a plan, check dependencies, the first complete user scenario, requirement references, required real tests, and agreed API/design contracts. For architecture, assess the chosen stack and bootstrap verification evidence.',
+          'For plans, check writePaths, selected library contextPacks, device resources, consumer verification and separation of proposed discoveries from validated knowledge. Findings should include rule, consequence and evidence; do not invent violations to fill the report.',
+          'Declared context packs: ' + JSON.stringify(h.config.contextPacks),
+        ]),
+    ...(kind === 'contract' && !consolidation
+      ? [...feasibilityReview, ...verifiabilityReview]
+      : []),
     ...(kind === 'contract' &&
+    !consolidation &&
     (proposal as { underTestImports?: unknown[] }).underTestImports?.length
       ? [underTestReview]
       : []),
@@ -439,7 +465,9 @@ async function review(
     runtimeAdapters(h, engine.policy, runtimes),
     {
       kind,
-      subject: reviewSubject(kind, title, repositoryId, subjectId),
+      subject: consolidation
+        ? reviewSubject(kind, 'consolidation:' + title, repositoryId)
+        : reviewSubject(kind, title, repositoryId, subjectId),
       digest: digest(proposal),
       author,
       instructions,
@@ -513,6 +541,33 @@ async function review(
     artifact,
     digest: digest(proposal),
   };
+}
+
+/**
+ * Раунд ревью равносильности консолидации (`consolidationReview`): та же
+ * политика выбора ревьюера, бюджет и история находок, что у ревью контракта,
+ * но своя история раундов. Отказ — `DomainError` с каталогом решения.
+ */
+export function reviewConsolidationRound(
+  h: DevContour,
+  root: string,
+  author: Author,
+  runtimes: Runtimes,
+  proposal: {
+    title: string;
+    repositoryId?: string;
+    file: string;
+    previous: { id: string; content: string };
+    content: string;
+    ids: string[];
+    artifacts?: unknown[];
+    checks?: unknown;
+    underTest?: string[];
+    siblings: unknown[];
+    inputs: unknown[];
+  },
+) {
+  return review(h, root, author, CONSOLIDATION_SUBJECT, proposal, runtimes, proposal.repositoryId);
 }
 
 /** Структурные пропуски договора проверки — отказ до вызова модели. */
