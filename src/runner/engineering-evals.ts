@@ -225,7 +225,8 @@ export async function engineeringEvals(raw: unknown = {}, fixtureAdapter?: Agent
           status:
             task.status === 'done'
               ? 'passed'
-              : run?.status === 'failed' || run?.evidence.some((e) => !e.passed)
+              : run?.status === 'failed' ||
+                  run?.evidence.some((e) => !e.passed && e.kind !== 'not-applicable')
                 ? 'failed'
                 : 'unverified',
           durationMs: Date.now() - started,

@@ -714,7 +714,14 @@ export type PanelProgress = {
   waitingInput?: number;
   statuses: Record<string, number>;
   blocks: { id: string; done: number; total: number }[];
-  gates: { gate: string; passed: number; failed: number; tasks: number; phases: string[] }[];
+  gates: {
+    gate: string;
+    passed: number;
+    failed: number;
+    notApplicable?: number;
+    tasks: number;
+    phases: string[];
+  }[];
   uncovered: { id: string; title: string }[];
   uncoveredCount: number;
 };
@@ -859,7 +866,14 @@ export function ProgressPanel({
               <table className="w-full min-w-[40rem] border-collapse text-sm">
                 <thead>
                   <tr>
-                    {['Проверка', 'Фаза', 'Задач покрыто', 'Прошло', 'Упало'].map((h, i) => (
+                    {[
+                      'Проверка',
+                      'Фаза',
+                      'Задач покрыто',
+                      'Прошло',
+                      'Упало',
+                      'Не применим (пути)',
+                    ].map((h, i) => (
                       <th
                         key={h}
                         className={`border-b p-2 align-top font-medium ${i > 1 ? 'text-right' : 'text-left'}`}
@@ -882,6 +896,9 @@ export function ProgressPanel({
                       <td className="tabular border-b p-2 text-right align-top">{g.passed}</td>
                       <td className="tabular border-b p-2 text-right align-top">
                         {g.failed ? <span className="text-destructive">{g.failed}</span> : g.failed}
+                      </td>
+                      <td className="tabular text-muted-foreground border-b p-2 text-right align-top">
+                        {g.notApplicable ?? 0}
                       </td>
                     </tr>
                   ))}

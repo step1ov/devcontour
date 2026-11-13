@@ -110,6 +110,19 @@ export function validateWorkflow(config: Config) {
       );
   }
   for (const repo of repos) {
+    // Условные gates (`when.paths`): то же правило, что у политики harness, —
+    // но при загрузке конфигурации, с именем компонента, а не при сборке движка.
+    if (repo.gates.some((g) => g.when)) {
+      if (!repo.gates.some((g) => g.kind === 'test' && !g.when))
+        throw new DomainError(
+          `Компонент ${repo.id}: нужен хотя бы один test gate без when — иначе задача может не исполнить ни одного теста`,
+        );
+      const generative = repo.gates.find((g) => g.when && g.property);
+      if (generative)
+        throw new DomainError(
+          `Компонент ${repo.id}: генеративный gate ${generative.id} не может быть условным (when)`,
+        );
+    }
     if (config.mode !== 'demo')
       for (const role of declaredRoles(config, repo.id)) {
         const writer = roleBinding(config, role, repo.id),
@@ -177,7 +190,17 @@ export function validateResources(config: Config, ids: string[]) {
     if (!config.resources.some((r) => r.id === id))
       throw new DomainError('Неизвестный ресурс: ' + id);
 }
-export function validateTaskContext(config: Config, task: TaskInput) {
+export function validateTaskContext(
+  config: Config,
+  task: TaskInput,
+  /**
+   * `history` — чтение уже записанной задачи (импорт Git sync): правило
+   * условных gates относится к постановке и выдаче, а не к истории. Задача,
+   * принятая до того, как её gate стал условным, иначе блокировала бы
+   * синхронизацию навсегда — изменить принятую задачу нельзя.
+   */
+  options: { history?: boolean } = {},
+) {
   validateResources(config, task.resources ?? []);
   // Роль объявляет workspace, и задача может ссылаться только на объявленную:
   // у неизвестной роли нет ни области записи, ни runtime, ни ревьюера, и
@@ -225,6 +248,19 @@ export function validateTaskContext(config: Config, task: TaskInput) {
     // проходят и на нереализованном коде.
     if (!gates.some((id) => own.some((g) => g.id === id && g.kind === 'test')))
       throw new DomainError('Область доказательства задачи должна включать test gate');
+    // Условный test gate, не задетый diff, не исполняется: задача с одними
+    // условными тестами могла бы пройти, не запустив ни одного. Исполняется
+    // всегда test gate без when или gate, названный требованием задачи.
+    const linked = new Set((task.requirements ?? []).map((l) => l.gate));
+    if (
+      !options.history &&
+      !gates.some((id) =>
+        own.some((g) => g.id === id && g.kind === 'test' && (!g.when || linked.has(id))),
+      )
+    )
+      throw new DomainError(
+        'Область доказательства задачи должна включать test gate без when (или названный её требованием): условный gate может не исполниться',
+      );
     for (const link of task.requirements ?? [])
       if (!gates.includes(link.gate))
         throw new DomainError('Требование ссылается на проверку вне области задачи: ' + link.gate);

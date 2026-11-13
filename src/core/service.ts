@@ -30,7 +30,9 @@ import {
   blocksWork,
   requestsOf,
   type CancelActor,
+  type ChangedPaths,
   type CodedIssue,
+  type ExecutionPolicy,
   type PropertyRecovery,
   type RetryActor,
 } from 'devcontour-harness';
@@ -443,18 +445,85 @@ export function uncoveredGates(
   tasks: Task[],
   /** Проверка доски на её итоговом SHA (`boardCoverageWorks`): её evidence тоже покрывает. */
   extra: { repositoryId: string; resultSha: string; evidence: readonly Evidence[] }[] = [],
+  /**
+   * Объединённый diff доски для условных gates (`boardChanges`): от зелёного
+   * SHA каждой записи `not-applicable` задач до итогового SHA компонента
+   * (`finalShas`). Нет — пропущенный условный gate непокрыт (исполняется на
+   * итоговом SHA): без diff его неприменимость к набору не доказана.
+   */
+  coverage?: BoardChanges,
 ) {
   const ids = [...new Set(tasks.map((t) => t.repositoryId))];
-  return harnessUncoveredGates(
-    ids.map((id) => ({ id, gates: repository(h.config, id).gates })),
-    [
-      ...tasks.map((t) => ({
-        repositoryId: t.repositoryId,
-        resultSha: t.resultSha,
-        evidence: taskEvidence(s, t, h),
-      })),
-      ...extra,
-    ],
+  // Gates — в форме политики harness: условный gate сверяется по digest
+  // своего определения (`gateDigest`), а объект конфигурации DevContour несёт
+  // свои умолчания и дал бы другой digest.
+  // Политика, которую не выразить для harness, — прежние объекты конфигурации:
+  // такая конфигурация не исполняется, но сводки по ней строятся.
+  let policy: Map<string, ExecutionPolicy['repositories'][number]>;
+  try {
+    policy = new Map(executionOf(h).engine.policy.repositories.map((r) => [r.id, r]));
+  } catch {
+    policy = new Map();
+  }
+  const gaps = harnessUncoveredGates(
+    ids.map((id) => ({
+      id,
+      gates: policy.get(id)?.gates ?? repository(h.config, id).gates,
+      protectedPaths: policy.get(id)?.protectedPaths ?? repository(h.config, id).protectedPaths,
+    })),
+    tasks.map((t) => ({
+      repositoryId: t.repositoryId,
+      resultSha: t.resultSha,
+      evidence: taskEvidence(s, t, h),
+    })),
+    coverage?.changes,
+    coverage?.finalShas,
+  );
+  // Проверка доски исполнила gate на итоговом SHA — после всех изменений
+  // набора: её PASS покрывает и условный gate, пропущенный задачами. Для
+  // обычного gate это то же правило, что прежде (покрывает любая
+  // собственная запись test фазы интеграции на итоговом SHA).
+  const passed = (repositoryId: string, gate: string) =>
+    extra.some(
+      (w) =>
+        w.repositoryId === repositoryId &&
+        w.evidence.some(
+          (e) =>
+            e.kind === 'test' &&
+            e.passed &&
+            e.phase === 'integration' &&
+            !e.consumer &&
+            e.sha === w.resultSha &&
+            e.gate === gate,
+        ),
+    );
+  return gaps.flatMap((g) => {
+    const gates = g.gates.filter((gate) => !passed(g.repositoryId, gate));
+    return gates.length ? [{ repositoryId: g.repositoryId, gates }] : [];
+  });
+}
+/** Объединённый diff доски для условных gates и итоговые SHA его конца. */
+export interface BoardChanges {
+  changes: Record<string, ChangedPaths>;
+  finalShas: Record<string, string>;
+}
+
+/**
+ * Записи `not-applicable` фазы интеграции на принятом SHA задач доски — те,
+ * которые решает `uncoveredGates` harness; от их зелёного SHA строится
+ * объединённый diff (`coverageChanges`).
+ */
+export function boardSkips(h: DevContour, s: DevContourState, tasks: Task[]) {
+  return tasks.flatMap((t) =>
+    taskEvidence(s, t, h)
+      .filter(
+        (e) =>
+          e.kind === 'not-applicable' &&
+          e.phase === 'integration' &&
+          !e.consumer &&
+          e.sha === t.resultSha,
+      )
+      .map((e) => ({ repositoryId: t.repositoryId, evidence: e })),
   );
 }
 
@@ -1560,6 +1629,8 @@ export class DevContour {
     approval: Approval = { actor: 'operator' },
     expectedDigest?: string,
     repositories?: Record<string, string>,
+    /** Объединённый diff для условных gates, пропущенных задачами (`boardChanges`). */
+    changes?: Record<string, ChangedPaths>,
   ) {
     return this.currentChange('board.accepted', (s) => {
       const r = activeRevision(s, boardId);
@@ -1598,6 +1669,7 @@ export class DevContour {
         s,
         tasks,
         repositories ? boardCoverageWorks(this, boardId, r, repositories) : [],
+        repositories && changes ? { changes, finalShas: repositories } : undefined,
       );
       if (uncovered.length) {
         // Receipt другого clone с другими проверками или без их тождества

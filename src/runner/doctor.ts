@@ -13,8 +13,8 @@ import {
 } from '../core/repositories.ts';
 import { DevContourExecutionStore, harnessVersion } from '../harness/index.ts';
 import { projectionOptions } from '../harness/host.ts';
-import { technicalReviewer } from '../harness/policy.ts';
-import { checkoutPath, standaloneScope } from 'devcontour-harness';
+import { policyFromConfig, technicalReviewer } from '../harness/policy.ts';
+import { checkoutPath, matchingPaths, standaloneScope } from 'devcontour-harness';
 import { isolationSupport } from './isolation.ts';
 import { quickSetupMarks } from './quick.ts';
 import { ATTENTION_NAMESPACE } from '../application/attention.ts';
@@ -198,6 +198,61 @@ export function gateTimeoutCheck(
     status: 'degraded',
     detail: `Проверки не укладываются в срок фазы runTimeoutMs ${min(config.runTimeoutMs)}: ${over.join('; ')}. Весь профиль компонента в одной фазе исполняют проверка перенесённой базы (base-check) и задача без области gates, а проверка покрытия доски — все gates, не покрытые областями задач; совместные проверки workspace идут целиком. Срок — сумма сроков timeoutMs, каждый не короче gateTimeoutFloorMs; долгая проверка оборвётся сроком фазы, и эти проверки упадут по таймауту. Это оценка снизу: повтор проверки на интеграции и шаги подготовки и окружения в неё не входят. Поднимите runTimeoutMs в config.json и перезапустите serve или сократите проверки.`,
   };
+}
+/**
+ * Условные gates (`when.paths`) компонентов. Отказ политики harness
+ * (у компонента нет test gate без `when`, `when` у генеративного gate) —
+ * блокировка: движок такую политику не примет. Шаблон, не совпавший ни с
+ * одним отслеживаемым файлом, — ослабление: gate с ним, скорее всего, не
+ * исполнится никогда (опечатка или переезд каталога). Справка называет, когда
+ * gate исполняется независимо от путей.
+ */
+export async function gateWhenChecks(config: Config): Promise<Check[]> {
+  const repos = repositories(config).filter((r) => r.gates.some((g) => g.when));
+  if (!repos.length) return [];
+  let policyProblem: string | undefined;
+  try {
+    policyFromConfig(config);
+  } catch (error) {
+    policyProblem = error instanceof Error ? error.message : String(error);
+  }
+  const checks: Check[] = [];
+  for (const repo of repos) {
+    const conditional = repo.gates.filter((g) => g.when);
+    const id = `gates:when:${repo.id}`;
+    if (policyProblem) {
+      checks.push({
+        id,
+        status: 'blocked',
+        detail: `Политика harness не собирается, условные gates не проверены: ${policyProblem}`,
+      });
+      continue;
+    }
+    let files: string[] | undefined;
+    try {
+      files = (await git(repo.path, 'ls-files', '-z')).split('\0').filter(Boolean);
+    } catch {
+      files = undefined;
+    }
+    const unmatched = files
+      ? conditional.flatMap((g) =>
+          g
+            .when!.paths.filter((p) => !matchingPaths([p], files).length)
+            .map((p) => `${g.id}: ${p}`),
+        )
+      : [];
+    const listed = conditional.map((g) => `${g.id} (${g.when!.paths.join(', ')})`).join('; ');
+    const always =
+      'Gate исполняется независимо от путей, если нет его зелёного SHA под тем же основанием, diff неполон или пуст, затронуты protectedPaths, .harness/, манифесты, lockfiles, файлы версий инструментов или пути из команды gate, gate нужен доказательству требования или свойства задачи либо он — предпосылка исполняемого gate.';
+    checks.push({
+      id,
+      status: unmatched.length ? 'degraded' : 'passed',
+      detail: unmatched.length
+        ? `Шаблоны when.paths не совпадают ни с одним отслеживаемым файлом ${repo.id}: ${unmatched.join('; ')}. Такой gate не исполнится, пока не изменится файл, задевающий его иначе. Исправьте шаблон в gates компонента.`
+        : `Условные gates ${repo.id}: ${listed}.${files ? '' : ' Отслеживаемые файлы не прочитаны: совпадение шаблонов не проверено.'} ${always}`,
+    });
+  }
+  return checks;
 }
 export const doctorReady = (checks: Pick<Check, 'status'>[]) =>
   !checks.some((c) => c.status === 'blocked');
@@ -790,6 +845,7 @@ export async function doctor(
   if (network) checks.push(network);
   const gateTimeouts = gateTimeoutCheck(config, state?.tasks ?? []);
   if (gateTimeouts) checks.push(gateTimeouts);
+  checks.push(...(await gateWhenChecks(config)));
   checks.push(checkoutsCheck(config, root));
   // Механизм на месте ещё не значит, что gate установки в нём пройдёт:
   // песочница всегда закрывает часть путей и внутри worktree. Проба ставит

@@ -1,3 +1,4 @@
+import { notApplicableLine } from '../core/evidence-verdict.ts';
 import { repositories } from '../core/repositories.ts';
 import { attemptNumbers } from '../core/attempt-numbers.ts';
 import { mkdirSync, writeFileSync, renameSync, lstatSync, realpathSync } from 'node:fs';
@@ -177,8 +178,10 @@ export function attachJournal(h: DevContour) {
             for (const run of state.runs.filter((r) => r.taskId === task.id))
               rows.push(
                 `- Попытка ${numbers.get(run.id)}${numbers.get(run.id) === run.attempt ? '' : ` (счёт ${run.attempt})`}: ${run.status}; ${run.runtime} / ${run.model ?? 'default'}; SHA ${run.integrationSha ?? run.candidateSha ?? '—'}`,
-                ...run.evidence.map(
-                  (e) => `  - ${e.gate}: ${e.passed ? 'PASS' : 'FAIL'}; ${e.sha}; ${e.log}`,
+                ...run.evidence.map((e) =>
+                  e.kind === 'not-applicable'
+                    ? `  - ${e.gate}: ${notApplicableLine(e.notApplicable)}; ${e.sha}`
+                    : `  - ${e.gate}: ${e.passed ? 'PASS' : 'FAIL'}; ${e.sha}; ${e.log}`,
                 ),
                 ...(run.error ? [`  - Ошибка: ${line(run.error)}`] : []),
               );
