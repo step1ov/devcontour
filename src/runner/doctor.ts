@@ -26,6 +26,7 @@ import { gateTimeoutSum, packageRegistryDomains } from './setup.ts';
 import { validateWorkflow } from '../core/workflow.ts';
 import { command, git } from './process.ts';
 import { outdatedContextPacks } from './context-library.ts';
+import { guideDrift, guideDriftText } from './guides.ts';
 import { executionEnvironment, runSteps, withEnvironment } from './environment.ts';
 import { withResources } from './resources.ts';
 import { agentEnvironment, reviewerRunsChecks, toolProfileFor, writerRunsChecks } from './tools.ts';
@@ -894,6 +895,7 @@ export async function doctor(
       .map((p) => `${p.id} ${p.version} → ${p.library}`)
       .join('; ')}. Решите: остаться на своей версии или перейти — context-adopt --pack <id>`;
   });
+  checks.push(...(await guideChecks(config, root)));
   await check('write-scope', async () => {
     const open = bindings
       .filter((b) => !b.review && !roleBinding(config, b.role, b.repo.id)?.writePaths?.length)
@@ -1111,6 +1113,52 @@ export async function doctor(
   await writeFile(join(root, 'doctor.json'), JSON.stringify(result, null, 2));
   return result;
 }
+
+/**
+ * Копии руководств DevContour в продукте (`docs/devcontour-*.md`): setup
+ * записывает их один раз, и без сверки долгоживущий продукт читает руководства
+ * прежней версии. Расхождение не блокирует работу — `degraded` с командой
+ * исправления. Проверяется основной репозиторий setup и компоненты, в которых
+ * копии есть; репозиторий без копий вовсе не сверяется.
+ */
+export async function guideChecks(config: Config, root: string): Promise<Check[]> {
+  const checks: Check[] = [];
+  const target = guideTarget(config, root);
+  for (const { id, path } of guideRepositories(config)) {
+    let entries;
+    try {
+      entries = await guideDrift(path);
+    } catch (e) {
+      checks.push({
+        id: `guides:${id}`,
+        status: 'degraded',
+        detail: `Копии руководств в ${path} не читаются: ${e instanceof Error ? e.message : String(e)}`,
+      });
+      continue;
+    }
+    if (!entries.length) continue;
+    const drift = guideDriftText(entries, target);
+    checks.push({
+      id: `guides:${id}`,
+      status: drift ? 'degraded' : 'passed',
+      detail: `${path}: ${drift ?? 'копии руководств DevContour совпадают с установленной версией'}`,
+    });
+  }
+  return checks;
+}
+
+/** Репозитории, где могут лежать копии: компоненты и репозиторий setup. */
+export function guideRepositories(config: Config): { id: string; path: string }[] {
+  const listed = repositories(config).map((r) => ({ id: r.id, path: r.path }));
+  if (listed.some((r) => r.path === config.repository)) return listed;
+  // Репозиторий setup вне списка компонентов: id `main`, если он не занят.
+  const id = listed.some((r) => r.id === 'main') ? 'setup' : 'main';
+  return [{ id, path: config.repository }, ...listed];
+}
+
+/** Как назвать конфигурацию в подсказке: workspace или каталог данных прежней конфигурации. */
+export const guideTarget = (config: Pick<Config, 'workspaceRoot'>, root: string) =>
+  config.workspaceRoot ? `--workspace ${config.workspaceRoot}` : `--data ${root}`;
 
 /**
  * Где лежат рабочие деревья попыток и проверок (`checkout-root.ts`). Каталог
