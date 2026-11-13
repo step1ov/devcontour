@@ -712,7 +712,7 @@ export class ContractChanges {
    * паузы оператора, ведущего, штатной остановки, проверки базы и
    * применения конфигурации не трогает. Проверка и снятие — одной записью.
    */
-  private async liftStaleBasePause() {
+  private async liftStaleBasePause(op: Pick<ContractChange, 'id'>) {
     for (const r of repositories(this.h.config)) {
       const behind = Number(
         await git(r.path, 'rev-list', '--count', `refs/heads/${r.targetBranch}..HEAD`),
@@ -726,6 +726,12 @@ export class ContractChanges {
         const stop = queueStopView(state, this.h.store.latestEvents(['scheduler.error'], 50));
         if (stop.reason !== 'runtime' || !stop.stopReason?.startsWith(STALE_BASE)) return false;
         this.h.pause(false);
+        // Запуск записан как снятие паузы операцией, а не решение человека:
+        // событие называет операцию и причину снятой паузы.
+        this.h.store.appendEvent('contract-change.queue-resumed', {
+          operation: op.id,
+          reason: 'stale-base',
+        });
         return true;
       });
     } catch {
@@ -953,7 +959,7 @@ export class ContractChanges {
         const tip = await git(repo.path, 'rev-parse', target);
         // База догнала рабочую ветку: пауза сбоя такта «база отстала»
         // (коммит контракта на рабочую ветку до переноса) больше не нужна (F40).
-        await this.liftStaleBasePause();
+        await this.liftStaleBasePause(op);
         this.advanceStep(op, (current) => {
           if (lifted.size)
             this.log(
