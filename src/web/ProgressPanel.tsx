@@ -26,7 +26,7 @@ import type { QueueStopView } from '../core/work-status.ts';
 import { roleLabel } from './roles.ts';
 import { WorkerCards } from './Workers.tsx';
 import { taskStatus } from './status.ts';
-import { heldByInput, inputNextText } from './input-labels.ts';
+import { heldByInput, inputNextText, type ResumeLabel } from './input-labels.ts';
 import { Badge } from '@/ui/badge.tsx';
 import { Card, CardContent, CardHeader, CardTitle } from '@/ui/card.tsx';
 import type { InputPolicyConfig } from './InputPolicy.tsx';
@@ -351,6 +351,8 @@ function Queue({ revision }: { revision?: string }) {
       actor?: 'operator' | 'lead';
       kind?: string;
       operatorMode?: boolean;
+      /** Цепочку после ответа ведёт сервер: фаза прохода. */
+      resume?: ResumeLabel;
     };
   };
   const [items, setItems] = useState<Item[]>([]);
@@ -429,6 +431,7 @@ function Queue({ revision }: { revision?: string }) {
                       actor: t.input.actor,
                       kind: t.input.kind,
                       operatorMode: t.input.operatorMode,
+                      resume: t.input.resume,
                     })}
                   </small>
                 )}

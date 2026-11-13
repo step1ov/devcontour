@@ -106,6 +106,12 @@ export interface HintParamMap {
   /** Ответ сохранён, но не применён (`state`). */
   'apply-saved': { state: string; operator: boolean } & Stops;
   /**
+   * Цепочку после ответа ведёт сервер (`InputResumer`): `phase` — фаза
+   * прохода (`resume` сводки вопроса), `trigger` — кто ответил. Фазы
+   * `failed`, `blocked`, `needs-lead` — проход остановился, `detail` — причина.
+   */
+  'apply-auto': { phase: string; trigger: string; detail?: string } & Stops;
+  /**
    * Ответ заменённого вопроса ждёт переноса в постановку задачи (F14):
    * `draft` — перенос в черновике, затем утверждение; `unreleased` — доска
    * без утверждённых задач: пауза, утверждение, перенос, снятие паузы;
@@ -367,6 +373,23 @@ const en: Catalog = {
       repeatedEn(taskId, p.stops)
     );
   },
+  'apply-auto': (p, s) => {
+    const { requestId, taskId } = s.input!;
+    const chain = 'input_context, input_review, input_target, input_apply';
+    const why = p.detail ? ` (${p.detail})` : '';
+    return (
+      (p.phase === 'failed'
+        ? `DevContour could not review the answer to ${requestId} automatically${why}: fix the cause (runtime, budget), then run ${chain} yourself.`
+        : p.phase === 'blocked'
+          ? `The answer to ${requestId} is reviewed but cannot be applied${why}: resolve that cause, then input_target and input_apply${p.detail?.startsWith('ATTEMPTS_EXHAUSTED') ? ' with reset.reason (the attempt budget of the task is spent)' : ''}.`
+          : p.phase === 'needs-lead'
+            ? p.detail === 'requirement-change'
+              ? `The answer to ${requestId} changes requirements: reopen and respecify task ${taskId}, input_supersede with the same task, carry the answer (${chain}), then approve the task.`
+              : `DevContour does not know the author runtime to review the answer to ${requestId}: start the board job (workflow_start) or run ${chain} yourself.`
+            : `DevContour continues task ${taskId} on the server after the ${p.trigger === 'operator' ? "operator's" : "lead's"} answer to ${requestId} (${p.phase}): it runs ${chain} itself with the configured reviewer and the same checks. Do not run them yourself; wait, or read input_show.`) +
+      repeatedEn(taskId, p.stops)
+    );
+  },
   'apply-carry': (p, s) => {
     const { requestId, taskId } = s.input!;
     const chain = 'input_context, input_review, input_target, input_apply';
@@ -583,6 +606,23 @@ const ru: Catalog = {
     const { requestId, taskId } = s.input!;
     return (
       `Ответ на ${requestId} сохранён, но не применён (${p.state}): ${chainRu(p.operator, taskId)}.` +
+      repeatedRu(taskId, p.stops)
+    );
+  },
+  'apply-auto': (p, s) => {
+    const { requestId, taskId } = s.input!;
+    const chain = 'input_context, input_review, input_target, input_apply';
+    const why = p.detail ? ` (${p.detail})` : '';
+    return (
+      (p.phase === 'failed'
+        ? `DevContour не смог автоматически проверить ответ на ${requestId}${why}: устраните причину (рантайм, бюджет) и выполните ${chain} сами.`
+        : p.phase === 'blocked'
+          ? `Ответ на ${requestId} проверен, но применить его нельзя${why}: устраните эту причину, затем input_target и input_apply${p.detail?.startsWith('ATTEMPTS_EXHAUSTED') ? ' с reset.reason (бюджет попыток задачи исчерпан)' : ''}.`
+          : p.phase === 'needs-lead'
+            ? p.detail === 'requirement-change'
+              ? `Ответ на ${requestId} меняет требования: переоткройте задачу ${taskId} с новой постановкой, input_supersede той же задачей, перенесите ответ (${chain}), затем утвердите задачу.`
+              : `DevContour не знает рантайм автора для ревью ответа на ${requestId}: запустите задание доски (workflow_start) или выполните ${chain} сами.`
+            : `DevContour продолжает задачу ${taskId} на сервере после ответа ${p.trigger === 'operator' ? 'оператора' : 'ведущего'} на ${requestId} (${p.phase}): он сам выполняет ${chain} с настроенным ревьюером и теми же проверками. Сами их не выполняйте; ждите или читайте input_show.`) +
       repeatedRu(taskId, p.stops)
     );
   },

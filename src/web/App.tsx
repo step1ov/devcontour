@@ -52,7 +52,7 @@ import {
 import { Alert, AlertDescription } from '@/ui/alert.tsx';
 import { Badge } from '@/ui/badge.tsx';
 import { TaskInput } from './TaskInput.tsx';
-import { heldByInput } from './input-labels.ts';
+import { heldByInput, resumeBadge, resumeText } from './input-labels.ts';
 import { Button } from '@/ui/button.tsx';
 import { Dialog, DialogContent, DialogDescription, DialogTitle } from '@/ui/dialog.tsx';
 import { Input } from '@/ui/input.tsx';
@@ -247,10 +247,27 @@ function TaskLive({
     );
   // Вопрос исполнителя держит задачу и после устаревшего применения (ready):
   // строка называет ожидание ответа, а не зависимость.
+  // Ответ уже дан, и его ведёт сервер: метка называет фазу прохода (полный
+  // текст — во всплывающей подсказке и в карточке вопроса).
   if (heldByInput(task))
     return (
-      <small className="mt-1 block" data-input-waiting>
-        <Badge variant="destructive">Ждёт ответа</Badge>
+      <small
+        className="mt-1 block"
+        data-input-waiting
+        {...(task.inputResume ? { 'data-input-resume': task.inputResume.phase } : {})}
+      >
+        {task.inputResume ? (
+          <Badge
+            variant={task.inputResume.auto ? 'secondary' : 'destructive'}
+            title={resumeText(task.inputResume)}
+          >
+            {resumeBadge(task.inputResume)}
+          </Badge>
+        ) : 'inputAnswered' in task && task.inputAnswered ? (
+          <Badge variant="secondary">Ответ дан: ведущий применяет</Badge>
+        ) : (
+          <Badge variant="destructive">Ждёт ответа</Badge>
+        )}
       </small>
     );
   if (task.status === 'ready' && task.blockers.length)
@@ -1717,7 +1734,9 @@ export function App() {
               : t.status === 'draft'
                 ? 'План не утверждён.'
                 : heldByInput(t)
-                  ? 'Ждёт ответа на вопрос исполнителя.'
+                  ? 'inputResume' in t && t.inputResume
+                    ? resumeText(t.inputResume) + '.'
+                    : 'Ждёт ответа на вопрос исполнителя.'
                   : t.status === 'failed'
                     ? 'Сбой, нужен повтор.'
                     : data.paused

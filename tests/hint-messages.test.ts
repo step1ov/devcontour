@@ -300,6 +300,39 @@ const samples: { [C in HintCode]: (HintSubject & Extract<HintOf, { code: C }>)[]
     { code: 'apply-saved', params: { state: 'answered', operator: false }, input: input1 },
     { code: 'apply-saved', params: { state: 'reviewed', operator: true }, input: input1 },
   ],
+  'apply-auto': [
+    { code: 'apply-auto', params: { phase: 'reviewing', trigger: 'operator' }, input: input1 },
+    {
+      code: 'apply-auto',
+      params: { phase: 'paused', trigger: 'operator', detail: 'operator' },
+      input: input1,
+    },
+    {
+      code: 'apply-auto',
+      params: { phase: 'blocked', trigger: 'operator', detail: 'ATTEMPTS_EXHAUSTED: spent' },
+      input: input1,
+    },
+    {
+      code: 'apply-auto',
+      params: { phase: 'failed', trigger: 'operator', detail: 'reviewer is down' },
+      input: input1,
+    },
+    {
+      code: 'apply-auto',
+      params: { phase: 'blocked', trigger: 'operator', detail: 'graph changed' },
+      input: input1,
+    },
+    {
+      code: 'apply-auto',
+      params: { phase: 'needs-lead', trigger: 'operator', detail: 'requirement-change' },
+      input: input1,
+    },
+    {
+      code: 'apply-auto',
+      params: { phase: 'needs-lead', trigger: 'operator', detail: 'author-runtime', stops },
+      input: input1,
+    },
+  ],
   'apply-carry': [
     { code: 'apply-carry', params: { order: 'draft' }, input: input1 },
     { code: 'apply-carry', params: { order: 'unreleased' }, input: input1 },
@@ -474,8 +507,11 @@ test('Подсказки шага: новая конфигурация setup п�
  * (`input_propose`) вместо «ждите»; добавлены образцы с `version` и
  * `proposed`; добавлены образцы `apply-rejected` с `operatorAnswers` и
  * `proposed`; прочие образцы байтово прежние.
+ * Намеренное изменение: добавлены образцы кода `apply-auto` (цепочку после
+ * ответа оператора ведёт сервер: идёт, на паузе, остановлен — в том числе
+ * исчерпанным бюджетом попыток); прочие образцы байтово прежние.
  */
-const ENGLISH_SAMPLES_SHA256 = '77db091366ccd05e377458831c483a5813b280bcb778dde3a8832a86a0f09039';
+const ENGLISH_SAMPLES_SHA256 = '079cb335165f3e63e74a0d32d9007d96c2266b608a17b3a8341edf348b9b513e';
 
 test('Подсказки шага: английские тексты образцов закреплены', () => {
   assert.equal(

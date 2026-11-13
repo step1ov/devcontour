@@ -173,55 +173,38 @@ test('The operator answers the writer question in the panel; the answer reaches 
   // В списке задача помечена ожиданием ответа.
   await expect(page.locator('[data-input-waiting]').first()).toBeVisible();
 
+  // Очередь на паузе оператора: проход сервера ждёт её снятия и моделей не
+  // вызывает — карточка и доска говорят это прямо.
+  expect((await request.post('/api/scheduler', { headers, data: { start: false } })).ok()).toBe(
+    true,
+  );
   await card.getByLabel('JSON').check();
   await card.getByLabel('Ответ исполнителю').fill('Оставьте JSON, как сейчас.');
   await card.getByRole('button', { name: 'Сохранить ответ' }).click();
-  await expect(card).toContainText('Ответ сохранён');
   await expect(card.locator('[data-input-answer]')).toContainText('Оставьте JSON');
   // Ответ оператора — сообщение обсуждения задачи со ссылкой на версию ответа.
   const thread = inspector.getByRole('list', { name: 'Сообщения обсуждения' });
   await expect(thread).toContainText('ответ на вопрос, r1');
   await expect(thread).toContainText('Оставьте JSON, как сейчас.');
-  // Режим agent: применять в панели нечего, следующий шаг — ведущего.
+  // Режим agent: применять в панели нечего, и сессия ведущего не нужна.
   await expect(card.getByRole('button', { name: 'Применить ответ' })).toHaveCount(0);
-  await expect(card.locator('[data-input-next]')).toContainText('ведущий');
-
-  // Ведущий: снимок, ревью (demo — детерминированное), цель, применение.
-  // Очередь на паузе, чтобы увидеть «применён, ждёт попытки».
+  const resume = card.locator('[data-input-resume]');
+  await expect(resume).toHaveAttribute('data-input-resume', 'paused');
+  await expect(resume).toContainText('Ответ принят — продолжу после снятия паузы');
   const { requests } = (await agent(request, 'input_list', { taskId: task.id })) as {
-    requests: { requestId: string }[];
+    requests: { requestId: string; state: string }[];
   };
   const requestId = requests[0].requestId;
-  const context = (await agent(request, 'input_context', { requestId })) as {
-    contextDigest: string;
-    answerDigest: string;
-  };
-  const review = await agent(request, 'input_review', {
-    requestId,
-    contextDigest: context.contextDigest,
-    authorRuntime: 'codex',
-  });
-  expect(review.approved).toBe(true);
-  await expect(card).toContainText('Контекст с ответом проверен');
-  const target = (await agent(request, 'input_target', {
-    requestId,
-    contextDigest: context.contextDigest,
-  })) as { version: number; targetDigest: string; problems: string[] };
-  expect(target.problems).toEqual([]);
-  expect((await request.post('/api/scheduler', { headers, data: { start: false } })).ok()).toBe(
-    true,
+  expect(requests[0].state).toBe('answer-saved');
+  // Доска задач: метка называет фазу прохода, а не «Ждёт ответа».
+  await page.goto(`/?tab=kanban&board=${board.id}&task=${task.id}`);
+  await expect(waitingColumn.locator('[data-input-resume="paused"]')).toContainText(
+    'Ответ принят: после паузы',
   );
-  const applied = await agent(request, 'input_apply', {
-    requestId,
-    answerDigest: context.answerDigest,
-    expectedVersion: target.version,
-    contextDigest: context.contextDigest,
-    targetDigest: target.targetDigest,
-  });
-  expect(applied.applied).toBe(true);
-  await expect(card).toContainText('Ответ применён, ждёт попытки');
-  await expect(card).not.toContainText('Передано в новую попытку');
+  await page.goto(`/?tab=list&board=${board.id}&task=${task.id}`);
 
+  // Снятие паузы: сервер проверяет ответ (demo-ревью, детерминированное),
+  // применяет его, и новая попытка завершает задачу.
   expect((await request.post('/api/scheduler', { headers, data: { start: true } })).ok()).toBe(
     true,
   );
@@ -229,6 +212,10 @@ test('The operator answers the writer question in the panel; the answer reaches 
     .poll(async () => (await taskState(request, task.id))?.status, { timeout: 60000 })
     .toBe('done');
   await expect(card).toContainText('Передано в новую попытку');
+  const shown = (await agent(request, 'input_show', { requestId })) as {
+    reviews: { approved: boolean }[];
+  };
+  expect(shown.reviews.map((r) => r.approved)).toEqual([true]);
   // «Ход попыток»: остановка вопросом и продолжение после ответа идут с одним
   // номером бюджета — пометки их различают.
   const attempts = inspector.getByRole('region', { name: 'Ход попыток' });

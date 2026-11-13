@@ -381,41 +381,27 @@ test('Quick start, a discussion note and the attention center together on a real
       before.runs.filter((r) => r.taskId === taskId).length,
     );
 
-    // 6. Ответ с карточки центра; ведущий применяет; новая попытка завершает задачу.
+    // 6. Ответ с карточки центра; сервер сам проверяет и применяет его (режим
+    // agent, без сессии ведущего); новая попытка завершает задачу.
     await page.goto(base + '/?view=attention');
     await card.getByRole('button', { name: 'Ответить' }).click();
     const answer = card.locator('form');
     await answer.getByLabel('JSON').check();
     await answer.getByLabel(/Ваш ответ/).fill('Оставьте JSON, как сейчас.');
     await answer.getByRole('button', { name: 'Ответить' }).click();
-    await expect(card).toHaveAttribute('data-attention-actor', 'lead');
-    expect(await execution()).toMatchObject({ state: 'current', actor: 'lead' });
-    const context = await agent<{ contextDigest: string; answerDigest: string }>(
-      request,
-      base,
-      'input_context',
-      { requestId: requests[0].requestId },
-    );
-    const review = await agent<{ approved: boolean }>(request, base, 'input_review', {
-      requestId: requests[0].requestId,
-      contextDigest: context.contextDigest,
-      authorRuntime: 'codex',
-    });
-    expect(review.approved).toBe(true);
-    const target = await agent<{ version: number; targetDigest: string; problems: string[] }>(
-      request,
-      base,
-      'input_target',
-      { requestId: requests[0].requestId, contextDigest: context.contextDigest },
-    );
-    expect(target.problems).toEqual([]);
-    await agent(request, base, 'input_apply', {
-      requestId: requests[0].requestId,
-      answerDigest: context.answerDigest,
-      expectedVersion: target.version,
-      contextDigest: context.contextDigest,
-      targetDigest: target.targetDigest,
-    });
+    // Действовать никому не нужно: карточки нет, ответ применяется сам.
+    await expect(card).toHaveCount(0);
+    await expect
+      .poll(
+        async () =>
+          (
+            await agent<{ state: string }>(request, base, 'input_show', {
+              requestId: requests[0].requestId,
+            })
+          ).state,
+        { timeout: 60000 },
+      )
+      .toMatch(/^(applied-awaiting-claim|delivered)$/);
     expect(
       (await request.post(base + '/api/scheduler', { headers, data: { start: true } })).ok(),
     ).toBe(true);

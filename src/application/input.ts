@@ -51,6 +51,7 @@ import { questionStops, REPEATED_QUESTION_STOPS } from '../core/input-labels.ts'
 import { outsideRoleScope, roleScopeAdvice } from '../core/workflow.ts';
 import { roleBinding } from '../core/repositories.ts';
 import { taskOwner } from '../core/sync-state.ts';
+import { resumeOf, type ResumeView } from './input-resume.ts';
 
 /**
  * Шаг переноса ответа заменённого вопроса (F14). В черновике — перенос, затем
@@ -80,6 +81,27 @@ const carryOrder = (
     : !task || task.status === 'draft' || !task.approvedDigest
       ? 'draft'
       : 'now';
+
+/**
+ * Шаг ведущего, пока цепочку после ответа ведёт сервер (`resume`): идущий
+ * проход — ждать; остановка прохода — что сделать. `undefined` — обычный шаг.
+ */
+const resumeNext = (resume: ResumeView): string | undefined => {
+  if (resume.auto)
+    return 'DevContour continues on the server: it runs input_context, input_review (the configured reviewer), input_target and input_apply itself, with the same checks; do not run them yourself — read input_show or the task card for progress';
+  switch (resume.phase) {
+    case 'failed':
+      return `DevContour could not review the answer automatically (${resume.detail ?? 'review failed'}): fix the cause (runtime, budget), then run input_context, input_review, input_target and input_apply yourself`;
+    case 'blocked':
+      return `the answer is reviewed but cannot be applied: ${resume.detail ?? 'no continuation target'}; resolve that cause, then input_target and input_apply${resume.detail?.startsWith('ATTEMPTS_EXHAUSTED') ? ' with reset.reason (the attempt budget of the task is spent)' : ''}`;
+    case 'needs-lead':
+      return resume.detail === 'requirement-change'
+        ? 'the answer changes requirements: reopen and respecify the task, input_supersede with the same task, carry the answer (input_context, input_review, input_target, input_apply), then approve the task'
+        : 'DevContour does not know the author runtime for the answer review: start the board job (workflow_start), or run input_context, input_review, input_target and input_apply yourself';
+    default:
+      return undefined;
+  }
+};
 
 /** Кто действует: ведущий агент (агентский API), оператор (панель) или хост от его имени (CLI `--by host`). */
 export type InputActorKind = 'lead' | 'operator' | 'host';
@@ -403,9 +425,21 @@ export class InputService {
   }
 
   /** Кто действует следующим и что делает. */
-  private nextOf(request: InputRequest, state: InputState, task?: Task, proposed = false) {
+  private nextOf(
+    request: InputRequest,
+    state: InputState,
+    task?: Task,
+    proposed = false,
+    resume?: ResumeView,
+  ) {
     const agent = this.h.config.approvalMode === 'agent';
     const lead = this.leadMayDecide(request);
+    // Цепочку после ответа ведёт сервер (`InputResumer`): ведущему делать
+    // нечего, пока проход идёт; остановку прохода шаг называет.
+    if (resume) {
+      const step = resumeNext(resume);
+      if (step) return { actor: 'lead' as const, next: step };
+    }
     // Заменённый вопрос ждёт переноса ответа. Выдачу он не держит (правило
     // движка), поэтому шаг называет порядок: перенос в черновике, затем
     // утверждение — оно сохраняет перенесённый ответ (F14).
@@ -499,6 +533,8 @@ export class InputService {
     const task = context.tasks.get(request.workId);
     const state = this.stateOf(view, request, task);
     const proposal = this.proposalOf(request, state.state);
+    // Продолжение после ответа, которое ведёт сервер (фаза и кто ответил).
+    const resume = resumeOf(this.h, request, state.state, task, context.boards.get(request.workId));
     // Повторные остановки вопросом по задаче: сигнал оператору и ведущему.
     // Сводка несёт только счёт и предел (вперёд, по текущему `maxAttempts`).
     const stops = questionStops(context.runs.get(request.workId) ?? [], this.h.config.maxAttempts);
@@ -538,7 +574,8 @@ export class InputService {
             },
           }
         : {}),
-      ...this.nextOf(request, state.state, task, !!proposal?.current),
+      ...(resume ? { resume } : {}),
+      ...this.nextOf(request, state.state, task, !!proposal?.current, resume),
     };
   }
 
@@ -1226,7 +1263,12 @@ export class InputService {
    * `input-<id>` и снимком в запросе reviewer. Отказ до вызова модели, если
    * снимка нет или в нём не этот ответ. Одобрение не активирует снимок.
    */
-  async review(raw: unknown, signal?: AbortSignal) {
+  async review(
+    raw: unknown,
+    signal?: AbortSignal,
+    /** `leased` — аренда ревью взята, вызова модели ещё не было (проход сервера учитывает ревью здесь). */
+    hooks: { leased?: () => void } = {},
+  ) {
     const input = inputOperationInputs.input_review.parse(raw);
     const request = this.request(input.requestId);
     const answer = latestAnswer(request);
@@ -1252,10 +1294,17 @@ export class InputService {
     const board = this.boardOf(task.id);
     const release = this.leaseReview(request.id);
     try {
+      hooks.leased?.();
       return await this.reviewUnderLease(request, input, snapshot, task, board, signal);
     } finally {
       release();
     }
+  }
+
+  /** Ревью ответа на запрос уже идёт (аренда другого процесса или ведущего): только чтение. */
+  reviewLeaseHeld(requestId: string, now = Date.now()) {
+    const held = this.h.store.localRecord<InputReviewLease>(REVIEW_LEASE, undefined, requestId);
+    return !!held && held.leaseUntil > now;
   }
 
   /**
@@ -1416,9 +1465,10 @@ export class InputService {
 
   /**
    * Идущие попытки графа задачи (её доски) — то, чего ждёт применение ответа
-   * движком (`{applied: false, active}`). Сведение для ведущего, не отказ.
+   * движком (`{applied: false, active}`). Сведение для ведущего, не отказ;
+   * только чтение (проход сервера проверяет его до применения).
    */
-  private activeInGraph(taskId: string) {
+  activeInGraph(taskId: string) {
     const state = this.h.store.read();
     const graph = (id: string) => boardOf(state, id)?.id ?? UNASSIGNED_GRAPH;
     const own = graph(taskId);
@@ -1472,8 +1522,12 @@ export class InputService {
   apply(
     raw: unknown,
     actor: InputActorKind,
-    /** Раунд отклонённого ревью, который оператор видел и подтвердил (панель, CLI). */
-    options: { confirmRejectedRound?: number } = {},
+    /**
+     * `confirmRejectedRound` — раунд отклонённого ревью, который оператор видел
+     * и подтвердил (панель, CLI); `origin: 'server'` — применяет проход
+     * сервера после ответа оператора (журнал называет это).
+     */
+    options: { confirmRejectedRound?: number; origin?: 'server' } = {},
   ) {
     const input = inputOperationInputs.input_apply.parse(raw);
     const mode = this.h.config.approvalMode;
@@ -1492,7 +1546,11 @@ export class InputService {
     const { store, engine } = executionOf(this.h);
     try {
       return store.host('input.applied', (ht) => {
-        ht.journal({ taskId: request.workId, requestId: request.id });
+        ht.journal({
+          taskId: request.workId,
+          requestId: request.id,
+          ...(options.origin ? { origin: options.origin, trigger: 'operator-answer' } : {}),
+        });
         // Область — в транзакции применения: правка задачи, записанная
         // между чтением и записью, видна здесь.
         const task = ht.state.tasks.find((t) => t.id === request.workId);

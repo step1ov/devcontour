@@ -542,153 +542,162 @@ const inputSource: AttentionSourceRule = {
     const { engine } = executionOf(h);
     const operatorMode = h.config.approvalMode === 'operator';
     const service = new InputService(h, ctx.root);
-    return service
-      .list()
-      .requests.filter((r) => inputActionable.has(r.state))
-      .map((r): Candidate => {
-        const operator = r.actor === 'operator';
-        const title = taskTitle(ctx, r.taskId);
-        let question = '';
-        let options: { id: string; label: string; consequence: string | null }[] = [];
-        let recommended: string | null = null;
-        try {
-          const asked = engine.inputRequest(r.requestId).question;
-          question = asked.question;
-          options = asked.options;
-          recommended = asked.recommended;
-        } catch {
-          /* Запрос не найден: карточка остаётся по сводке. */
-        }
-        // Оператор отвечает на ожидающий вопрос и исправляет ответ, который
-        // отклонило ревью (как в карточке задачи).
-        const answer = operator && (r.state === 'awaiting-answer' || r.state === 'review-rejected');
-        // Отклонённое ревью (D03 `review-rejected`): в режиме operator ответ
-        // применяют только подтверждением показанного раунда — то же правило
-        // `InputService.apply`, что у панели; его находки — в карточке.
-        const rejected = r.state === 'review-rejected';
-        const apply =
-          operator &&
-          operatorMode &&
-          (r.state === 'ready-to-apply' || (rejected && !r.problems?.length));
-        // Текущее предложение ответа ведущего (F37): оператор подтверждает его
-        // одним действием; ответить иначе — прежнее «Ответить».
-        const held = answer && r.proposal ? service.proposalRecord(r.requestId) : undefined;
-        const proposal = held && held.digest === r.proposal?.digest ? held : undefined;
-        const proposalLabel = proposal
-          ? options.find((o) => o.id === proposal.optionId)?.label
-          : undefined;
-        // Подтверждение с карточки центра — только когда она показывает
-        // предложение целиком и как есть: без усечения и без маски. Иначе
-        // оператор подтверждает в карточке задачи, где текст полный.
-        const proposalText = proposal ? proposalPrompt(proposal, proposalLabel) : '';
-        const confirmable =
-          !!proposal &&
-          proposalText.length <= ATTENTION_LIMITS.prompt &&
-          ctx.redact(proposalText) === proposalText;
-        let findings = '';
-        if (rejected)
-          engine.read((v) => {
-            const last = inputReviewRounds(v, r.requestId).at(-1);
-            findings = last ? last.summary : '';
-          });
-        return {
-          sourceKey: `input:${r.requestId}`,
-          occurrenceId: r.requestId,
-          // Новое предложение ведущего — новая версия карточки.
-          sourceVersion:
-            `${r.version}:${r.state}:${r.round ?? 0}` +
-            (proposal ? `:p${proposal.digest.slice(0, 12)}` : ''),
-          source: 'input',
-          category: operator ? 'question' : 'technical',
-          actor: operator ? 'operator' : 'lead',
-          title: !r.blocking
-            ? `Решение исполнителя по задаче «${title}» ждёт ведущего`
-            : answer
-              ? `Исполнитель спрашивает по задаче «${title}»`
-              : apply
-                ? `Ответ по задаче «${title}» готов к применению`
-                : `Вопрос исполнителя по задаче «${title}»: ${inputStateLabels[r.state] ?? r.state}`,
-          // Следующий шаг — словами оператора: поле `next` сводки — указание
-          // ведущему агенту по-английски, с операциями агентского API.
-          // Повторные остановки вопросом — первой строкой: длинный вопрос
-          // (он же — в форме ответа) не вытесняет сигнал за предел причины.
-          reason: ctx.redact(
-            (r.questionStops ? `${repeatedQuestionText(r.questionStops)} ` : '') +
-              // Предложение ведущего — до вопроса: причина усекается, а
-              // вид ответа (изменение требований) должен быть виден сразу.
-              (proposal
-                ? `Ведущий предлагает ответ${proposal.kind === 'requirement-change' ? ' (изменение требований)' : ''}${proposalLabel ? ` (вариант «${proposalLabel}»)` : ''}` +
-                  (confirmable
-                    ? ': полностью — в «Ответ ведущего и обоснование». '
-                    : ': он длинный или содержит скрытые данные — прочитайте и подтвердите его в карточке задачи. ')
-                : '') +
-              (rejected ? `Ревью отклонило ответ (раунд ${r.round}): ${findings} — ` : '') +
-              (question ? `${question} — ` : '') +
-              `Дальше: ${inputNextText({ ...r, operatorMode })}.`,
-          ),
-          since: r.createdAt,
-          subject: { kind: 'request', id: r.requestId, href: hrefs.input(r.taskId) },
-          actions: [
-            ...(confirmable
-              ? [
-                  {
-                    id: 'confirm-proposal',
-                    kind: 'domain' as const,
-                    label: 'Подтвердить ответ ведущего',
-                    input: 'confirm' as const,
-                    prompt: proposalText,
-                  },
-                ]
-              : []),
-            ...(answer
-              ? [
-                  {
-                    id: 'answer',
-                    kind: 'domain' as const,
-                    label: 'Ответить',
-                    input: 'text+option' as const,
-                    ...(question ? { prompt: question } : {}),
-                    ...(options.length
-                      ? {
-                          choices: options.map((o) => ({
-                            id: o.id,
-                            label: o.label,
-                            ...(o.consequence ? { hint: o.consequence } : {}),
-                            ...(o.id === recommended ? { recommended: true } : {}),
-                          })),
-                        }
-                      : {}),
-                  },
-                ]
-              : []),
-            ...(apply
-              ? [
-                  {
-                    id: 'apply',
-                    kind: 'domain' as const,
-                    label: rejected
-                      ? `Применить вопреки ревью (раунд ${r.round})`
-                      : 'Применить ответ',
-                    input: 'confirm' as const,
-                    ...(rejected && r.round !== undefined
-                      ? { round: r.round, prompt: findings }
-                      : {}),
-                  },
-                ]
-              : []),
-            ...(operator ? [] : [handoffOf(ctx)]),
-          ],
-          covered: r.blocking ? unclaimed(ctx, [r.taskId]) : [],
-          basis: {
-            options: options.map((o) => ({ id: o.id, label: o.label })),
-            taskId: r.taskId,
-            requestId: r.requestId,
-            expectedVersion: r.version,
-            ...(rejected && r.round !== undefined ? { rejectedRound: r.round } : {}),
-            ...(confirmable ? { proposalDigest: proposal.digest } : {}),
-          },
-        };
-      });
+    return (
+      service
+        .list()
+        // Цепочку после ответа ведёт сервер (`resume.auto`): действовать никому
+        // не нужно, карточки нет — ход виден в карточке задачи. Остановку
+        // прохода карточка ведущего называет.
+        .requests.filter((r) => inputActionable.has(r.state) && !r.resume?.auto)
+        .map((r): Candidate => {
+          const operator = r.actor === 'operator';
+          const title = taskTitle(ctx, r.taskId);
+          let question = '';
+          let options: { id: string; label: string; consequence: string | null }[] = [];
+          let recommended: string | null = null;
+          try {
+            const asked = engine.inputRequest(r.requestId).question;
+            question = asked.question;
+            options = asked.options;
+            recommended = asked.recommended;
+          } catch {
+            /* Запрос не найден: карточка остаётся по сводке. */
+          }
+          // Оператор отвечает на ожидающий вопрос и исправляет ответ, который
+          // отклонило ревью (как в карточке задачи).
+          const answer =
+            operator && (r.state === 'awaiting-answer' || r.state === 'review-rejected');
+          // Отклонённое ревью (D03 `review-rejected`): в режиме operator ответ
+          // применяют только подтверждением показанного раунда — то же правило
+          // `InputService.apply`, что у панели; его находки — в карточке.
+          const rejected = r.state === 'review-rejected';
+          const apply =
+            operator &&
+            operatorMode &&
+            (r.state === 'ready-to-apply' || (rejected && !r.problems?.length));
+          // Текущее предложение ответа ведущего (F37): оператор подтверждает его
+          // одним действием; ответить иначе — прежнее «Ответить».
+          const held = answer && r.proposal ? service.proposalRecord(r.requestId) : undefined;
+          const proposal = held && held.digest === r.proposal?.digest ? held : undefined;
+          const proposalLabel = proposal
+            ? options.find((o) => o.id === proposal.optionId)?.label
+            : undefined;
+          // Подтверждение с карточки центра — только когда она показывает
+          // предложение целиком и как есть: без усечения и без маски. Иначе
+          // оператор подтверждает в карточке задачи, где текст полный.
+          const proposalText = proposal ? proposalPrompt(proposal, proposalLabel) : '';
+          const confirmable =
+            !!proposal &&
+            proposalText.length <= ATTENTION_LIMITS.prompt &&
+            ctx.redact(proposalText) === proposalText;
+          let findings = '';
+          if (rejected)
+            engine.read((v) => {
+              const last = inputReviewRounds(v, r.requestId).at(-1);
+              findings = last ? last.summary : '';
+            });
+          return {
+            sourceKey: `input:${r.requestId}`,
+            occurrenceId: r.requestId,
+            // Новое предложение ведущего — новая версия карточки.
+            sourceVersion:
+              `${r.version}:${r.state}:${r.round ?? 0}` +
+              (proposal ? `:p${proposal.digest.slice(0, 12)}` : '') +
+              (r.resume ? `:r-${r.resume.phase}` : ''),
+            source: 'input',
+            category: operator ? 'question' : 'technical',
+            actor: operator ? 'operator' : 'lead',
+            title: !r.blocking
+              ? `Решение исполнителя по задаче «${title}» ждёт ведущего`
+              : answer
+                ? `Исполнитель спрашивает по задаче «${title}»`
+                : apply
+                  ? `Ответ по задаче «${title}» готов к применению`
+                  : r.resume
+                    ? `Ответ по задаче «${title}»: DevContour не может продолжить сам`
+                    : `Вопрос исполнителя по задаче «${title}»: ${inputStateLabels[r.state] ?? r.state}`,
+            // Следующий шаг — словами оператора: поле `next` сводки — указание
+            // ведущему агенту по-английски, с операциями агентского API.
+            // Повторные остановки вопросом — первой строкой: длинный вопрос
+            // (он же — в форме ответа) не вытесняет сигнал за предел причины.
+            reason: ctx.redact(
+              (r.questionStops ? `${repeatedQuestionText(r.questionStops)} ` : '') +
+                // Предложение ведущего — до вопроса: причина усекается, а
+                // вид ответа (изменение требований) должен быть виден сразу.
+                (proposal
+                  ? `Ведущий предлагает ответ${proposal.kind === 'requirement-change' ? ' (изменение требований)' : ''}${proposalLabel ? ` (вариант «${proposalLabel}»)` : ''}` +
+                    (confirmable
+                      ? ': полностью — в «Ответ ведущего и обоснование». '
+                      : ': он длинный или содержит скрытые данные — прочитайте и подтвердите его в карточке задачи. ')
+                  : '') +
+                (rejected ? `Ревью отклонило ответ (раунд ${r.round}): ${findings} — ` : '') +
+                (question ? `${question} — ` : '') +
+                `Дальше: ${inputNextText({ ...r, operatorMode })}.`,
+            ),
+            since: r.createdAt,
+            subject: { kind: 'request', id: r.requestId, href: hrefs.input(r.taskId) },
+            actions: [
+              ...(confirmable
+                ? [
+                    {
+                      id: 'confirm-proposal',
+                      kind: 'domain' as const,
+                      label: 'Подтвердить ответ ведущего',
+                      input: 'confirm' as const,
+                      prompt: proposalText,
+                    },
+                  ]
+                : []),
+              ...(answer
+                ? [
+                    {
+                      id: 'answer',
+                      kind: 'domain' as const,
+                      label: 'Ответить',
+                      input: 'text+option' as const,
+                      ...(question ? { prompt: question } : {}),
+                      ...(options.length
+                        ? {
+                            choices: options.map((o) => ({
+                              id: o.id,
+                              label: o.label,
+                              ...(o.consequence ? { hint: o.consequence } : {}),
+                              ...(o.id === recommended ? { recommended: true } : {}),
+                            })),
+                          }
+                        : {}),
+                    },
+                  ]
+                : []),
+              ...(apply
+                ? [
+                    {
+                      id: 'apply',
+                      kind: 'domain' as const,
+                      label: rejected
+                        ? `Применить вопреки ревью (раунд ${r.round})`
+                        : 'Применить ответ',
+                      input: 'confirm' as const,
+                      ...(rejected && r.round !== undefined
+                        ? { round: r.round, prompt: findings }
+                        : {}),
+                    },
+                  ]
+                : []),
+              ...(operator ? [] : [handoffOf(ctx)]),
+            ],
+            covered: r.blocking ? unclaimed(ctx, [r.taskId]) : [],
+            basis: {
+              options: options.map((o) => ({ id: o.id, label: o.label })),
+              taskId: r.taskId,
+              requestId: r.requestId,
+              expectedVersion: r.version,
+              ...(rejected && r.round !== undefined ? { rejectedRound: r.round } : {}),
+              ...(confirmable ? { proposalDigest: proposal.digest } : {}),
+            },
+          };
+        })
+    );
   },
 };
 

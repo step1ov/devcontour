@@ -88,33 +88,6 @@ const center = (page: Page) => page.locator('[aria-label="Центр внима�
 const cardOf = (page: Page, key: string) => page.locator(`article[data-attention-key="${key}"]`);
 const liveStatus = (page: Page) => center(page).locator('[role="status"]').first();
 
-/** Ведущий готовит, проверяет и применяет ответ через агентский API (как input.spec). */
-async function leadApplies(request: APIRequestContext, requestId: string) {
-  const context = (await agent(request, 'input_context', { requestId })) as {
-    contextDigest: string;
-    answerDigest: string;
-  };
-  const review = await agent(request, 'input_review', {
-    requestId,
-    contextDigest: context.contextDigest,
-    authorRuntime: 'codex',
-  });
-  expect(review.approved).toBe(true);
-  const target = (await agent(request, 'input_target', {
-    requestId,
-    contextDigest: context.contextDigest,
-  })) as { version: number; targetDigest: string; problems: string[] };
-  expect(target.problems).toEqual([]);
-  const applied = await agent(request, 'input_apply', {
-    requestId,
-    answerDigest: context.answerDigest,
-    expectedVersion: target.version,
-    contextDigest: context.contextDigest,
-    targetDigest: target.targetDigest,
-  });
-  expect(applied.applied).toBe(true);
-}
-
 test('D05-A: from the center to the executor question, an answer, the wait for apply and the new attempt', async ({
   page,
   request,
@@ -152,22 +125,12 @@ test('D05-A: from the center to the executor question, an answer, the wait for a
   await form.getByLabel(/Ваш ответ/).fill('Оставьте JSON, как сейчас.');
   await form.getByRole('button', { name: 'Ответить' }).click();
   await expect(liveStatus(page)).toContainText('Ответ сохранён');
-  // Дальше — ведущий: карточка в группе ведущего, без кнопок решения.
-  const moved = cardOf(page, key);
-  await expect(moved).toHaveAttribute('data-attention-actor', 'lead');
-  await expect(moved).toContainText('Ведущий агент разберёт это сам');
-  await expect(moved.getByRole('button', { name: 'Ответить' })).toHaveCount(0);
-
-  // Ожидание применения видно в задаче; затем новая попытка.
-  expect((await request.post('/api/scheduler', { headers, data: { start: false } })).ok()).toBe(
-    true,
-  );
-  await leadApplies(request, own.requestId);
-  await moved.getByRole('link', { name: 'Открыть вопрос' }).click();
-  await expect(question).toContainText('Ответ применён, ждёт попытки');
-  expect((await request.post('/api/scheduler', { headers, data: { start: true } })).ok()).toBe(
-    true,
-  );
+  // Дальше — DevContour сам (режим agent, сессии ведущего нет): сервер
+  // проверяет и применяет ответ; действовать никому не нужно, карточки нет.
+  await expect(cardOf(page, key)).toHaveCount(0);
+  // Очередь идёт: применённый ответ сразу уходит в новую попытку
+  // («применён, ждёт попытки» под паузой — e2e/input.spec.ts).
+  await page.goto(`/?tab=list&board=${own.board}&task=${own.task}`);
   await expect
     .poll(async () => (await taskState(request, own.task))?.status, { timeout: 60000 })
     .toBe('done');
@@ -278,16 +241,17 @@ test('D05-B: keyboard only; focus stays on a card that moves and goes to the nex
   await expect(form).toHaveCount(0);
   await expect(answer).toBeFocused();
 
-  // Ответ целиком с клавиатуры: Ctrl+Enter отправляет. Карточка переходит
-  // к ведущему и сохраняет фокус.
+  // Ответ целиком с клавиатуры: Ctrl+Enter отправляет. Дальше ответ ведёт
+  // сервер (режим agent): действовать никому не нужно, карточка уходит, а
+  // фокус переходит к другой карточке группы, а не теряется на body.
   await page.keyboard.press('Enter');
   await page.keyboard.press('Space');
   await page.keyboard.press('Tab');
   await expect(form.getByLabel(/Ваш ответ/)).toBeFocused();
   await page.keyboard.type('Ответ с клавиатуры.');
   await page.keyboard.press('Control+Enter');
-  await expect(cardOf(page, keyB)).toHaveAttribute('data-attention-actor', 'lead');
-  await expect(cardOf(page, keyB)).toBeFocused();
+  await expect(cardOf(page, keyB)).toHaveCount(0);
+  await expect(center(page).locator('article[data-attention-key]:focus')).toHaveCount(1);
 
   // Карточка, решённая в другом месте, пока фокус в ней: фокус переходит к
   // следующей карточке группы, опрос не теряет его на body.
@@ -434,7 +398,8 @@ test('D05-B / D04-C: a version conflict replaces the card, keeps the typed text 
   const form = cardOf(page, key).locator('form');
   await form.getByLabel('JSON').check();
   await form.getByLabel(/Ваш ответ/).fill('Ответ из устаревшей вкладки.');
-  // Тем временем ответ дан из другой вкладки.
+  // Тем временем ответ дан из другой вкладки — изменением требований: такой
+  // ответ сервер сам не продолжает, карточка остаётся у ведущего.
   const view = (await (await request.get(`/api/tasks/${own.task}/input`)).json()) as {
     current: { version: number };
   };
@@ -443,7 +408,7 @@ test('D05-B / D04-C: a version conflict replaces the card, keeps the typed text 
     data: {
       text: 'Ответ из другой вкладки.',
       optionId: 'json',
-      kind: 'clarification',
+      kind: 'requirement-change',
       expectedVersion: view.current.version,
       idempotencyKey: 'other-tab-' + own.requestId.slice(-12),
     },
