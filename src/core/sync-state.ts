@@ -8,11 +8,13 @@ import {
   contractDigest,
   contractRedactionsOf,
   digest,
+  newerRedaction,
   sameObligations,
   scopeDigest,
   specDigest,
   type DevContour,
 } from './service.ts';
+import { textChecks } from './contract-text.ts';
 import { receiptProblems } from '../harness/receipt.ts';
 import { independentReviewer } from '../harness/policy.ts';
 import {
@@ -651,19 +653,36 @@ export function stateFromRecords(
       (local.get(a.id) ?? local.size + incoming.get(a.id)!) -
       (local.get(b.id) ?? local.size + incoming.get(b.id)!),
   );
-  // Консолидация переносится только как консолидация редакции того же
-  // документа с теми же обязательствами: иначе клон сохранил бы привязки
-  // задач к договору с другим смыслом. Порядок записей в Git не обязан
-  // совпадать с порядком реестра, поэтому сверяется сама ссылка.
+  // Консолидация переносится, только если она консолидирует непосредственно
+  // предыдущую редакцию того же документа (`previous` = `from`), с теми же
+  // обязательствами и проходит те же детерминированные проверки текста, что
+  // и при регистрации: короче, ID правил и якоря, на которые ссылаются
+  // соседние контракты, на месте. Иначе запись чужого клона сохраняла бы
+  // местные привязки задач к тексту, равносильность которого ничем не
+  // подтверждена здесь. Параллельная поправка той же редакции заменяет
+  // консолидацию по порядку редакций (`orderRedactions`), а не отвергается.
   for (const c of s.contracts) {
     if (!c.consolidates) continue;
+    const refuse = (why: string) => {
+      throw new Error(`Консолидация ${c.id} не принята: ${why}`);
+    };
     const from = c.source
       ? contractRedactionsOf(s.contracts, c.source, c.repositoryId).find(
           (x) => x.id === c.consolidates!.from,
         )
       : undefined;
-    if (!from || !sameObligations(from, c.artifacts ?? [], c.checks, c.underTest))
-      throw new Error('Консолидация не относится к редакции того же документа: ' + c.id);
+    if (!from) refuse('нет консолидируемой редакции того же документа');
+    if (c.previous !== undefined && c.previous !== from!.id)
+      refuse('консолидирует не непосредственно предыдущую редакцию');
+    if (!sameObligations(from!, c.artifacts ?? [], c.checks, c.underTest))
+      refuse('artifacts, checks или underTest отличаются от консолидируемой редакции');
+    const siblings = s.contracts.filter(
+      (x) => x.source !== c.source && !newerRedaction(s.contracts, x.id),
+    );
+    const checks = textChecks(from!.content, c.content, c.source!, siblings);
+    if (checks.longer) refuse('текст не короче консолидируемого');
+    if (checks.lost.length) refuse('нет ID правил ' + checks.lost.slice(0, 20).join(', '));
+    if (checks.broken.length) refuse('нет разделов ' + checks.broken.slice(0, 20).join('; '));
   }
   s.tasks = all
     .filter((x) => x.record.kind === 'task')

@@ -2,6 +2,8 @@ import { test } from 'node:test';
 import assert from 'node:assert/strict';
 import { fixture, input } from './helpers.ts';
 import {
+  contractDigest,
+  contractRedactionsOf,
   currentText,
   meaningRedactionsSinceConsolidation,
   newerRedaction,
@@ -201,8 +203,121 @@ test('F20: sync carries consolidates; a record of an older peer without it still
     ]);
     assert.throws(
       () => stateFromRecords(f.h, empty, forged as never, new Map()),
-      /Консолидация не относится/,
+      /Консолидация .* не принята: нет консолидируемой редакции/,
     );
+  } finally {
+    f.cleanup();
+  }
+});
+
+/** Экспорт состояния и импорт в пустой клон после правки записей `patch`. */
+function reimport(f: ReturnType<typeof registry>, patch: (records: Record<string, any>) => void) {
+  const empty = { ...f.store.read(), contracts: [], tasks: [], boards: [] };
+  const exported = recordsFromState(f.h, f.store.read());
+  for (const records of exported.values()) patch(records);
+  return stateFromRecords(f.h, empty, exported, new Map());
+}
+const contractRecord = (records: Record<string, any>, id: string) =>
+  Object.values(records).find((r) => r.kind === 'contract' && r.data.id === id);
+
+test('F20 M1: import re-checks a consolidation: the immediately preceding redaction, shorter text, ids kept', () => {
+  const f = registry();
+  try {
+    const m = f.h.contract(
+      'API',
+      'Rule REQ-1.\n\nRule REQ-2.\n\nAmended.\n',
+      agent,
+      undefined,
+      SOURCE,
+    );
+    const c = f.h.contract(
+      'API',
+      'REQ-1 REQ-2 amended',
+      agent,
+      undefined,
+      SOURCE,
+      [],
+      undefined,
+      [],
+      {
+        from: m.id,
+        review: 'R-1',
+      },
+    );
+    assert.equal(c.previous, m.id);
+    // Честная запись проходит.
+    assert.equal(supersededBy(reimport(f, () => {}).contracts, m.id), undefined);
+    // Консолидация не непосредственно предыдущей редакции.
+    assert.throws(
+      () =>
+        reimport(f, (r) => {
+          const rec = contractRecord(r, c.id);
+          if (rec) rec.data.consolidates = { from: f.c1.id, review: 'R-1' };
+        }),
+      /не непосредственно предыдущую/,
+    );
+    // Подделанный текст: пропал ID правила (digest пересчитан честно).
+    assert.throws(
+      () =>
+        reimport(f, (r) => {
+          const rec = contractRecord(r, c.id);
+          if (!rec) return;
+          rec.data.content = 'REQ-1 amended';
+          rec.data.digest = contractDigest(rec.data.content, undefined, undefined);
+        }),
+      /нет ID правил REQ-2/,
+    );
+    // Текст не короче.
+    assert.throws(
+      () =>
+        reimport(f, (r) => {
+          const rec = contractRecord(r, c.id);
+          if (!rec) return;
+          rec.data.content = 'Rule REQ-1.\n\nRule REQ-2.\n\nAmended, but longer than before.\n';
+          rec.data.digest = contractDigest(rec.data.content, undefined, undefined);
+        }),
+      /не короче/,
+    );
+  } finally {
+    f.cleanup();
+  }
+});
+
+test('F20 M1: a concurrent amendment of the consolidated redaction replaces the consolidation (safe order)', () => {
+  const f = registry();
+  try {
+    const base = f.store.read().contracts[0];
+    // Два клона: поправка M и консолидация F одной редакции c1; поправка
+    // утверждена раньше по часам — порядок всё равно ставит F сразу за c1.
+    const at = (iso: string) => ({ approvedAt: iso });
+    const m = {
+      ...base,
+      id: 'C-amend',
+      content: 'Rule REQ-1.\n\nRule REQ-2 amended.\n',
+      previous: f.c1.id,
+      ...at('2020-01-01T00:00:00.000Z'),
+    };
+    const fc = {
+      ...base,
+      id: 'C-consolidate',
+      content: 'REQ-1, REQ-2.',
+      previous: f.c1.id,
+      consolidates: { from: f.c1.id, review: 'R' },
+      ...at('2020-01-02T00:00:00.000Z'),
+    };
+    for (const contracts of [
+      [f.c1, m, fc],
+      [fc, m, f.c1],
+    ]) {
+      assert.deepEqual(
+        contractRedactionsOf(contracts, SOURCE, undefined).map((c) => c.id),
+        [f.c1.id, fc.id, m.id],
+      );
+      assert.equal(supersededBy(contracts, f.c1.id)?.id, m.id);
+      assert.equal(supersededBy(contracts, fc.id)?.id, m.id);
+      assert.equal(supersededBy(contracts, m.id), undefined);
+      assert.equal(meaningRedactionsSinceConsolidation(contracts, SOURCE, undefined), 1);
+    }
   } finally {
     f.cleanup();
   }

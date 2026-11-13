@@ -17,6 +17,9 @@ import {
   reviewConsolidationRound,
 } from './agent-control.ts';
 import { pinArtifacts } from './contract-artifacts.ts';
+import { idTokens, textChecks } from '../core/contract-text.ts';
+
+export { anchors, headings, idTokens, referencedAnchors, slug } from '../core/contract-text.ts';
 
 /**
  * Консолидация контракта (F20): переписать документ, накопивший поправки
@@ -33,76 +36,9 @@ import { pinArtifacts } from './contract-artifacts.ts';
  * редакции сохраняют привязку (`supersededBy`).
  */
 
-/** ID-токены требований и правил: REQ-12, API-3, AC-31. */
-export const ID_TOKEN = /\b[A-Z]{2,}-\d+/g;
 /** Предел выдержек соседей и вопросов в запросе ревьюера. */
 const EXCERPTS = 40;
 const INPUTS = 20;
-
-export function idTokens(text: string) {
-  return [...new Set(text.match(ID_TOKEN) ?? [])].sort();
-}
-
-/** Якорь заголовка в форме GitHub: нижний регистр, без пунктуации, пробелы — дефисы. */
-export function slug(heading: string) {
-  return heading
-    .trim()
-    .toLowerCase()
-    .replace(/[^\p{L}\p{N}\s_-]/gu, '')
-    .replace(/\s/g, '-');
-}
-
-/**
- * Якоря документа: заголовки Markdown (повтор получает суффикс `-1`, `-2`,
- * как у GitHub) и явные `id`/`name` HTML и `{#id}`. Заголовки внутри блоков
- * кода не считаются.
- */
-export function anchors(text: string) {
-  const out = new Set<string>();
-  const counts = new Map<string, number>();
-  let fence: string | undefined;
-  for (const line of text.split('\n')) {
-    const marker = /^\s{0,3}(`{3,}|~{3,})/.exec(line)?.[1];
-    if (marker) {
-      if (!fence) fence = marker[0];
-      else if (marker[0] === fence) fence = undefined;
-      continue;
-    }
-    if (fence) continue;
-    const heading = /^\s{0,3}#{1,6}\s+(.*?)\s*#*\s*$/.exec(line)?.[1];
-    if (heading !== undefined) {
-      const explicit = /\{#([^}\s]+)\}\s*$/.exec(heading)?.[1];
-      if (explicit) out.add(explicit.toLowerCase());
-      const base = slug(heading.replace(/\{#[^}]*\}\s*$/, ''));
-      const n = counts.get(base) ?? 0;
-      counts.set(base, n + 1);
-      out.add(n ? `${base}-${n}` : base);
-    }
-    for (const m of line.matchAll(/<a\s[^>]*\b(?:id|name)\s*=\s*["']([^"']+)["']/gi))
-      out.add(m[1].toLowerCase());
-  }
-  return out;
-}
-
-const escape = (s: string) => s.replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
-
-/** Якоря документа `file`, на которые ссылается текст соседа: `catalog.md#rules`. */
-export function referencedAnchors(text: string, file: string) {
-  const name = escape(basename(file));
-  const found = new Set<string>();
-  for (const m of text.matchAll(
-    new RegExp(`(?:^|[^\\w./-])(?:[\\w./-]*/)?${name}#([^\\s)\\]>"'\`]+)`, 'g'),
-  )) {
-    let anchor = m[1];
-    try {
-      anchor = decodeURIComponent(anchor);
-    } catch {
-      /* Оставить как есть. */
-    }
-    found.add(anchor.toLowerCase());
-  }
-  return [...found];
-}
 
 /** Строки соседа, упоминающие документ, с соседними строками — для ревьюера. */
 function excerpts(text: string, file: string) {
@@ -191,36 +127,28 @@ export async function consolidationPlan(
   }
   if (content === current.content)
     throw new DomainError('Текст совпадает с действующей редакцией: консолидировать нечего', 400);
-  if (content.length >= current.content.length)
-    throw new DomainError(
-      `Консолидация сокращает документ: новый текст — ${content.length} знаков, действующий — ${current.content.length}. Дополнение правил — обычный contract-change`,
-      400,
-    );
-  const ids = idTokens(current.content);
-  const kept = new Set(idTokens(content));
-  const lost = ids.filter((id) => !kept.has(id));
-  if (lost.length)
-    throw new DomainError(
-      `Консолидация не может убрать идентификаторы правил: в новом тексте нет ${lost.slice(0, 30).join(', ')}. Верните их на место переписанных правил`,
-      400,
-    );
   // Соседние зарегистрированные контракты: действующие редакции других
   // документов. Ссылка на якорь этого документа должна остаться рабочей.
   const siblings = s.contracts.filter(
     (c) => c.source !== file && !newerRedaction(s.contracts, c.id) && typeof c.content === 'string',
   );
-  const before = anchors(current.content);
-  const after = anchors(content);
-  const broken = siblings.flatMap((c) =>
-    referencedAnchors(c.content, file)
-      .filter((a) => before.has(a) && !after.has(a))
-      .map((a) => `${c.source ?? c.title}: #${a}`),
-  );
-  if (broken.length)
+  const checks = textChecks(current.content, content, file, siblings);
+  if (checks.longer)
     throw new DomainError(
-      `Соседние контракты ссылаются на разделы, которых в новом тексте нет: ${broken.slice(0, 20).join('; ')}. Сохраните эти заголовки или якоря`,
+      `Консолидация сокращает документ: новый текст — ${content.length} знаков, действующий — ${current.content.length}. Дополнение правил — обычный contract-change`,
       400,
     );
+  if (checks.lost.length)
+    throw new DomainError(
+      `Консолидация не может убрать идентификаторы правил: в новом тексте нет ${checks.lost.slice(0, 30).join(', ')}. Верните их на место переписанных правил`,
+      400,
+    );
+  if (checks.broken.length)
+    throw new DomainError(
+      `Соседние контракты ссылаются на разделы, которых в новом тексте нет: ${checks.broken.slice(0, 20).join('; ')}. Сохраните эти заголовки или якоря`,
+      400,
+    );
+  const ids = idTokens(current.content);
   return {
     current,
     content,

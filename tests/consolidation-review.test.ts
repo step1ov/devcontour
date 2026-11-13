@@ -13,11 +13,12 @@ import { parseProposal } from '../src/runner/agent-control.ts';
 import { CONSOLIDATED, consolidationStage, reviewers } from './consolidation-fixture.ts';
 
 test('F20: deterministic helpers: id tokens, heading anchors and sibling references', () => {
-  assert.deepEqual(idTokens('REQ-2 and REQ-10, API-3; REQ-2 again; X-1, req-4'), [
-    'API-3',
-    'REQ-10',
-    'REQ-2',
-  ]);
+  assert.deepEqual(
+    idTokens(
+      'REQ-2 and REQ-10, API-3; REQ-2 again; X-1, req-4, ТР-4, REQ-1.2 and REQ-1.3; UTF-8, SHA-256, ISO-8601; pre-REQ-9',
+    ),
+    ['API-3', 'REQ-1.2', 'REQ-1.3', 'REQ-10', 'REQ-2', 'req-4', 'ТР-4'].sort(),
+  );
   const a = anchors(
     [
       '# Catalog',
