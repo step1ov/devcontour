@@ -92,10 +92,15 @@ export class LeadRunner {
     this.halt();
     await this.pending;
     await Promise.allSettled([...this.joints.values()].map((f) => f.promise));
+    await this.resumer.settled();
   }
-  /** Дождаться начатых стадиями совместных проверок (их итог читает следующий такт). */
+  /**
+   * Дождаться начатых стадиями совместных проверок (их итог читает следующий
+   * такт) и полётов прохода после ответа.
+   */
   async settled() {
     await Promise.allSettled([...this.joints.values()].map((f) => f.promise));
+    await this.resumer.settled();
   }
   /**
    * Начать совместную проверку вне такта: стадия уже ответила «жду», и
@@ -145,16 +150,13 @@ export class LeadRunner {
   private async advance() {
     // Ответы на вопросы исполнителя: сервер доводит цепочку после ответа
     // сам — с заданием доски и без него (оно только ждёт `waiting:input`).
-    if (!this.stopping && this.h.config.approvalMode === 'agent') {
-      const controller = (this.controller = new AbortController());
+    // Такт только начинает полёты прохода и не ждёт ревью.
+    if (!this.stopping && this.h.config.approvalMode === 'agent')
       try {
-        await this.resumer.tick(controller.signal);
+        this.resumer.tick();
       } catch {
         /* Причины — в записях прохода; задания идут дальше. */
-      } finally {
-        this.controller = undefined;
       }
-    }
     const owners = [undefined, ...repositories(this.h.config).map((r) => r.id)];
     for (const owner of owners)
       for (const saved of this.workflow.list(owner)) {

@@ -93,7 +93,7 @@ const resumeNext = (resume: ResumeView): string | undefined => {
     case 'failed':
       return `DevContour could not review the answer automatically (${resume.detail ?? 'review failed'}): fix the cause (runtime, budget), then run input_context, input_review, input_target and input_apply yourself`;
     case 'blocked':
-      return `the answer is reviewed but cannot be applied: ${resume.detail ?? 'no continuation target'}; resolve the cause (input_target names it), then input_target and input_apply`;
+      return `the answer is reviewed but cannot be applied: ${resume.detail ?? 'no continuation target'}; resolve that cause, then input_target and input_apply${resume.detail?.startsWith('ATTEMPTS_EXHAUSTED') ? ' with reset.reason (the attempt budget of the task is spent)' : ''}`;
     case 'needs-lead':
       return resume.detail === 'requirement-change'
         ? 'the answer changes requirements: reopen and respecify the task, input_supersede with the same task, carry the answer (input_context, input_review, input_target, input_apply), then approve the task'
@@ -1453,9 +1453,10 @@ export class InputService {
 
   /**
    * Идущие попытки графа задачи (её доски) — то, чего ждёт применение ответа
-   * движком (`{applied: false, active}`). Сведение для ведущего, не отказ.
+   * движком (`{applied: false, active}`). Сведение для ведущего, не отказ;
+   * только чтение (проход сервера проверяет его до применения).
    */
-  private activeInGraph(taskId: string) {
+  activeInGraph(taskId: string) {
     const state = this.h.store.read();
     const graph = (id: string) => boardOf(state, id)?.id ?? UNASSIGNED_GRAPH;
     const own = graph(taskId);
@@ -1509,8 +1510,12 @@ export class InputService {
   apply(
     raw: unknown,
     actor: InputActorKind,
-    /** Раунд отклонённого ревью, который оператор видел и подтвердил (панель, CLI). */
-    options: { confirmRejectedRound?: number } = {},
+    /**
+     * `confirmRejectedRound` — раунд отклонённого ревью, который оператор видел
+     * и подтвердил (панель, CLI); `origin: 'server'` — применяет проход
+     * сервера после ответа оператора (журнал называет это).
+     */
+    options: { confirmRejectedRound?: number; origin?: 'server' } = {},
   ) {
     const input = inputOperationInputs.input_apply.parse(raw);
     const mode = this.h.config.approvalMode;
@@ -1529,7 +1534,11 @@ export class InputService {
     const { store, engine } = executionOf(this.h);
     try {
       return store.host('input.applied', (ht) => {
-        ht.journal({ taskId: request.workId, requestId: request.id });
+        ht.journal({
+          taskId: request.workId,
+          requestId: request.id,
+          ...(options.origin ? { origin: options.origin, trigger: 'operator-answer' } : {}),
+        });
         // Область — в транзакции применения: правка задачи, записанная
         // между чтением и записью, видна здесь.
         const task = ht.state.tasks.find((t) => t.id === request.workId);

@@ -381,7 +381,7 @@ const en: Catalog = {
       (p.phase === 'failed'
         ? `DevContour could not review the answer to ${requestId} automatically${why}: fix the cause (runtime, budget), then run ${chain} yourself.`
         : p.phase === 'blocked'
-          ? `The answer to ${requestId} is reviewed but cannot be applied${why}: resolve the cause (input_target names it), then input_target and input_apply.`
+          ? `The answer to ${requestId} is reviewed but cannot be applied${why}: resolve that cause, then input_target and input_apply${p.detail?.startsWith('ATTEMPTS_EXHAUSTED') ? ' with reset.reason (the attempt budget of the task is spent)' : ''}.`
           : p.phase === 'needs-lead'
             ? p.detail === 'requirement-change'
               ? `The answer to ${requestId} changes requirements: reopen and respecify task ${taskId}, input_supersede with the same task, carry the answer (${chain}), then approve the task.`
@@ -617,7 +617,7 @@ const ru: Catalog = {
       (p.phase === 'failed'
         ? `DevContour не смог автоматически проверить ответ на ${requestId}${why}: устраните причину (рантайм, бюджет) и выполните ${chain} сами.`
         : p.phase === 'blocked'
-          ? `Ответ на ${requestId} проверен, но применить его нельзя${why}: устраните причину (её называет input_target), затем input_target и input_apply.`
+          ? `Ответ на ${requestId} проверен, но применить его нельзя${why}: устраните эту причину, затем input_target и input_apply${p.detail?.startsWith('ATTEMPTS_EXHAUSTED') ? ' с reset.reason (бюджет попыток задачи исчерпан)' : ''}.`
           : p.phase === 'needs-lead'
             ? p.detail === 'requirement-change'
               ? `Ответ на ${requestId} меняет требования: переоткройте задачу ${taskId} с новой постановкой, input_supersede той же задачей, перенесите ответ (${chain}), затем утвердите задачу.`

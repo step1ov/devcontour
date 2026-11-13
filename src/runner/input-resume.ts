@@ -1,16 +1,19 @@
-// Продолжение после ответа без отдельной сессии ведущего (режим `agent`).
+// Продолжение после ответа оператора без отдельной сессии ведущего (режим `agent`).
 //
 // Ответ на вопрос исполнителя сам задачу не продолжает: снимок с ответом
 // (`input_context`) → независимое ревью ответа (`input_review`, вызов модели
 // ревьюера по политике `review.plan`) → цель (`input_target`) → применение
 // (`input_apply`). Раньше эту цепочку вёл только ведущий агент в своей
 // сессии, и ответ оператора на критический вопрос без живой сессии лежал
-// «сохранённым» бесконечно. Теперь её ведёт сервер в такте цикла ведущего —
-// теми же операциями `InputService`, с теми же отказами, ревьюером, арендой
-// ревью и бюджетами; меняется только то, кто их вызывает. Решения после
-// отклонённого ревью, причины цели и изменение требований остаются ведущему
-// и оператору: проход их не обходит.
-import { latestAnswer, type InputRequest } from 'devcontour-harness';
+// «сохранённым» бесконечно. Теперь её ведёт сервер — теми же операциями
+// `InputService`, с теми же отказами, ревьюером, арендой ревью и бюджетами;
+// меняется только то, кто их вызывает. Решения после отклонённого ревью,
+// причины цели, изменение требований и ответы ведущего (он доводит их сам)
+// остаются ведущему и оператору: проход их не обходит.
+//
+// Каждый запрос — свой полёт, как совместная проверка ChangeSet: такт цикла
+// ведущего только начинает полёты и не ждёт ревью, задания досок идут дальше.
+import { latestAnswer } from 'devcontour-harness';
 import type { DevContour } from '../core/service.ts';
 import { SERVER_STOPPING } from '../core/service.ts';
 import { executionOf } from '../harness/execution.ts';
@@ -21,21 +24,34 @@ import {
   RESUME_BACKOFF_MS,
   RESUME_DRIVER,
   RESUME_REVIEWS,
+  coveringRound,
+  needsReview,
   resumeAuthor,
+  resumeHeld,
   resumeRecord,
   type ResumeRecord,
 } from '../application/input-resume.ts';
 import { adapters, type AgentAdapter } from './adapters.ts';
 
-/** Как часто проход перепроверяет ожидание идущих попыток доски. */
+/** Первая перепроверка ожидания идущих попыток доски; удваивается до предела. */
 export const RESUME_ACTIVE_RECHECK_MS = 5_000;
+export const RESUME_ACTIVE_RECHECK_MAX_MS = 60_000;
 /** Как часто проход перепроверяет причины, по которым ответ нельзя применить. */
 export const RESUME_BLOCKED_RECHECK_MS = 60_000;
+/** Просмотр кандидатов без изменения данных — не чаще. */
+export const RESUME_SCAN_MS = 30_000;
+/** Сколько ревью ответов идёт одновременно. */
+export const RESUME_PARALLEL = 2;
 
 const codeOf = (e: unknown) => (e as { code?: unknown } | undefined)?.code;
 const messageOf = (e: unknown) => (e instanceof Error ? e.message : String(e)).slice(0, 1000);
 
 export class InputResumer {
+  private flights = new Map<string, Promise<void>>();
+  /** Перепроверки без записи (ожидание попыток, причины цели): ID запроса → срок и шаг. */
+  private rechecks = new Map<string, { at: number; delay: number }>();
+  private scanned?: { revision: number; at: number };
+  private controller = new AbortController();
   constructor(
     readonly h: DevContour,
     readonly root: string,
@@ -57,13 +73,19 @@ export class InputResumer {
     );
   }
 
-  /** Снять отметку при остановке: без сервера цепочку снова ведёт ведущий агент. */
+  /** Остановить: идущие ревью прерываются, отметка снимается — цепочку снова ведёт ведущий. */
   stop() {
+    this.controller.abort();
     try {
       this.h.store.atomic(() => this.h.store.deleteLocal(RESUME, undefined, RESUME_DRIVER));
     } catch {
       /* Хранилище закрыто: отметка истечёт сама. */
     }
+  }
+
+  /** Дождаться начатых полётов (остановка сервера, тесты). */
+  async settled() {
+    while (this.flights.size) await Promise.allSettled([...this.flights.values()]);
   }
 
   private save(record: ResumeRecord, event?: Record<string, unknown>) {
@@ -84,142 +106,191 @@ export class InputResumer {
     });
   }
 
-  /** Причина, по которой ответ нельзя применить: журнал — только новой причины. */
-  private blocked(prior: ResumeRecord | undefined, record: ResumeRecord) {
-    const same = prior?.phase === 'blocked' && prior.problems?.join() === record.problems?.join();
-    this.save(record, same ? undefined : { problems: record.problems });
+  private recheck(requestId: string, base: number, max = base) {
+    const prev = this.rechecks.get(requestId);
+    const delay = prev ? Math.min(prev.delay * 2, max) : base;
+    this.rechecks.set(requestId, { at: Date.now() + delay, delay });
   }
 
   /**
-   * Один такт: каждый вопрос, который сервер ведёт сейчас (`resume.auto` или
-   * повтор цели после причины), — один шаг цепочки. Отказ одного запроса
-   * записывается в его проход и не останавливает остальные.
+   * Один такт: начать полёты для запросов, которые сервер ведёт сейчас. Ни
+   * ревью, ни применение такт не ждёт. На паузе — ничего (пауза человека,
+   * остановка, применение конфигурации, отказ рантайма).
    */
-  async tick(signal?: AbortSignal) {
-    if (this.h.config.approvalMode !== 'agent') return;
+  tick() {
+    if (this.h.config.approvalMode !== 'agent' || this.controller.signal.aborted) return;
     this.beat();
+    if (resumeHeld(this.h)) return;
     const now = Date.now();
-    // Ожидание идущих попыток и причины цели перепроверяются реже такта:
-    // каждая проверка применения пишет журнал.
-    const since = (requestId: string, ms: number) => {
-      const at = resumeRecord(this.h, requestId)?.at;
-      return !at || now - Date.parse(at) >= ms;
-    };
-    const due = this.service.list().requests.filter((r) => {
-      switch (r.resume?.phase) {
-        case 'pending':
-        case 'applying':
-        case 'reviewing':
-          return true;
-        case 'waiting-active':
-          return since(r.requestId, RESUME_ACTIVE_RECHECK_MS);
-        case 'blocked':
-          return since(r.requestId, RESUME_BLOCKED_RECHECK_MS);
-        case 'retry':
-          return !r.resume?.until || Date.parse(r.resume.until) <= now;
-        default:
-          return false;
-      }
-    });
-    for (const summary of due) {
-      if (signal?.aborted) return;
-      try {
-        await this.drive(summary.requestId, summary.state, summary.boardId ?? undefined, signal);
-      } catch {
-        /* Причина записана в проход; следующий такт прочитает свежее состояние. */
-      }
+    // Просмотр — только когда данные изменились или подошёл срок перепроверки.
+    const revision = this.h.store.revision();
+    const timed = [...this.rechecks.values()].some((r) => r.at <= now);
+    if (
+      this.scanned &&
+      this.scanned.revision === revision &&
+      now - this.scanned.at < RESUME_SCAN_MS &&
+      !timed
+    )
+      return;
+    this.scanned = { revision, at: now };
+    const { engine } = executionOf(this.h);
+    // Дешёвый отбор по запросам движка; сводка — только по кандидатам.
+    const candidates = engine
+      .inputRequests()
+      .filter(
+        (r) =>
+          r.kind === 'question' &&
+          r.blocking &&
+          r.lifecycle === 'answered' &&
+          latestAnswer(r)?.actor.kind === 'operator',
+      );
+    for (const request of candidates) {
+      if (this.flights.size >= RESUME_PARALLEL) return;
+      if (this.flights.has(request.id)) continue;
+      const summary = this.service
+        .list({ taskId: request.workId })
+        .requests.find((r) => r.requestId === request.id);
+      const resume = summary?.resume;
+      const recheck = this.rechecks.get(request.id);
+      const due =
+        resume?.phase === 'pending' ||
+        resume?.phase === 'applying' ||
+        (resume?.phase === 'retry' && (!resume.until || Date.parse(resume.until) <= now)) ||
+        ((resume?.phase === 'waiting-active' || resume?.phase === 'blocked') &&
+          (!recheck || recheck.at <= now));
+      if (!due) continue;
+      const flight = this.drive(request.id)
+        .catch(() => {
+          /* Причина записана в проход; следующий такт прочитает свежее состояние. */
+        })
+        .finally(() => {
+          this.flights.delete(request.id);
+        });
+      this.flights.set(request.id, flight);
     }
   }
 
-  private async drive(
-    requestId: string,
-    state: string,
-    boardId: string | undefined,
-    signal?: AbortSignal,
-  ) {
+  private async drive(requestId: string) {
+    await new Promise<void>((resolve) => setImmediate(resolve));
+    const signal = this.controller.signal;
+    if (signal.aborted || this.h.config.approvalMode !== 'agent' || resumeHeld(this.h)) return;
     const service = this.service;
     const { engine } = executionOf(this.h);
-    const request: InputRequest = engine.inputRequest(requestId);
+    const request = engine.inputRequest(requestId);
     const answer = latestAnswer(request);
     const task = this.h.store.read().tasks.find((t) => t.id === request.workId);
     if (!answer || !task) return;
+    // Состояние — свежее, а не прочитанное при отборе.
+    const summary = service
+      .list({ taskId: task.id })
+      .requests.find((r) => r.requestId === requestId);
+    if (!summary?.resume || summary.resume.trigger !== 'operator') return;
+    const state = summary.state;
     const saved = resumeRecord(this.h, requestId);
     const prior = saved?.answerDigest === answer.digest ? saved : undefined;
+    const author = prior?.author ?? resumeAuthor(this.h, task, summary.boardId ?? undefined);
+    if (!author) return;
     const base: Omit<ResumeRecord, 'phase' | 'at'> = {
       requestId,
       taskId: task.id,
       answerDigest: answer.digest,
       revision: answer.revision,
       trigger: answer.actor.kind,
+      author,
       reviews: prior?.reviews ?? 0,
     };
+    const record = (phase: ResumeRecord['phase'], extra: Partial<ResumeRecord> = {}) => ({
+      ...base,
+      phase,
+      at: new Date().toISOString(),
+      ...extra,
+    });
     let contextDigest: string | undefined;
-    if (state === 'answer-saved' || state === 'stale') {
-      const author = resumeAuthor(this.h, task, boardId);
-      if (!author || base.reviews >= RESUME_REVIEWS) return;
+    if (needsReview(this.h, request, state, task)) {
+      // Предел — явная остановка прохода: карточка ведущего и шаг передачи.
+      if (base.reviews >= RESUME_REVIEWS) {
+        if (prior?.phase !== 'failed')
+          this.save(record('failed', { error: prior?.error ?? 'достигнут предел ревью ответа' }), {
+            error: 'review limit reached',
+          });
+        return;
+      }
+      const rounds = () => engine.read((v) => inputReviewRounds(v, requestId).length);
+      const before = rounds();
       // Ревью учтено до вызова модели: перезапуск лишнего вызова не получает.
-      const reviewing: ResumeRecord = {
-        ...base,
+      const reviewing = record('reviewing', {
         reviews: base.reviews + 1,
-        phase: 'reviewing',
-        at: new Date().toISOString(),
-      };
-      this.save(reviewing, { authorRuntime: author });
+        leaseUntil: Date.now() + this.h.config.runTimeoutMs + this.h.config.leaseMs,
+      });
+      this.save(reviewing, { authorRuntime: author.runtime, authorSource: author.source });
       let review;
       try {
         const context = await service.context({ requestId });
         review = await service.review(
-          { requestId, contextDigest: context.contextDigest, authorRuntime: author },
+          { requestId, contextDigest: context.contextDigest, authorRuntime: author.runtime },
           signal,
         );
         contextDigest = review.contextDigest ?? context.contextDigest;
       } catch (error) {
-        // Ревью уже ведёт другой (ведущий агент): этот такт его не считает.
+        // Ревью уже ведёт другой (ведущий агент): этот проход его не считает.
         if (codeOf(error) === 'REVIEW_IN_PROGRESS') {
           if (prior) this.save(prior);
           else this.h.store.atomic(() => this.h.store.deleteLocal(RESUME, undefined, requestId));
           return;
         }
-        const stopping = signal?.aborted || messageOf(error) === SERVER_STOPPING;
+        // Остановка сервера оборвала ревью без раунда: попытка возвращается.
+        const stopping = signal.aborted || messageOf(error) === SERVER_STOPPING;
+        const reviews = stopping && rounds() === before ? base.reviews : reviewing.reviews;
         this.save(
-          {
-            ...reviewing,
-            phase: 'failed',
-            at: new Date().toISOString(),
+          record('failed', {
+            reviews,
             error: messageOf(error),
             notBefore:
-              Date.now() + (stopping ? 0 : RESUME_BACKOFF_MS * 2 ** (reviewing.reviews - 1)),
-          },
+              Date.now() + (stopping ? 0 : RESUME_BACKOFF_MS * 2 ** Math.max(0, reviews - 1)),
+          }),
           { error: messageOf(error) },
         );
         return;
       }
+      // Считается только записанный раунд: повтор одобренного раунда — не ревью.
+      base.reviews = rounds() > before ? reviewing.reviews : base.reviews;
       if (!review.approved) {
-        // Отклонённое ревью — решение людей и ведущего (состояние
-        // `review-rejected`): проход дальше не идёт.
-        this.save(
-          { ...reviewing, phase: 'rejected', at: new Date().toISOString() },
-          { round: review.round },
-        );
+        // Отклонённое ревью — решение оператора (состояние `review-rejected`).
+        this.save(record('rejected'), { round: review.round });
+        return;
+      }
+      // Режим или пауза могли смениться за время ревью: применение — потом.
+      if (this.h.config.approvalMode !== 'agent' || resumeHeld(this.h)) {
+        this.save(record('waiting-active'));
         return;
       }
     } else {
       contextDigest =
-        engine.read((v) => inputReviewRounds(v, requestId).at(-1))?.contextDigest ?? undefined;
+        state === 'stale'
+          ? coveringRound(this.h, request, task)
+          : (engine.read((v) => inputReviewRounds(v, requestId).at(-1))?.contextDigest ??
+            undefined);
       if (!contextDigest) return;
     }
-    const current = (phase: ResumeRecord['phase'], extra: Partial<ResumeRecord> = {}) => ({
-      ...base,
-      ...(state === 'answer-saved' || state === 'stale' ? { reviews: base.reviews + 1 } : {}),
-      phase,
-      at: new Date().toISOString(),
-      ...extra,
-    });
+    const blocked = (problems: string[]) => {
+      this.recheck(requestId, RESUME_BLOCKED_RECHECK_MS);
+      if (prior?.phase === 'blocked' && prior.problems?.join() === problems.join()) return;
+      this.save(record('blocked', { problems }), { problems });
+    };
+    const waiting = () => {
+      this.recheck(requestId, RESUME_ACTIVE_RECHECK_MS, RESUME_ACTIVE_RECHECK_MAX_MS);
+      // Запись и журнал — только при входе в ожидание.
+      if (prior?.phase !== 'waiting-active') this.save(record('waiting-active'), {});
+    };
+    // Идущие попытки доски — проверка только чтением: применение без них.
+    if (service.activeInGraph(task.id).length) {
+      waiting();
+      return;
+    }
     try {
       const target = service.target({ requestId, contextDigest });
       if (target.problems.length || !target.targetDigest) {
-        const problems = target.problems.length ? target.problems : ['нет основания продолжения'];
-        this.blocked(prior, current('blocked', { problems }));
+        blocked(target.problems.length ? target.problems : ['нет основания продолжения']);
         return;
       }
       const applied = service.apply(
@@ -231,24 +302,22 @@ export class InputResumer {
           targetDigest: target.targetDigest,
         },
         'lead',
+        { origin: 'server' },
       );
       if (applied.applied) {
-        this.save(current('applied'), { applied: true });
+        this.rechecks.delete(requestId);
+        this.save(record('applied'), { applied: true });
         return;
       }
       if ('blocker' in applied && applied.blocker) {
-        const problems = [applied.blocker.message];
-        this.blocked(prior, current('blocked', { problems }));
+        blocked([`${applied.blocker.code}: ${applied.blocker.message}`]);
         return;
       }
-      // Идут попытки графа доски: применение подождёт их окончания.
-      // Время записи — начало следующей перепроверки; журнал — только при входе.
-      this.save(current('waiting-active'), prior?.phase === 'waiting-active' ? undefined : {});
+      waiting();
     } catch (error) {
       // Отказ цели или применения (версия, область, конфликт с ведущим):
-      // без вызова модели, следующий такт перечитает состояние.
-      const problems = [messageOf(error)];
-      this.blocked(prior, current('blocked', { problems }));
+      // без вызова модели, следующая перепроверка перечитает состояние.
+      blocked([messageOf(error)]);
     }
   }
 }

@@ -302,7 +302,16 @@ const samples: { [C in HintCode]: (HintSubject & Extract<HintOf, { code: C }>)[]
   ],
   'apply-auto': [
     { code: 'apply-auto', params: { phase: 'reviewing', trigger: 'operator' }, input: input1 },
-    { code: 'apply-auto', params: { phase: 'grace', trigger: 'lead' }, input: input1 },
+    {
+      code: 'apply-auto',
+      params: { phase: 'paused', trigger: 'operator', detail: 'operator' },
+      input: input1,
+    },
+    {
+      code: 'apply-auto',
+      params: { phase: 'blocked', trigger: 'operator', detail: 'ATTEMPTS_EXHAUSTED: spent' },
+      input: input1,
+    },
     {
       code: 'apply-auto',
       params: { phase: 'failed', trigger: 'operator', detail: 'reviewer is down' },
@@ -315,7 +324,7 @@ const samples: { [C in HintCode]: (HintSubject & Extract<HintOf, { code: C }>)[]
     },
     {
       code: 'apply-auto',
-      params: { phase: 'needs-lead', trigger: 'lead', detail: 'requirement-change' },
+      params: { phase: 'needs-lead', trigger: 'operator', detail: 'requirement-change' },
       input: input1,
     },
     {
@@ -499,9 +508,10 @@ test('Подсказки шага: новая конфигурация setup п�
  * `proposed`; добавлены образцы `apply-rejected` с `operatorAnswers` и
  * `proposed`; прочие образцы байтово прежние.
  * Намеренное изменение: добавлены образцы кода `apply-auto` (цепочку после
- * ответа ведёт сервер); прочие образцы байтово прежние.
+ * ответа оператора ведёт сервер: идёт, на паузе, остановлен — в том числе
+ * исчерпанным бюджетом попыток); прочие образцы байтово прежние.
  */
-const ENGLISH_SAMPLES_SHA256 = '5acf2aad6463eeb65c368e109739ddb5a11e7235ed55021d2a0eb9ac6477fd22';
+const ENGLISH_SAMPLES_SHA256 = '079cb335165f3e63e74a0d32d9007d96c2266b608a17b3a8341edf348b9b513e';
 
 test('Подсказки шага: английские тексты образцов закреплены', () => {
   assert.equal(

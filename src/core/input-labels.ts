@@ -168,12 +168,10 @@ const clock = (iso?: string) =>
  * кто нужен и что сделать. Пустая строка — фаза без подписи.
  */
 export function resumeText(r: ResumeLabel): string {
-  const accepted = r.trigger === 'operator' ? 'Ответ принят' : 'Ответ ведущего принят';
+  const accepted = 'Ответ принят';
   switch (r.phase) {
     case 'pending':
       return `${accepted} — DevContour продолжает: проверка ответа начнётся в ближайшие секунды`;
-    case 'grace':
-      return `${accepted} — ведущий агент доводит его сам; если он не начнёт проверку${r.until ? ' до ' + clock(r.until) : ''}, DevContour продолжит без него`;
     case 'reviewing':
       return `${accepted} — DevContour продолжает: проверка ответа (независимое ревью)`;
     case 'applying':
@@ -208,8 +206,6 @@ export function resumeBadge(r: ResumeLabel): string {
     case 'applying':
     case 'waiting-active':
       return 'Ответ принят: применение';
-    case 'grace':
-      return 'Ответ ведущего принят';
     case 'retry':
       return 'Ответ принят: повтор проверки';
     case 'paused':
