@@ -14,15 +14,23 @@ import {
   writeFileSync,
 } from 'node:fs';
 import { join } from 'node:path';
-import { currentText, DevContour, digest, specDigest } from '../core/service.ts';
+import { currentText, DevContour, digest, scopeDigest, specDigest } from '../core/service.ts';
 import {
   DomainError,
   requireValue,
   type Board,
+  type Config,
   type DevContourState,
+  type Repository,
   type Task,
 } from '../core/model.ts';
-import { repositories, repository, roleBinding, reviewerBinding } from '../core/repositories.ts';
+import {
+  expandGates,
+  repositories,
+  repository,
+  roleBinding,
+  reviewerBinding,
+} from '../core/repositories.ts';
 import { identitySchema } from '../core/sync-model.ts';
 import { LeadWorkflow } from '../core/lead-workflow.ts';
 import { queueStopOf } from './queue-stop.ts';
@@ -37,6 +45,47 @@ import {
 } from 'devcontour-harness';
 
 const id = z.string().regex(/^[A-Za-z0-9_-]{1,80}$/);
+
+const gateView = (repo: Repository, ids: string[]) =>
+  ids.map((id) => {
+    const g = repo.gates.find((g) => g.id === id)!;
+    return { id, kind: g.kind, ...(g.when ? { when: g.when } : {}) };
+  });
+
+/**
+ * Gates задачи в том виде, в каком их исполняет попытка (`requiredGates`
+ * harness — `expandGateRefs` области): `gates` задачи с раскрытыми группами
+ * или, без области, весь профиль компонента (`gateScope`). Условный gate
+ * (`when.paths`) из области исполняется, только если diff фазы задевает его
+ * шаблоны, иначе записывается как `not-applicable`. `outsideScope` — gates
+ * профиля вне области задачи: их исполняет другая задача доски или, если
+ * ни одна, приёмка доски один раз на итоговом SHA (`coverageGaps`).
+ * `consumerGates` — проверки потребителей в их компонентах. Область,
+ * которую профиль уже не раскрывает, — `gatesError` вместо списков.
+ */
+export function taskGates(config: Config, t: Pick<Task, 'repositoryId' | 'gates' | 'consumers'>) {
+  const repo = repository(config, t.repositoryId);
+  const gateScope: 'task' | 'profile' = t.gates?.length ? 'task' : 'profile';
+  try {
+    const own = expandGates(repo, t.gates);
+    const outside = repo.gates.map((g) => g.id).filter((id) => !own.includes(id));
+    const consumers = (t.consumers ?? []).map((c) => {
+      const other = repository(config, c.repositoryId);
+      return { repositoryId: c.repositoryId, gates: gateView(other, expandGates(other, c.gates)) };
+    });
+    return {
+      gateScope,
+      gates: gateView(repo, own),
+      ...(outside.length ? { outsideScope: outside } : {}),
+      ...(consumers.length ? { consumerGates: consumers } : {}),
+    };
+  } catch (error) {
+    return {
+      gateScope,
+      gatesError: error instanceof Error ? error.message : String(error),
+    };
+  }
+}
 const scope = { repositoryId: id.optional() };
 const paging = {
   cursor: z.string().max(1000).optional(),
@@ -534,6 +583,7 @@ export class AgentContext {
           role: t.role,
           status: t.status,
           specDigest: specDigest(t),
+          scopeDigest: scopeDigest(t),
           resultSha: t.resultSha,
           assignee: t.assignee,
           supersedes: t.supersedes,
@@ -545,7 +595,7 @@ export class AgentContext {
           writePaths:
             t.writePaths ?? roleBinding(h.config, t.role, t.repositoryId).writePaths ?? [],
           protectedPaths: repo.protectedPaths,
-          gates: repo.gates.map((g) => ({ id: g.id, kind: g.kind })),
+          ...taskGates(h.config, t),
           contextPacks: h.config.contextPacks
             .filter(
               (p) =>
