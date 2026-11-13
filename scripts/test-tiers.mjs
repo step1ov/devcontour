@@ -20,6 +20,8 @@ export const fileSeconds = {
   'product-scenarios': 379,
   'product-scope': 375,
   'product-proof': 371,
+  // Оценка по отдельному прогону (~125 с) с запасом на нагрузку полной проверки.
+  'contract-change-registered': 370,
   engineering: 368,
   'runner-base': 349,
   'input-carry-order': 346,
@@ -164,6 +166,15 @@ export const slowTests = {
     'A running server applies the requested configuration and',
     'The operation repins a context pack that pins the previous',
     'A configuration changed outside the operation is refused with',
+  ],
+  'contract-change-registered': [
+    'After an explicit base-update the stopped operations finish instead of',
+    'A base that does not carry the reviewed redaction keeps the operation',
+    'A registered document that is not the approved redaction is not carried',
+    'Amendments registered without an operation are not carried with open work',
+    'A pinned artifact of a contract registered without an operation is carried',
+    'A registered document pinned in a context pack: the operation repins',
+    'A newer redaction of a registered document, or an operation taking it',
   ],
   'contract-change-siblings': [
     'A sibling document fixed after its operation started does not make the',

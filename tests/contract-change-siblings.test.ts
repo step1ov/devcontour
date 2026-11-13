@@ -192,7 +192,12 @@ test('A waited-for sibling abandoned after review: the waiting operation is surf
     assert.match(card.reason, new RegExp(`contract-change --id ${a.id}`));
     const refused = await s.changes().advance(a.id);
     assert.equal(refused.status, 'failed');
-    assert.match(refused.error ?? '', /вне контракта: docs\/contracts\/orders\.md\./);
+    // Редакцию отменённого соседа зарегистрировала незавершённая операция:
+    // как контракт без операции она не переносится.
+    assert.match(
+      refused.error ?? '',
+      /контрактов без операции, не годные[^:]*: docs\/contracts\/orders\.md\./,
+    );
     assert.match(refused.error ?? '', new RegExp(`${b.id} \\(abandoned\\)`));
     assert.equal(base(), before, 'одобренная редакция отменённого соседа не перенесена');
   } finally {
@@ -285,7 +290,7 @@ test('An artifact pinned differently by another contract of open work: the opera
   }
 });
 
-test('No adoption when HEAD is rewritten or after the base move: the operation is stale', async () => {
+test('No adoption when HEAD is rewritten or after the base move: stale unless the base carries the reviewed redaction', async () => {
   {
     const { s, a } = await twoContracts();
     try {
@@ -319,10 +324,20 @@ test('No adoption when HEAD is rewritten or after the base move: the operation i
         .advance(b.id);
       assert.equal(stopped.next, 'context');
       assert.equal(stopped.continued?.[0].next, 'context');
-      // После переноса базы сдвиг HEAD в пути живого соседа — устаревание.
+      // После переноса базы HEAD не принимается: операция, чья проверенная
+      // редакция уже в базе, продолжается по проверенному commit.
+      const reviewed = s.changes().get(b.id).expected.head;
       await writeFile(join(s.repo, 'docs/contracts/catalog.md'), '# Catalog\n\nLater.\n');
       s.sh('commit', '-qam', 'catalog later');
-      const stale = await s.changes().advance(b.id);
+      const done = await s.changes().advance(b.id);
+      assert.equal(done.status, 'completed', done.error);
+      assert.equal(s.changes().get(b.id).expected.head, reviewed, 'HEAD не принят');
+      assert.ok(done.history.some((e) => e.event === 'head-moved'));
+      // База, больше не несущая проверенную редакцию, — устаревание.
+      execFileSync('git', ['update-ref', 'refs/heads/devcontour/accepted', `${reviewed}~1`], {
+        cwd: s.repo,
+      });
+      const stale = await s.changes().advance(a.id);
       assert.equal(stale.status, 'stale');
     } finally {
       await s.remove();
