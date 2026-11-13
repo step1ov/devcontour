@@ -52,7 +52,10 @@ const thresholdLabel = (n: number) =>
 type Phase = 'submitted' | 'pending' | 'applied' | 'refused';
 type Requested = { operation: string; digest: string; threshold: number; phase: Phase };
 
-export function nextPhase(requested: Requested, config: InputPolicyConfig): Phase {
+export function nextPhase(
+  requested: Pick<Requested, 'operation' | 'digest' | 'phase'>,
+  config: InputPolicyConfig,
+): Phase {
   if (requested.phase === 'applied' || requested.phase === 'refused') return requested.phase;
   if (config.configDigest === requested.digest) return 'applied';
   const pending = config.configPending;

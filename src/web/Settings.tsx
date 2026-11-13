@@ -1,4 +1,4 @@
-import { useCallback, useEffect, useId, useRef, useState } from 'react';
+import { forwardRef, useCallback, useEffect, useId, useRef, useState } from 'react';
 import { Cpu } from 'lucide-react';
 import { Alert, AlertDescription } from '@/ui/alert.tsx';
 import { Button } from '@/ui/button.tsx';
@@ -6,8 +6,9 @@ import { Card, CardContent, CardHeader, CardTitle } from '@/ui/card.tsx';
 import { InputPolicyCard, nextPhase, type InputPolicyConfig } from './InputPolicy.tsx';
 import { roleName } from './roles.ts';
 
-// Экран «Настройки» — выбор владельца: модели ролей и порог вопросов
-// исполнителя. Агентской операции для них нет. Модели меняются тем же путём,
+// Экран «Настройки» — выбор оператора: модели ролей и порог вопросов
+// исполнителя. Агентской операции для них нет; граница HTTP — та же, что у
+// прочих действий панели (защита от чужих страниц, не от локальных процессов). Модели меняются тем же путём,
 // что `devcontour config-apply --keys models`: сервер сверяет digest
 // конфигурации, которую видела панель, проверяет новую тем же загрузчиком
 // (правило вендора ревью, профили инструментов), пишет файл объявления и
@@ -19,6 +20,7 @@ export type ModelSlot = {
   id: string;
   kind: 'writer' | 'role-reviewer' | 'repository-reviewer' | 'reviewer' | 'review';
   repositoryId?: string;
+  repositories?: string[];
   role?: string;
   title?: string;
   binding: Binding | null;
@@ -27,6 +29,7 @@ export type ModelSlot = {
   nullable: boolean;
   editable: boolean;
   reason?: string;
+  note?: string;
   file?: string;
   toolProfile?: string;
 };
@@ -41,15 +44,32 @@ export type SettingsView = InputPolicyConfig & {
     error?: string;
   };
 };
-type Change = { slot: string; label: string; before: Binding | null; after: Binding | null };
+type Change = Pick<ModelSlot, 'kind' | 'repositoryId' | 'repositories' | 'role' | 'title'> & {
+  slot: string;
+  before: Binding | null;
+  after: Binding | null;
+};
+type Effective = {
+  repositoryId: string;
+  role: string;
+  title?: string;
+  kind: 'writer' | 'reviewer';
+  before: Binding | null;
+  after: Binding | null;
+};
 type Effects = {
   changes: Change[];
-  approvals: { stale: number; tasks: { id: string; title: string }[] };
+  effective: Effective[];
+  reviews: { kind: 'plan' | 'contract'; author: string; before: string; after: string }[];
+  approvals: { stale: number; tasks: { id: string; title: string }[]; digest: string };
   waitingFor: string[];
   warnings: string[];
   files: string[];
-  commit: string[];
+  components: string[];
 };
+/** Запрос применения моделей из этой карточки и его исход. */
+type Phase = 'submitted' | 'pending' | 'applied' | 'refused';
+type Requested = { operation: string; digest: string; phase: Phase; effects: Effects };
 /** Черновик привязки: пустой runtime — наследовать или правило по умолчанию. */
 type Draft = { runtime: string; model: string; effort: string };
 
@@ -72,7 +92,7 @@ export const bindingText = (b: Binding | null | undefined) =>
         .join(' · ')
     : 'не задан';
 
-export const slotLabel = (s: ModelSlot) =>
+export const slotLabel = (s: Pick<ModelSlot, 'id' | 'kind' | 'repositoryId'>) =>
   s.kind === 'writer'
     ? 'Исполнитель'
     : s.kind === 'role-reviewer'
@@ -86,6 +106,15 @@ export const slotLabel = (s: ModelSlot) =>
             : s.id === 'review:contract'
               ? 'Ревью контракта'
               : 'Ревью кода (правило)';
+
+const roleTitle = (role: string, title?: string) =>
+  roleName(role, { roles: { [role]: { title } } });
+const SHARED = '*';
+/** Название привязки в списке изменений: то же имя роли, что в форме. */
+const changeLabel = (c: Change) =>
+  c.role
+    ? `${roleTitle(c.role, c.title)}${c.repositoryId === SHARED ? ' (все компоненты без своей роли)' : ''}, ${c.kind === 'writer' ? 'исполнитель' : 'ревьюер кода'}`
+    : slotLabel({ ...c, id: c.slot });
 
 const selectClass =
   'border-input bg-card h-(--control-height-form) min-w-0 rounded-sm border px-2 text-sm';
@@ -207,6 +236,11 @@ function SlotRow({
           Только просмотр: {slot.reason}
         </p>
       )}
+      {slot.note && (
+        <p className="text-muted-foreground m-0 text-xs" data-model-note>
+          {slot.note}
+        </p>
+      )}
       {(slot.file || slot.toolProfile) && (
         <p className="text-muted-foreground m-0 text-xs">
           {slot.file && (
@@ -227,9 +261,6 @@ function SlotRow({
   );
 }
 
-type Phase = 'submitted' | 'pending' | 'applied' | 'refused';
-type Requested = { operation: string; digest: string; threshold: number; phase: Phase };
-
 async function post<T>(path: string, body: unknown): Promise<T> {
   const response = await fetch(path, {
     method: 'POST',
@@ -243,16 +274,59 @@ async function post<T>(path: string, body: unknown): Promise<T> {
   return result;
 }
 
-function EffectsView({ effects }: { effects: Effects }) {
+const EffectsView = forwardRef<HTMLDivElement, { effects: Effects }>(function EffectsView(
+  { effects },
+  ref,
+) {
+  const headingId = useId();
   return (
-    <div className="grid gap-2" data-model-effects>
+    // Последствия появляются после проверки: фокус переходит на них, и
+    // область объявляется читателю экрана целиком.
+    <div
+      ref={ref}
+      tabIndex={-1}
+      role="region"
+      aria-labelledby={headingId}
+      className="grid gap-2 outline-offset-2"
+      data-model-effects
+    >
+      <h4 id={headingId} className="m-0 font-medium">
+        Что изменится
+      </h4>
       <ul className="m-0 grid list-disc gap-0.5 pl-5">
         {effects.changes.map((c) => (
           <li key={c.slot}>
-            {c.label}: {bindingText(c.before)} → {c.after ? bindingText(c.after) : 'наследовать'}
+            {changeLabel(c)}: {bindingText(c.before)} →{' '}
+            {c.after ? bindingText(c.after) : 'наследовать'}
           </li>
         ))}
       </ul>
+      {effects.effective.length > 0 && (
+        <div data-model-effective>
+          <p className="m-0">Действующие привязки по компонентам:</p>
+          <ul className="m-0 grid list-disc gap-0.5 pl-5">
+            {effects.effective.map((e) => (
+              <li key={`${e.repositoryId}:${e.role}:${e.kind}`}>
+                {e.repositoryId} · {roleTitle(e.role, e.title)},{' '}
+                {e.kind === 'writer' ? 'исполнитель' : 'ревьюер кода'}: {bindingText(e.before)} →{' '}
+                {bindingText(e.after)}
+              </li>
+            ))}
+          </ul>
+        </div>
+      )}
+      {effects.reviews.length > 0 && (
+        <div data-model-reviews>
+          <p className="m-0">Ревью плана и контракта (кто проверит автора каждого runtime):</p>
+          <ul className="m-0 grid list-disc gap-0.5 pl-5">
+            {effects.reviews.map((r) => (
+              <li key={`${r.kind}:${r.author}`}>
+                {r.kind === 'plan' ? 'План' : 'Контракт'}, автор {r.author}: {r.before} → {r.after}
+              </li>
+            ))}
+          </ul>
+        </div>
+      )}
       <p className="m-0">
         Когда действует: со следующей попытки и следующего ревью после применения. Идущие работы
         заканчиваются с прежними моделями
@@ -295,13 +369,24 @@ function EffectsView({ effects }: { effects: Effects }) {
       )}
       <p className="text-muted-foreground m-0 text-xs">
         Изменятся файлы: {effects.files.join(', ')}.
-        {effects.commit.length
-          ? ` Файл компонента лежит в репозитории продукта — закоммитьте правку: ${effects.commit.join(', ')}.`
-          : ''}
       </p>
+      {effects.components.length > 0 && (
+        <Alert variant="info" data-model-commit>
+          <AlertDescription>
+            {effects.components.join(', ')} — файл компонента в основном checkout репозитория
+            продукта. Сервер читает его оттуда, поэтому модели действуют без коммита; до коммита
+            checkout считается изменённым. Коммит — правка настройки контура в базе прогонов:
+            диспетчер не перематывает базу через неё, и очередь остановится. Тогда выполните{' '}
+            <code className="font-mono text-xs">devcontour base-update --workspace …</code>, затем
+            проверьте базу гейтами и продолжите очередь (
+            <code className="font-mono text-xs">devcontour queue --start</code>; в режиме агента
+            базу проверяет цикл ведущего).
+          </AlertDescription>
+        </Alert>
+      )}
     </div>
   );
-}
+});
 
 export function ModelSettingsCard({
   view,
@@ -313,10 +398,11 @@ export function ModelSettingsCard({
   const titleId = useId();
   const ackId = useId();
   const status = useRef<HTMLDivElement>(null);
+  const shownEffects = useRef<HTMLDivElement>(null);
   const slots = view.models.slots;
   const initial = () =>
     Object.fromEntries(slots.map((s) => [s.id, draftOf(s)])) as Record<string, Draft>;
-  // Опрос приносит новый массив каждые 2 с: черновик сбрасывает только
+  // Опрос приносит новый массив каждые несколько секунд: черновик сбрасывает только
   // изменившаяся конфигурация, а не повтор того же ответа.
   const slotsKey = JSON.stringify(slots.map((s) => [s.id, s.binding, s.own, s.editable]));
   const [drafts, setDrafts] = useState(initial);
@@ -324,7 +410,7 @@ export function ModelSettingsCard({
   const [ack, setAck] = useState(false);
   const [busy, setBusy] = useState(false);
   const [error, setError] = useState('');
-  const [requested, setRequested] = useState<Requested & { effects: Effects }>();
+  const [requested, setRequested] = useState<Requested>();
   const phase = requested && nextPhase(requested, view);
   useEffect(() => {
     if (requested && phase && phase !== requested.phase) setRequested({ ...requested, phase });
@@ -351,6 +437,10 @@ export function ModelSettingsCard({
   useEffect(() => {
     if (operation) status.current?.focus();
   }, [operation]);
+  // Последствия проверки — на них фокус: читатель экрана слышит их сразу.
+  useEffect(() => {
+    if (effects) shownEffects.current?.focus();
+  }, [effects]);
 
   const changes = slots
     .filter((s) => s.editable && drafts[s.id] && !sameDraft(drafts[s.id], draftOf(s)))
@@ -370,9 +460,9 @@ export function ModelSettingsCard({
   const locked = own || otherPending || !!drift || busy;
   const body = { changes, expectedConfigDigest: view.configDigest };
 
-  const check = async () => {
+  const check = async (keepError = false) => {
     setBusy(true);
-    setError('');
+    if (!keepError) setError('');
     try {
       setEffects(await post<Effects>('/api/config/models/preview', body));
       setAck(false);
@@ -387,25 +477,31 @@ export function ModelSettingsCard({
     setBusy(true);
     setError('');
     try {
+      // Подтверждение — ровно показанного набора задач: изменился — сервер откажет.
       const result = await post<Effects & { operation?: string; digest?: string }>(
         '/api/config/models',
-        { ...body, ...(ack ? { acknowledgeReapproval: true } : {}) },
+        {
+          ...body,
+          ...(ack && effects ? { acknowledgedApprovals: effects.approvals.digest } : {}),
+        },
       );
       if (!result.operation || !result.digest)
         throw new Error('сервер не назвал запрос применения; обновите страницу');
       setRequested({
         operation: result.operation,
         digest: result.digest,
-        threshold: 0,
         phase: 'submitted',
         effects: result,
       });
       setEffects(undefined);
+      setBusy(false);
       onChanged?.();
     } catch (e) {
       setError(e instanceof Error ? e.message : String(e));
-    } finally {
       setBusy(false);
+      // Отказ сервера мог сменить последствия (новые утверждения, другой
+      // набор): показ проверяется заново, ошибка остаётся видна.
+      void check(true);
     }
   };
 
@@ -511,7 +607,11 @@ export function ModelSettingsCard({
                 >
                   <legend className="px-1 font-medium">
                     {title}
-                    {repositories.size > 1 ? ` · ${repositoryId}` : ''}
+                    {repositoryId === SHARED
+                      ? ` · все компоненты без своей роли (${rows[0]?.repositories?.join(', ') ?? ''})`
+                      : repositories.size > 1
+                        ? ` · ${repositoryId}`
+                        : ''}
                     {title !== role && (
                       <span className="text-muted-foreground font-mono text-xs"> {role}</span>
                     )}
@@ -550,7 +650,7 @@ export function ModelSettingsCard({
                 ))}
               </fieldset>
             )}
-            {effects && <EffectsView effects={effects} />}
+            {effects && <EffectsView ref={shownEffects} effects={effects} />}
             {effects && effects.approvals.stale > 0 && (
               <div className="flex items-start gap-2">
                 <input
@@ -611,7 +711,7 @@ export function SettingsScreen({ revision }: { revision?: string }) {
   // Применение идёт на такте сервера: экран перечитывает настройки, пока открыт.
   useEffect(() => {
     void load();
-    const timer = setInterval(() => void load(), 2000);
+    const timer = setInterval(() => void load(), 4000);
     return () => clearInterval(timer);
   }, [load, revision]);
   if (!view)

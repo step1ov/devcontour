@@ -1,6 +1,6 @@
 import { test, expect, type Page } from '@playwright/test';
 import AxeBuilder from '@axe-core/playwright';
-import { mkdtempSync, readFileSync, realpathSync, rmSync, writeFileSync } from 'node:fs';
+import { mkdirSync, mkdtempSync, readFileSync, realpathSync, rmSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join, sep } from 'node:path';
 import { setupDemo } from '../src/demo.ts';
@@ -58,7 +58,25 @@ test.beforeAll(async () => {
       cacheWrite: 1,
     },
   ];
-  writeFileSync(path, JSON.stringify({ ...raw, prices }, null, 2) + '\n');
+  // Каталог workspace с эскизом дизайна: эскиз открывается из панели и отдельно.
+  const workspace = join(root, 'workspace');
+  mkdirSync(join(workspace, 'docs/design'), { recursive: true });
+  writeFileSync(
+    join(workspace, 'docs/design/sketch.html'),
+    `<!doctype html><title>Эскиз</title><body><script>
+      const probe = (path, init) =>
+        fetch(path, init).then((r) => String(r.status), () => 'blocked');
+      Promise.all([
+        probe('/api/config/settings'),
+        probe('/api/config/models', {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json', 'X-DevContour-Request': '1' },
+          body: JSON.stringify({ changes: [{ slot: 'writer:main:qa', binding: { runtime: 'codex' } }] }),
+        }),
+      ]).then((r) => { document.body.dataset.result = r.join('|'); });
+    </script></body>`,
+  );
+  writeFileSync(path, JSON.stringify({ ...raw, prices, workspaceRoot: workspace }, null, 2) + '\n');
   const store = new Store(join(data, 'state.sqlite'));
   const h = new DevContour(store, loadConfig(path));
   const scheduler = new Scheduler(h, data);
@@ -111,7 +129,9 @@ test('Владелец меняет модель исполнителя: пос�
   await card.getByLabel('Тестировщик, исполнитель: уровень рассуждения').selectOption('low');
   await check.click();
   const effects = card.locator('[data-model-effects]');
-  await expect(effects).toContainText('qa (main): исполнитель');
+  await expect(effects).toBeFocused();
+  await expect(effects).toContainText('Тестировщик, исполнитель');
+  await expect(card.locator('[data-model-effective]')).toContainText('main · Тестировщик');
   await expect(effects).toContainText('codex · EXAMPLE_CODEX_B · effort low');
   await expect(effects).toContainText('со следующей попытки');
   // Утверждённые задачи демо закреплены при прежних моделях: нужно подтверждение.
@@ -159,5 +179,14 @@ test('Устаревший digest: отказ 409, ошибка в карточ�
   await expect(alert).toContainText('Модели не изменены');
   await expect(alert).toContainText('обновите страницу');
   await expect(card.locator('[data-model-effects]')).toHaveCount(0);
+  expect(readFileSync(join(data, 'config.json'), 'utf8')).toBe(before);
+});
+
+test('Эскиз дизайна, открытый отдельно, не может вызвать маршруты настроек', async ({ page }) => {
+  const before = readFileSync(join(data, 'config.json'), 'utf8');
+  await page.goto(url + '/api/design/file/docs/design/sketch.html');
+  // Скрипт эскиза работает, но источник страницы непрозрачный (песочница CSP).
+  expect(await page.evaluate(() => window.origin)).toBe('null');
+  await expect(page.locator('body')).toHaveAttribute('data-result', 'blocked|blocked');
   expect(readFileSync(join(data, 'config.json'), 'utf8')).toBe(before);
 });

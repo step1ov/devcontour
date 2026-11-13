@@ -8,7 +8,16 @@
  */
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
-import { mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from 'node:fs';
+import { execFileSync } from 'node:child_process';
+import {
+  existsSync,
+  mkdirSync,
+  mkdtempSync,
+  readFileSync,
+  realpathSync,
+  rmSync,
+  writeFileSync,
+} from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { config, input, removeTestCheckoutRoot, testCheckoutRoot } from './helpers.ts';
@@ -18,7 +27,14 @@ import { loadConfig } from '../src/runner/config.ts';
 import { serve } from '../src/server/http.ts';
 import { Scheduler } from '../src/runner/scheduler.ts';
 import { parseOperationalKeys, serveReconfigure } from '../src/runner/reconfigure.ts';
-import { modelSettingsView, previewModels, requestModels } from '../src/runner/model-settings.ts';
+import {
+  modelSettingsView,
+  previewModels,
+  recoverConfigWrite,
+  requestModels,
+} from '../src/runner/model-settings.ts';
+import { sensitiveBaseEntries } from '../src/runner/sensitive-paths.ts';
+import { withModelChoices } from '../src/runner/workspace-setup.ts';
 
 const price = (runtime: string, model: string) => ({
   runtime,
@@ -239,12 +255,34 @@ test('The panel route writes config.json with the apply request; the server tick
       (applied[0].data as { changed: string[] }).changed.includes('models'),
       'журнал называет изменённый ключ',
     );
-    // Агентский API такой операции не знает.
-    const agent = await post('/api/agent', {
-      operation: 'models_set',
-      input: { changes, expectedConfigDigest: result.digest },
+    // Агентский API такой операции не знает: ни одна операция каталога (он же
+    // — инструменты MCP) не принимает выбор моделей или порог вопросов.
+    const catalog = (await (await fetch(app.url + '/api/capabilities')).json()) as {
+      tools: { name: string; inputSchema?: unknown; input?: unknown }[];
+    };
+    assert.ok(catalog.tools.length > 10);
+    for (const tool of catalog.tools) {
+      const shape = JSON.stringify(tool.inputSchema ?? tool.input ?? {});
+      assert.doesNotMatch(tool.name, /model|config|input_policy|threshold/, tool.name);
+      for (const field of ['expectedConfigDigest', 'acknowledgedApprovals', '"threshold"'])
+        assert.ok(!shape.includes(field), `${tool.name}: ${field}`);
+    }
+    const fileBefore = readFileSync(s.path, 'utf8');
+    for (const operation of ['models_set', 'config_models', 'input_policy']) {
+      const agent = await post('/api/agent', {
+        operation,
+        input: { changes, expectedConfigDigest: result.digest },
+      });
+      assert.equal(agent.status, 400, operation);
+    }
+    assert.equal(readFileSync(s.path, 'utf8'), fileBefore, 'агентский вызов файл не тронул');
+    // Без подтверждения показанного набора маршрут отвечает 409 — проверено ниже функцией;
+    // здесь — что маршрут передаёт отказ как 409, а не 500.
+    const noAck = await post('/api/config/models', {
+      changes: [{ slot: 'reviewer:main:backend', binding: { runtime: 'codex' } }],
+      expectedConfigDigest: 'a'.repeat(64),
     });
-    assert.notEqual(agent.status, 200);
+    assert.equal(noAck.status, 409);
   } finally {
     await app.close();
     s.cleanup();
@@ -298,9 +336,15 @@ test('Approved tasks pinned under the old models need re-approval; the panel ask
       () => requestModels(s.server, s.root, body),
       (e: Error & { status?: number }) => e.status === 409 && /review-plan/.test(e.message),
     );
+    // Подтверждение другого набора (например, показанного до нового утверждения) — тоже отказ.
+    assert.throws(
+      () => requestModels(s.server, s.root, { ...body, acknowledgedApprovals: 'b'.repeat(64) }),
+      (e: Error & { status?: number }) =>
+        e.status === 409 && /изменился после показа/.test(e.message),
+    );
     assert.equal(readFileSync(s.path, 'utf8'), before);
     assert.equal(s.server.store.read().reconfigure, undefined);
-    requestModels(s.server, s.root, { ...body, acknowledgeReapproval: true });
+    requestModels(s.server, s.root, { ...body, acknowledgedApprovals: preview.approvals.digest });
     s.tick();
     assert.equal(s.server.config.roles.qa.model, 'EXAMPLE_CODEX_B');
     const after = s.server.store.read().tasks.find((t) => t.id === task.id)!;
@@ -344,7 +388,8 @@ test('A component binding is edited in its component file; the single-component 
       ],
       expectedConfigDigest: s.server.configDigest,
     });
-    assert.deepEqual(result.commit, ['app/devcontour.component.json']);
+    assert.deepEqual(result.components, ['app/devcontour.component.json']);
+    assert.deepEqual(result.files, ['app/devcontour.component.json', 'config.json']);
     const file = JSON.parse(
       readFileSync(join(s.repository, 'devcontour.component.json'), 'utf8'),
     ) as { roles: Record<string, unknown>; reviewer: unknown };
@@ -396,4 +441,297 @@ test('review rules declared in workspace.json stay read-only in the panel', () =
   } finally {
     s.cleanup();
   }
+});
+
+const gate = {
+  id: 'test',
+  kind: 'test',
+  command: ['node', 'verify.mjs'],
+  report: { type: 'junit', path: '.reports/junit.xml' },
+};
+const component = (roles: Record<string, unknown>) => ({
+  name: 'Example app',
+  gates: [gate],
+  roles,
+  reviewer: { runtime: 'demo' },
+});
+
+test('A top-level role shared by several components is one binding; the preview names every component', () => {
+  const s = served();
+  const second = mkdtempSync(join(s.root, 'repo-b-'));
+  const raw = JSON.parse(readFileSync(s.path, 'utf8')) as Record<string, unknown>;
+  delete raw.gates;
+  raw.repositories = [
+    { id: 'a', name: 'A', path: s.repository, gates: [gate] },
+    { id: 'b', name: 'B', path: second, gates: [gate] },
+  ];
+  writeFileSync(s.path, JSON.stringify(raw, null, 2) + '\n');
+  try {
+    const h = new DevContour(s.server.store, loadConfig(s.path));
+    const view = modelSettingsView(h, s.root);
+    const qa = view.slots.filter((x) => x.role === 'qa' && x.kind === 'writer');
+    assert.deepEqual(
+      qa.map((x) => [x.id, x.repositories]),
+      [['writer:*:qa', ['a', 'b']]],
+      'одна привязка на роль, а не по одной на компонент',
+    );
+    assert.match(qa[0].note ?? '', /обновление профиля/);
+    const preview = previewModels(h, s.root, {
+      changes: [{ slot: 'writer:*:qa', binding: { runtime: 'codex', model: 'EXAMPLE_CODEX_B' } }],
+      expectedConfigDigest: h.configDigest,
+    });
+    assert.deepEqual(
+      preview.effective
+        .filter((e) => e.role === 'qa' && e.kind === 'writer')
+        .map((e) => [e.repositoryId, e.after]),
+      [
+        ['a', { runtime: 'codex', model: 'EXAMPLE_CODEX_B' }],
+        ['b', { runtime: 'codex', model: 'EXAMPLE_CODEX_B' }],
+      ],
+    );
+  } finally {
+    s.cleanup();
+  }
+});
+
+test('A role the component file lacks is read-only: the panel does not pin the whole role into the file', () => {
+  const s = served({}, component({ qa: { runtime: 'demo' } }));
+  const raw = JSON.parse(readFileSync(s.path, 'utf8')) as {
+    repositories: Record<string, unknown>[];
+  };
+  // Роль из профиля или реестра — в записи репозитория, а не в файле компонента.
+  raw.repositories[0].roles = { backend: { runtime: 'demo', writePaths: ['src/'] } };
+  writeFileSync(s.path, JSON.stringify(raw, null, 2) + '\n');
+  try {
+    const h = new DevContour(s.server.store, loadConfig(s.path));
+    const backend = modelSettingsView(h, s.root).slots.find((x) => x.id === 'writer:app:backend')!;
+    assert.equal(backend.editable, false);
+    assert.match(backend.reason ?? '', /workspace\.json/);
+    const before = readFileSync(join(s.repository, 'devcontour.component.json'), 'utf8');
+    assert.throws(
+      () =>
+        requestModels(h, s.root, {
+          changes: [{ slot: 'writer:app:backend', binding: { runtime: 'codex' } }],
+          expectedConfigDigest: h.configDigest,
+        }),
+      (e: Error & { status?: number }) => e.status === 409,
+    );
+    assert.equal(readFileSync(join(s.repository, 'devcontour.component.json'), 'utf8'), before);
+  } finally {
+    s.cleanup();
+  }
+});
+
+test('A failed multi-file write returns every file byte for byte; a crash journal is rolled back on start', () => {
+  const s = served({}, component({ qa: { runtime: 'demo' } }));
+  try {
+    const file = join(s.repository, 'devcontour.component.json');
+    const before = { config: readFileSync(s.path, 'utf8'), component: readFileSync(file, 'utf8') };
+    const body = {
+      changes: [
+        { slot: 'writer:app:qa', binding: { runtime: 'codex', model: 'EXAMPLE_CODEX_B' } },
+        { slot: 'reviewer:app', binding: { runtime: 'claude' } },
+      ],
+      expectedConfigDigest: s.server.configDigest,
+    };
+    const request = s.server.requestReconfigure.bind(s.server);
+    s.server.requestReconfigure = () => {
+      throw new Error('request not written');
+    };
+    assert.throws(() => requestModels(s.server, s.root, body), /request not written/);
+    assert.equal(readFileSync(s.path, 'utf8'), before.config);
+    assert.equal(readFileSync(file, 'utf8'), before.component);
+    assert.equal(existsSync(join(s.root, 'config-write.json')), false);
+    assert.equal(s.server.store.read().reconfigure, undefined);
+    s.server.requestReconfigure = request;
+    // Сбой процесса посреди записи: журнал остаётся, файлы — наполовину новые.
+    writeFileSync(
+      join(s.root, 'config-write.json'),
+      JSON.stringify({
+        operation: 'config-apply:models:crash001',
+        files: [
+          { path: realpathSync(file), before: before.component, after: '{}' },
+          { path: s.path, before: before.config, after: '{}' },
+        ],
+      }),
+    );
+    writeFileSync(file, '{"half": true}');
+    // Пока журнал лежит, новая запись не начинается.
+    assert.throws(
+      () => requestModels(s.server, s.root, body),
+      (e: Error & { status?: number }) => e.status === 409 || /не завершена/.test(e.message),
+    );
+    assert.deepEqual(recoverConfigWrite(s.root)?.restored, [realpathSync(file), s.path]);
+    assert.equal(readFileSync(file, 'utf8'), before.component);
+    assert.equal(readFileSync(s.path, 'utf8'), before.config);
+    assert.equal(recoverConfigWrite(s.root), undefined, 'журнала больше нет');
+  } finally {
+    s.cleanup();
+  }
+});
+
+test('A component file edited after the panel read it is a CAS conflict, even when config.json is unchanged', () => {
+  const s = served({}, component({ qa: { runtime: 'demo' } }));
+  try {
+    const seen = s.server.configDigest;
+    const file = join(s.repository, 'devcontour.component.json');
+    const raw = JSON.parse(readFileSync(file, 'utf8')) as { roles: Record<string, unknown> };
+    raw.roles.qa = { runtime: 'claude' };
+    writeFileSync(file, JSON.stringify(raw, null, 2) + '\n');
+    assert.throws(
+      () =>
+        requestModels(s.server, s.root, {
+          changes: [{ slot: 'writer:app:qa', binding: { runtime: 'codex' } }],
+          expectedConfigDigest: seen,
+        }),
+      (e: Error & { status?: number }) => e.status === 409,
+    );
+    assert.equal(s.server.store.read().reconfigure, undefined);
+  } finally {
+    s.cleanup();
+  }
+});
+
+test('The preview warns when review independence weakens: same vendor, no check rights, plan and contract reviewers', () => {
+  const s = served({
+    ...live,
+    review: { code: { vendor: 'same-vendor-allowed' } },
+  });
+  try {
+    const preview = (changes: unknown) =>
+      previewModels(s.server, s.root, { changes, expectedConfigDigest: s.server.configDigest });
+    // Ревьюер qa — того же вендора, что исполнитель: только явным правилом, и с предупреждением.
+    const same = preview([{ slot: 'reviewer:main:qa', binding: { runtime: 'codex' } }]);
+    assert.ok(
+      same.warnings.some((w) => /same-vendor-allowed/.test(w)),
+      same.warnings.join('\n'),
+    );
+    // codex-ревьюер без профиля запускает проверки, claude без Bash в профиле — нет.
+    const reads = preview([{ slot: 'reviewer:main:backend', binding: { runtime: 'claude' } }]);
+    assert.ok(reads.warnings.some((w) => /не сможет запускать проверки/.test(w)));
+    // Ревьюер плана, названный явно, — того же runtime, что автор codex: ревью такому автору невозможно.
+    const plan = preview([{ slot: 'review:plan', binding: { runtime: 'codex' } }]);
+    assert.ok(
+      plan.reviews.some(
+        (r) => r.kind === 'plan' && r.author === 'codex' && r.after === 'отказ правила вендора',
+      ),
+    );
+    assert.ok(plan.warnings.some((w) => /Ревью плана автора codex станет невозможным/.test(w)));
+    const contract = preview([{ slot: 'review:contract', binding: { runtime: 'claude' } }]);
+    assert.ok(contract.warnings.some((w) => /Ревью контракта автора claude/.test(w)));
+  } finally {
+    s.cleanup();
+  }
+});
+
+test('A legacy approval without a pinned policy is pinned to the old policy before the change, then needs re-approval', () => {
+  const s = served({ prices: [price('codex', 'EXAMPLE_CODEX_B')] });
+  try {
+    const board = s.server.createBoard('Example board');
+    const task = s.server.addTask(board.id, input());
+    s.server.approve(board.id);
+    const old = s.server.planPolicyDigest();
+    s.server.store.change('fixture.legacy', (state) => {
+      delete state.tasks.find((t) => t.id === task.id)!.approvedPolicy;
+    });
+    const body = {
+      changes: [{ slot: 'writer:main:qa', binding: { runtime: 'codex' } }],
+      expectedConfigDigest: s.server.configDigest,
+    };
+    const preview = previewModels(s.server, s.root, body);
+    assert.equal(preview.approvals.stale, 1, 'утверждение без закрепления тоже затронуто');
+    requestModels(s.server, s.root, { ...body, acknowledgedApprovals: preview.approvals.digest });
+    assert.equal(
+      s.server.store.read().tasks.find((t) => t.id === task.id)!.approvedPolicy,
+      old,
+      'закреплено за прежней политикой до смены, а не за новой',
+    );
+    s.tick();
+    assert.ok(s.server.approvalStale(s.server.store.read().tasks.find((t) => t.id === task.id)!));
+  } finally {
+    s.cleanup();
+  }
+});
+
+test('A refused apply is journaled as config.apply-refused when the files moved before the tick', () => {
+  const s = served({ prices: [price('codex', 'EXAMPLE_CODEX_B')] });
+  try {
+    const result = requestModels(s.server, s.root, {
+      changes: [{ slot: 'writer:main:qa', binding: { runtime: 'codex' } }],
+      expectedConfigDigest: s.server.configDigest,
+    });
+    const raw = JSON.parse(readFileSync(s.path, 'utf8')) as {
+      roles: Record<string, Record<string, unknown>>;
+    };
+    raw.roles.qa.model = 'EXAMPLE_CODEX_B';
+    writeFileSync(s.path, JSON.stringify(raw, null, 2) + '\n');
+    s.tick();
+    const refused = s.events('config.apply-refused');
+    assert.equal(refused.length, 1);
+    assert.equal((refused[0].data as { operation: string }).operation, result.operation);
+    assert.equal(s.server.config.roles.qa.runtime, 'demo', 'прежние модели остались');
+    assert.equal(s.server.store.read().reconfigure, undefined, 'запрос снят');
+  } finally {
+    s.cleanup();
+  }
+});
+
+test('Committing the edited component file is a contour change of the run base: the panel names the stop', async () => {
+  const s = served({}, component({ qa: { runtime: 'demo' } }));
+  try {
+    const git = (...args: string[]) =>
+      execFileSync('git', ['-C', s.repository, ...args], { encoding: 'utf8' }).trim();
+    git('init', '-q', '-b', 'main');
+    git('config', 'user.name', 'Fixture');
+    git('config', 'user.email', 'fixture@example.invalid');
+    git('add', '.');
+    git('commit', '-q', '-m', 'base');
+    const base = git('rev-parse', 'HEAD');
+    const result = requestModels(s.server, s.root, {
+      changes: [{ slot: 'writer:app:qa', binding: { runtime: 'codex' } }],
+      expectedConfigDigest: s.server.configDigest,
+    });
+    assert.deepEqual(result.components, ['app/devcontour.component.json']);
+    git('commit', '-q', '-am', 'models');
+    const entries = await sensitiveBaseEntries(
+      s.server,
+      s.root,
+      s.server.store.read(),
+      'app',
+      base,
+      git('rev-parse', 'HEAD'),
+    );
+    // Диспетчер не перематывает базу через этот коммит: очередь ждёт base-update.
+    assert.ok(
+      entries.some((e) => e.path === 'devcontour.component.json'),
+      JSON.stringify(entries),
+    );
+  } finally {
+    s.cleanup();
+  }
+});
+
+test('A profile upgrade keeps model choices of top-level roles and reports what it kept', () => {
+  const declared = {
+    qa: { runtime: 'claude', writePaths: ['tests/'], reviewer: { runtime: 'codex' } },
+    backend: { runtime: 'claude' },
+  };
+  const existing = {
+    qa: { runtime: 'codex', model: 'EXAMPLE_CODEX_B', reviewer: { runtime: 'claude' } },
+    gone: { runtime: 'codex' },
+  };
+  const { roles, kept } = withModelChoices(declared, existing);
+  assert.deepEqual(roles.qa, {
+    runtime: 'codex',
+    writePaths: ['tests/'],
+    model: 'EXAMPLE_CODEX_B',
+    reviewer: { runtime: 'claude' },
+  });
+  assert.deepEqual(roles.backend, { runtime: 'claude' }, 'роль без прежнего выбора — из профиля');
+  assert.equal(
+    'gone' in roles,
+    false,
+    'роль, которой профиль больше не объявляет, не возвращается',
+  );
+  assert.deepEqual(kept, ['qa']);
 });

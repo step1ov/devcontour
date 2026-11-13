@@ -199,6 +199,44 @@ const withComponentRoles = <T extends Record<string, unknown>>(
 const withComponentReviewer = <T>(top: T, repos: { reviewer?: T }[]): T =>
   repos.length === 1 && repos[0].reviewer ? repos[0].reviewer : top;
 const differs = (a: unknown, b: unknown) => JSON.stringify(a) !== JSON.stringify(b);
+const modelFields = ['runtime', 'model', 'effort'] as const;
+/**
+ * Роли профиля с выбором моделей прежних ролей того же id: runtime, модель и
+ * effort исполнителя и его ревьюера. Прочие поля роли — из профиля.
+ */
+export function withModelChoices(
+  declared: Record<string, Record<string, unknown>>,
+  existing: Record<string, Record<string, unknown>>,
+) {
+  const kept: string[] = [];
+  const choice = (to: Record<string, unknown>, from: Record<string, unknown>) => {
+    const next = { ...to };
+    for (const k of modelFields) {
+      if (from[k] === undefined) delete next[k];
+      else next[k] = from[k];
+    }
+    return next;
+  };
+  const roles = Object.fromEntries(
+    Object.entries(declared).map(([id, role]) => {
+      const was = existing[id];
+      if (!was?.runtime) return [id, role];
+      let next = choice(role, was);
+      const wasReviewer = was.reviewer as Record<string, unknown> | undefined;
+      if (wasReviewer?.runtime)
+        next = {
+          ...next,
+          reviewer: choice(
+            (role.reviewer as Record<string, unknown> | undefined) ?? {},
+            wasReviewer,
+          ),
+        };
+      if (differs(next, role)) kept.push(id);
+      return [id, next];
+    }),
+  );
+  return { roles, kept };
+}
 type Review = NonNullable<z.infer<typeof configSchema.shape.review>>;
 /**
  * Правила ревью переносятся по видам: реестр, объявивший только `code`, не
@@ -538,42 +576,70 @@ export async function setupWorkspace(file: string, data?: string) {
       // и конфигурация оставалась сломанной без единого способа её починить.
       const previousConfig = await readFile(configPath, 'utf8');
       const previousLock = await readFile(join(root, 'packs.lock.json'), 'utf8').catch(() => null);
-      const upgraded = JSON.stringify(
-        {
-          ...raw,
-          packs: config.packs,
-          gates: config.gates,
-          // Компонент с файлом хранится ссылкой: копия его полей в config.json
-          // устаревала, как только поле удаляли из файла.
-          repositories: repos.map(componentRef),
-          workspaceGates: config.workspaceGates,
-          contextPacks: withPins(
-            (raw as { contextPacks?: ContextPack[] }).contextPacks ?? [],
-            config.contextPacks,
-          ),
-          runTimeoutMs: config.runTimeoutMs,
-          protectedPaths: repos[0].protectedPaths,
-          ...operationalDeclaration(input).values,
-          ...(input.review
-            ? { review: withReview((raw as { review?: Review }).review, input.review) }
-            : {}),
-          roles: withComponentRoles(
-            withDeclaredRoles(
-              (raw as { roles?: Record<string, Record<string, unknown>> }).roles ?? {},
-              config.roles,
-              true,
-            ),
-            repos,
-          ),
-        },
-        null,
-        2,
+      const declaredTop = withDeclaredRoles(
+        (raw as { roles?: Record<string, Record<string, unknown>> }).roles ?? {},
+        config.roles,
+        true,
       );
+      const profileRoles = withComponentRoles(declaredTop, repos);
+      // Модели ролей верхнего уровня выбирает оператор (панель «Настройки»,
+      // правка config.json): обновление профиля задаёт роли заново, но
+      // runtime, модель и effort прежней роли с тем же id сохраняет, если
+      // конфигурация с ними загружается. Иначе действует профиль, и ответ
+      // называет роли, чей выбор не сохранился. Копия роли единственного
+      // компонента по-прежнему следует файлу компонента.
+      const carried = withModelChoices(
+        declaredTop,
+        (raw as { roles?: Record<string, Record<string, unknown>> }).roles ?? {},
+      );
+      const carriedRoles = withComponentRoles(carried.roles, repos);
+      const keptModels = carried.kept.filter(
+        (id) => JSON.stringify(carriedRoles[id]) !== JSON.stringify(profileRoles[id]),
+      );
+      const upgradedWith = (roles: Record<string, unknown>) =>
+        JSON.stringify(
+          {
+            ...raw,
+            packs: config.packs,
+            gates: config.gates,
+            // Компонент с файлом хранится ссылкой: копия его полей в config.json
+            // устаревала, как только поле удаляли из файла.
+            repositories: repos.map(componentRef),
+            workspaceGates: config.workspaceGates,
+            contextPacks: withPins(
+              (raw as { contextPacks?: ContextPack[] }).contextPacks ?? [],
+              config.contextPacks,
+            ),
+            runTimeoutMs: config.runTimeoutMs,
+            protectedPaths: repos[0].protectedPaths,
+            ...operationalDeclaration(input).values,
+            ...(input.review
+              ? { review: withReview((raw as { review?: Review }).review, input.review) }
+              : {}),
+            roles,
+          },
+          null,
+          2,
+        );
+      const upgraded = upgradedWith(profileRoles);
       const additions = additionsFor(true);
+      let modelsKept: string[] = [];
+      let modelsDropped: string[] = [];
       const undoFiles = await completeComponentFiles(additions);
       try {
         await atomicWrite(join(root, 'packs.lock.json'), JSON.stringify(lock, null, 2) + '\n');
-        await atomicWrite(configPath, upgraded);
+        let text = upgraded;
+        if (keptModels.length) {
+          const carriedText = upgradedWith(carriedRoles);
+          try {
+            loadConfig(configPath, carriedText);
+            text = carriedText;
+          } catch {
+            modelsDropped = keptModels;
+          }
+        }
+        modelsKept = text === upgraded ? [] : keptModels;
+        await atomicWrite(configPath, text);
         await reserveRepositories(loadConfig(configPath), root);
       } catch (invalid) {
         // Вернуть как было: иначе номер версии израсходован, а починить нечем.
@@ -628,6 +694,19 @@ export async function setupWorkspace(file: string, data?: string) {
         data: root,
         config: configPath,
         delivered,
+        ...(modelsKept.length || modelsDropped.length
+          ? {
+              models: {
+                kept: modelsKept,
+                dropped: modelsDropped,
+                ...(modelsDropped.length
+                  ? {
+                      note: `Выбор моделей ролей ${modelsDropped.join(', ')} не сохранён: конфигурация с ним не загружается под новым профилем; действуют привязки профиля`,
+                    }
+                  : {}),
+              },
+            }
+          : {}),
         ...operationalNote(operationalDeclaration(input, operationalCurrent(raw)).differs),
         ...additionsNote(publicAdditions(additions)),
         ...(shadowed.length

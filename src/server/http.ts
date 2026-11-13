@@ -416,8 +416,10 @@ export async function serve(
           };
           const type = types[extname(file).toLowerCase()];
           if (!type) throw new DomainError('Неподдерживаемый тип файла', 415);
-          // A document keeps its own subresources; isolation comes from the
-          // sandboxed frame the panel renders it in, not from blocking its CSS.
+          // A document keeps its own subresources (CSS, scripts). It is always
+          // a sandbox with an opaque origin, also when opened on its own
+          // («Открыть отдельно»): a sketch script then sends `Origin: null`
+          // and cannot call the panel API, operator routes included.
           const html = type.startsWith('text/html');
           res.writeHead(200, {
             'Content-Type': type,
@@ -428,7 +430,7 @@ export async function serve(
                 "font-src 'self' data:; " +
                 "script-src 'self' 'unsafe-inline' https://cdn.jsdelivr.net https://cdnjs.cloudflare.com; " +
                 "connect-src 'self' https://cdn.jsdelivr.net https://cdnjs.cloudflare.com; " +
-                "frame-ancestors 'self'; base-uri 'none'; form-action 'none'"
+                "frame-ancestors 'self'; base-uri 'none'; form-action 'none'; sandbox allow-scripts"
               : "default-src 'none'; sandbox",
           });
           res.end(await readFile(file));
