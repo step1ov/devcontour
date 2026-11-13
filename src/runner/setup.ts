@@ -1,6 +1,6 @@
 import { selectedWorkspaceMode, assertControllerCheckout } from './workspace-mode.ts';
 import { readFile, realpath, writeFile } from 'node:fs/promises';
-import { basename, dirname, isAbsolute, join, relative, resolve, sep } from 'node:path';
+import { basename, isAbsolute, join, relative, resolve, sep } from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { isIP } from 'node:net';
 import {
@@ -29,6 +29,7 @@ import {
 } from './config.ts';
 import { profile, profileMetadata, profilePin, packKey } from './packs.ts';
 import { git } from './process.ts';
+import { guideCopies } from './guides.ts';
 
 const templateRoot = fileURLToPath(new URL('../../templates/project/', import.meta.url));
 const libraryRoot = fileURLToPath(new URL('../../packs/context/', import.meta.url));
@@ -620,49 +621,10 @@ async function runSetup(options: {
   );
   if (workspaceRoot && workspaceRoot !== repository)
     files.set(join(workspaceRoot, '.gitignore'), '.devcontour-local/\n.env*\n!.env.example\n');
-  const guides = new Map([
-    ['START.md', 'devcontour-start.md'],
-    ['docs/workspaces.md', 'devcontour-workspaces.md'],
-    ['docs/engineering-context.md', 'devcontour-engineering.md'],
-    ['docs/project-integration.md', 'devcontour-integration.md'],
-    ...[
-      'team-sync',
-      'requirements',
-      'lead-workflow',
-      'staged-workflow',
-      'workspace-modes',
-      'project-memory',
-      'metrics',
-      'experiments',
-      'agent-evals',
-      'intent',
-      'product-map',
-      'mcp-and-profiles',
-    ].map((name) => ['docs/' + name + '.md', 'devcontour-' + name + '.md'] as [string, string]),
-  ]);
-  for (const [source, destination] of guides) {
-    const text = await readFile(join(devcontourRoot, source), 'utf8');
-    const rewritten = text.replace(
-      /\[([^\]]+)\]\(([^)]+\.(?:md|json)(?:#[^)]*)?)\)/g,
-      (match, label, target: string) => {
-        if (/^(https?:|#)/.test(target)) return match;
-        const [file, anchor] = target.split('#');
-        const sourceRelative = relative(
-          devcontourRoot,
-          resolve(devcontourRoot, dirname(source), file),
-        );
-        const installed = guides.get(sourceRelative);
-        return installed
-          ? '[' + label + '](' + installed + (anchor ? '#' + anchor : '') + ')'
-          : label +
-              ' (справочник DevContour: ' +
-              sourceRelative +
-              (anchor ? '#' + anchor : '') +
-              ')';
-      },
-    );
-    files.set(join(repository, 'docs', destination), rewritten);
-  }
+  // Руководства DevContour — с меткой digest: guides-refresh позже отличит
+  // устаревшую копию от изменённой в продукте (guides.ts).
+  for (const [name, content] of await guideCopies())
+    files.set(join(repository, 'docs', name), content);
   files.set(join(data, 'packs.lock.json'), JSON.stringify(profileLock(pinned), null, 2) + '\n');
   const profilePath = join(data, 'profiles', selected.id + '.json');
   const profileContent = selected.raw;

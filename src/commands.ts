@@ -32,6 +32,7 @@ import { serveMcp } from './server/mcp.ts';
 import { readAgentJson } from './runner/json-file.ts';
 import { repositories } from './core/repositories.ts';
 import { dataDoctor, doctor, doctorState } from './runner/doctor.ts';
+import { guideDrift, refreshGuides } from './runner/guides.ts';
 import { cleanupEnvironment } from './runner/environment.ts';
 import { environmentRoots } from './runner/checkout-root.ts';
 import { importKnowledge } from './runner/knowledge.ts';
@@ -718,6 +719,35 @@ async function main() {
     );
     console.log(JSON.stringify(result, null, 2));
     if (!result.ready) process.exitCode = 1;
+    return;
+  }
+  // Копии руководств DevContour в продукте: пишутся только файлы, которые
+  // записал инструмент и которые с тех пор не правили (guides.ts). Состояние
+  // не меняется, коммита нет — копии ложатся в рабочее дерево.
+  if (operation === 'guides-refresh') {
+    const replaceUnmarked = args.includes('--replace-unmarked');
+    const results = [];
+    for (const path of new Set([config.repository, ...config.repositories.map((r) => r.path)]))
+      if (path === config.repository || (await guideDrift(path)).length)
+        results.push(await refreshGuides(path, { replaceUnmarked }));
+    console.log(
+      JSON.stringify(
+        {
+          repositories: results,
+          next: [
+            'Копии записаны в рабочее дерево и не закоммичены: проверьте git diff и закоммитьте их на рабочей ветке.',
+            'Прогоны видят новые копии, только когда рабочая ветка перенесена в их базу: base-update.',
+            ...(results.some((r) => r.kept.length)
+              ? [
+                  'Оставленные копии названы в kept с причиной; doctor продолжит называть расхождение.',
+                ]
+              : []),
+          ],
+        },
+        null,
+        2,
+      ),
+    );
     return;
   }
   // Отчёт об эффекте только читает базу (как doctor): рядом может работать

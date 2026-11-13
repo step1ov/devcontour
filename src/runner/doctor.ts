@@ -26,6 +26,7 @@ import { gateTimeoutSum, packageRegistryDomains } from './setup.ts';
 import { validateWorkflow } from '../core/workflow.ts';
 import { command, git } from './process.ts';
 import { outdatedContextPacks } from './context-library.ts';
+import { guideDrift, guideDriftText } from './guides.ts';
 import { executionEnvironment, runSteps, withEnvironment } from './environment.ts';
 import { withResources } from './resources.ts';
 import { agentEnvironment, reviewerRunsChecks, toolProfileFor, writerRunsChecks } from './tools.ts';
@@ -894,6 +895,7 @@ export async function doctor(
       .map((p) => `${p.id} ${p.version} → ${p.library}`)
       .join('; ')}. Решите: остаться на своей версии или перейти — context-adopt --pack <id>`;
   });
+  checks.push(...(await guideChecks(config)));
   await check('write-scope', async () => {
     const open = bindings
       .filter((b) => !b.review && !roleBinding(config, b.role, b.repo.id)?.writePaths?.length)
@@ -1110,6 +1112,42 @@ export async function doctor(
   await mkdir(root, { recursive: true });
   await writeFile(join(root, 'doctor.json'), JSON.stringify(result, null, 2));
   return result;
+}
+
+/**
+ * Копии руководств DevContour в продукте (`docs/devcontour-*.md`): setup
+ * записывает их один раз, и без сверки долгоживущий продукт читает руководства
+ * прежней версии. Расхождение не блокирует работу — `degraded` с командой
+ * исправления. Проверяется основной репозиторий setup и компоненты, в которых
+ * копии есть; репозиторий без копий вовсе не сверяется.
+ */
+export async function guideChecks(
+  config: Pick<Config, 'repository' | 'repositories' | 'workspaceRoot'>,
+): Promise<Check[]> {
+  const paths = [...new Set([config.repository, ...config.repositories.map((r) => r.path)])];
+  const checks: Check[] = [];
+  const hint = config.workspaceRoot ? `--workspace ${config.workspaceRoot}` : '--workspace <W>';
+  for (const path of paths) {
+    let entries;
+    try {
+      entries = await guideDrift(path);
+    } catch (e) {
+      checks.push({
+        id: `guides:${path}`,
+        status: 'degraded',
+        detail: 'Копии руководств не читаются: ' + (e instanceof Error ? e.message : String(e)),
+      });
+      continue;
+    }
+    if (!entries.length) continue;
+    const drift = guideDriftText(entries, hint);
+    checks.push({
+      id: `guides:${path}`,
+      status: drift ? 'degraded' : 'passed',
+      detail: drift ?? 'Копии руководств DevContour совпадают с установленной версией',
+    });
+  }
+  return checks;
 }
 
 /**
