@@ -44,6 +44,7 @@ import { DomainError } from '../core/model.ts';
 import { blockers, readyTasks } from '../core/graph.ts';
 import { Scheduler } from '../runner/scheduler.ts';
 import { requestInputPolicy } from '../runner/reconfigure.ts';
+import { modelSettingsView, previewModels, requestModels } from '../runner/model-settings.ts';
 import { InputService, inputHolds, stopQuestions } from '../application/input.ts';
 import { acceptBoard } from '../runner/agent-control.ts';
 import { modelRuntimes, repositories } from '../core/repositories.ts';
@@ -570,6 +571,14 @@ export async function serve(
           );
         } else if (req.method === 'GET' && parts[1] === 'contracts' && parts[2] && !parts[3]) {
           result = panelContract(h, decodeURIComponent(parts[2]));
+        } else if (req.method === 'GET' && path === '/api/config/settings') {
+          // Настройки оператора: модели ролей и порог вопросов. Только чтение;
+          // изменение — маршрутами POST ниже, с ожидаемым digest.
+          result = {
+            ...inputPolicyView(h, h.store.read(), scheduler.root),
+            approvalMode: h.config.approvalMode,
+            models: modelSettingsView(h, scheduler.root),
+          };
         } else if (req.method === 'GET' && path === '/api/state') {
           const state = h.store.read();
           const events = h.store.events();
@@ -758,6 +767,12 @@ export async function serve(
           else if (path === '/api/config/input-policy')
             // Порог вопросов исполнителя — выбор оператора: не операция агента.
             result = requestInputPolicy(h, scheduler.root, input);
+          else if (path === '/api/config/models/preview')
+            // Что изменит выбор моделей: без записи.
+            result = previewModels(h, scheduler.root, input);
+          else if (path === '/api/config/models')
+            // Модели ролей и независимость ревью — выбор владельца: не операция агента.
+            result = requestModels(h, scheduler.root, input);
           else if (path === '/api/scheduler') {
             const start = z.boolean().parse(input.start);
             // Сервер останавливается: запуск очереди снял бы паузу остановки,

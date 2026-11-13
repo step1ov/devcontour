@@ -11,7 +11,7 @@ import { Scheduler } from '../src/runner/scheduler.ts';
 import { serve } from '../src/server/http.ts';
 import { useLiveCliGuard } from './live-cli-guard.ts';
 
-// Порог вопросов исполнителя в панели («Ход работ» → «Вопросы исполнителя»).
+// Порог вопросов исполнителя в панели («Настройки» → «Вопросы исполнителя»).
 // Свой учебный сервер в процессе теста: правка порога меняет конфигурацию,
 // и общий демо-проект после неё был бы не тем, что ждут другие сценарии; а
 // объявление в workspace.json требует workspaceRoot, которого у demo нет.
@@ -77,6 +77,15 @@ test.afterAll(async () => {
     rmSync(root, { recursive: true, force: true });
 });
 
+/** Подмена полей данных экрана «Настройки» (`GET /api/config/settings`). */
+async function patchSettings(page: Page, patch: () => Record<string, unknown>) {
+  await page.route('**/api/config/settings', async (route) => {
+    const response = await route.fetch();
+    const state = (await response.json()) as Record<string, unknown>;
+    await route.fulfill({ response, json: { ...state, ...patch() } });
+  });
+}
+
 const card = (page: Page) => page.getByRole('region', { name: 'Вопросы исполнителя' });
 const configFile = () =>
   JSON.parse(readFileSync(join(data, 'config.json'), 'utf8')) as { inputPolicy?: unknown };
@@ -97,7 +106,7 @@ test('Оператор меняет порог без правки JSON: при�
       }
     }).observe(document, { childList: true, subtree: true, characterData: true });
   });
-  await page.goto(url + '/?tab=progress');
+  await page.goto(url + '/?tab=settings');
   const policy = card(page);
   // Действующее значение — в описании текущего порога, а не в вариантах выбора.
   await expect(policy.locator('[data-input-policy-threshold]')).toHaveText(
@@ -143,6 +152,8 @@ test('Оператор меняет порог без правки JSON: при�
   };
   const applied = events.items.find((e) => e.type === 'config.applied');
   expect(applied?.data?.operation).toMatch(/^config-apply:inputPolicy:/);
+  // Журнал — на вкладке «Ход работ».
+  await page.goto(url + '/?tab=progress');
   const journal = page.locator('[data-slot="card"]', {
     has: page.getByRole('heading', { name: /^Журнал/ }),
   });
@@ -154,19 +165,10 @@ test('Оператор меняет порог без правки JSON: при�
 test('Устаревший digest: сервер отказывает 409, карточка показывает ошибку и не пишет файл', async ({
   page,
 }) => {
-  // Панель «видела» другую конфигурацию: digest в сводке подменён.
-  await page.route('**/api/summary*', async (route) => {
-    const target = new URL(route.request().url());
-    target.searchParams.delete('revision');
-    const response = await route.fetch({ url: target.toString() });
-    const state = (await response.json()) as { config: Record<string, unknown> };
-    await route.fulfill({
-      response,
-      json: { ...state, config: { ...state.config, configDigest: 'a'.repeat(64) } },
-    });
-  });
+  // Панель «видела» другую конфигурацию: digest в данных экрана подменён.
+  await patchSettings(page, () => ({ configDigest: 'a'.repeat(64) }));
   const before = readFileSync(join(data, 'config.json'), 'utf8');
-  await page.goto(url + '/?tab=progress');
+  await page.goto(url + '/?tab=settings');
   const policy = card(page);
   await policy.getByLabel('Порог', { exact: true }).selectOption('3');
   await policy.getByRole('button', { name: 'Применить порог' }).click();
@@ -180,26 +182,15 @@ test('Устаревший digest: сервер отказывает 409, кар
   );
 });
 
-/** Подмена полей `config` сводки: ревизия убирается, чтобы каждый ответ был полным. */
-async function patchSummary(page: Page, patch: () => Record<string, unknown>) {
-  await page.route('**/api/summary*', async (route) => {
-    const target = new URL(route.request().url());
-    target.searchParams.delete('revision');
-    const response = await route.fetch({ url: target.toString() });
-    const state = (await response.json()) as { config: Record<string, unknown> };
-    await route.fulfill({ response, json: { ...state, config: { ...state.config, ...patch() } } });
-  });
-}
-
 test('Слот занят другой операцией: карточка называет её вместо формы', async ({ page }) => {
-  await patchSummary(page, () => ({
+  await patchSettings(page, () => ({
     configPending: {
       operation: 'contract-change:CC-9',
       requestedAt: new Date().toISOString(),
       appliedAt: new Date().toISOString(),
     },
   }));
-  await page.goto(url + '/?tab=progress');
+  await page.goto(url + '/?tab=settings');
   const policy = card(page);
   const busy = policy.locator('[data-input-policy-busy]');
   await expect(busy).toContainText('contract-change:CC-9');
@@ -225,7 +216,7 @@ test('Сервер отклонил применение: после ожида�
       },
     });
   });
-  await patchSummary(page, () =>
+  await patchSettings(page, () =>
     stage === 'pending'
       ? {
           configPending: {
@@ -245,7 +236,7 @@ test('Сервер отклонил применение: после ожида�
             { configPending: null, configDrift: null, configDigest: 'c'.repeat(64) }
           : {},
   );
-  await page.goto(url + '/?tab=progress');
+  await page.goto(url + '/?tab=settings');
   const policy = card(page);
   await policy.getByLabel('Порог', { exact: true }).selectOption('2');
   await policy.getByRole('button', { name: 'Применить порог' }).click();
@@ -272,7 +263,7 @@ test('config.json правлен и не применён: подсказка co
   const raw = JSON.parse(before) as Record<string, unknown>;
   writeFileSync(path, JSON.stringify({ ...raw, concurrency: 3 }, null, 2) + '\n');
   try {
-    await page.goto(url + '/?tab=progress');
+    await page.goto(url + '/?tab=settings');
     const policy = card(page);
     const drift = policy.locator('[data-input-policy-drift]');
     await expect(drift).toContainText('config.json отличается от действующей конфигурации');
@@ -282,7 +273,7 @@ test('config.json правлен и не применён: подсказка co
     writeFileSync(path, before);
   }
   // Файл возвращён: форма снова доступна.
-  await page.goto(url + '/?tab=progress');
+  await page.goto(url + '/?tab=settings');
   await expect(card(page).getByRole('button', { name: 'Применить порог' })).toBeVisible();
 });
 
@@ -292,7 +283,7 @@ test('Порог объявлен в workspace.json: значение тольк
   const file = join(registry, 'workspace.json');
   writeFileSync(file, JSON.stringify({ inputPolicy: { threshold: 9 } }));
   try {
-    await page.goto(url + '/?tab=progress');
+    await page.goto(url + '/?tab=settings');
     const policy = card(page);
     const hint = policy.locator('[data-input-policy-declared]');
     await expect(hint).toContainText('объявлен в workspace.json');

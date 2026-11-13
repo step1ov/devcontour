@@ -18,7 +18,16 @@ import { configuredSpellings } from '../core/check-store.ts';
  * прочли (или только собираются записать): так digest считается по тому
  * тексту, который проверили, а не по повторному чтению файла.
  */
-export function loadConfig(path: string, text = readFileSync(path, 'utf8')): Config {
+export function loadConfig(
+  path: string,
+  text = readFileSync(path, 'utf8'),
+  /**
+   * Тексты файлов компонентов по разрешённому пути, ещё не записанные на диск:
+   * правка из панели проверяется тем же загрузчиком до записи, и digest
+   * считается по тем байтам, которые будут записаны.
+   */
+  componentTexts?: ReadonlyMap<string, string>,
+): Config {
   const raw = JSON.parse(text);
   let ignoredCopies: IgnoredComponentCopy[] = [];
   // Хэш ровно тех байтов, что разобраны: главного файла и component config.
@@ -28,7 +37,7 @@ export function loadConfig(path: string, text = readFileSync(path, 'utf8')): Con
   if (raw.repositories?.length) {
     const ignored: IgnoredComponentCopy[] = [];
     raw.repositories = raw.repositories.map((r: any) =>
-      readComponentConfig(r, sources, false, ignored),
+      readComponentConfig(r, sources, false, ignored, componentTexts),
     );
     ignoredCopies = ignored;
     // Верхнеуровневые gates и protectedPaths при списке репозиториев —
@@ -199,6 +208,7 @@ export function readComponentConfig(
   sources?: ConfigSourceFile[],
   inherit = true,
   ignored?: IgnoredComponentCopy[],
+  texts?: ReadonlyMap<string, string>,
 ) {
   if (!entry.configFile) return entry;
   const declared = { path: String(entry.path), file: String(entry.configFile) };
@@ -206,7 +216,7 @@ export function readComponentConfig(
   const path = realpathSync(resolve(root, declared.file));
   if (!path.startsWith(root + sep))
     throw new Error('Component config должен находиться в репозитории');
-  const text = readFileSync(path, 'utf8');
+  const text = texts?.get(path) ?? readFileSync(path, 'utf8');
   sources?.push({
     path: resolve(declared.path, declared.file),
     real: path,

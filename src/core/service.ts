@@ -75,6 +75,82 @@ export const operationalKeys = [
   'gateTimeoutFloorMs',
 ] as const;
 export type OperationalKey = (typeof operationalKeys)[number];
+/**
+ * Ключи запроса `config-apply`: эксплуатационные и `models` — runtime, модель
+ * и уровень рассуждения привязок исполнителей и ревьюеров. `models` не
+ * эксплуатационный ключ: привязки входят в digest утверждения плана, поэтому
+ * после применения открытые утверждённые задачи требуют повторного
+ * утверждения (`approvalStale`), а не перезакрепляются молча. Применяется тем
+ * же запросом и тем же drain, что и эксплуатационные ключи.
+ */
+export const applyKeys = [...operationalKeys, 'models'] as const;
+export type ApplyKey = (typeof applyKeys)[number];
+type ModelFields = { runtime: string; model?: string; effort?: string };
+type BindingHolder = Record<string, unknown> | undefined;
+/**
+ * Привязки конфигурации по месту объявления: роли и их ревьюеры, ревьюер
+ * workspace, роли и ревьюеры компонентов, ревьюеры правил ревью. `visit`
+ * получает объект привязки и путь к нему.
+ */
+function eachBinding(c: Config, visit: (binding: Record<string, unknown>, at: string) => void) {
+  const role = (b: BindingHolder, at: string) => {
+    if (!b) return;
+    visit(b, at);
+    if (b.reviewer) visit(b.reviewer as Record<string, unknown>, at + '.reviewer');
+  };
+  for (const [id, b] of Object.entries(c.roles ?? {})) role(b, `roles.${id}`);
+  if (c.reviewer) visit(c.reviewer, 'reviewer');
+  for (const r of c.repositories ?? []) {
+    for (const [id, b] of Object.entries(r.roles ?? {}))
+      role(b, `repositories.${r.id}.roles.${id}`);
+    if (r.reviewer) visit(r.reviewer, `repositories.${r.id}.reviewer`);
+  }
+  for (const kind of ['code', 'plan', 'contract'] as const) {
+    const reviewer = c.review?.[kind]?.reviewer;
+    if (reviewer) visit(reviewer, `review.${kind}.reviewer`);
+  }
+}
+/** Значение ключа `models`: runtime, модель и effort каждой привязки по её месту. */
+export function modelBindings(c: Config): Record<string, ModelFields> {
+  const result: Record<string, ModelFields> = {};
+  eachBinding(c, (b, at) => {
+    result[at] = {
+      runtime: b.runtime as string,
+      ...(b.model !== undefined ? { model: b.model as string } : {}),
+      ...(b.effort !== undefined ? { effort: b.effort as string } : {}),
+    };
+  });
+  return result;
+}
+/** Конфигурация без полей модели в привязках: что ещё обязано совпасть при применении `models`. */
+export function withoutModels(c: Config): Config {
+  const copy = JSON.parse(JSON.stringify(c)) as Config;
+  eachBinding(copy, (b) => {
+    delete b.runtime;
+    delete b.model;
+    delete b.effort;
+  });
+  // Свой ревьюер роли или правила ревью, у которого кроме модели ничего нет, —
+  // тоже выбор модели: его появление или снятие не меняет прочего.
+  const empty = (v: unknown) => !!v && typeof v === 'object' && !Object.keys(v).length;
+  const roles = (bindings: Record<string, { reviewer?: unknown }> | undefined) => {
+    for (const b of Object.values(bindings ?? {})) if (empty(b.reviewer)) delete b.reviewer;
+  };
+  roles(copy.roles);
+  for (const r of copy.repositories ?? []) roles(r.roles);
+  if (copy.review) {
+    const review = copy.review as Record<string, { reviewer?: unknown } | undefined>;
+    for (const kind of Object.keys(review)) {
+      if (empty(review[kind]?.reviewer)) delete review[kind]!.reviewer;
+      if (empty(review[kind])) delete review[kind];
+    }
+    if (empty(copy.review)) delete copy.review;
+  }
+  return copy;
+}
+/** Значение ключа запроса применения в конфигурации (журнал `config.applied`). */
+export const applyKeyValue = (c: Config, key: ApplyKey): unknown =>
+  key === 'models' ? modelBindings(c) : (c[key] ?? null);
 export { digest, scopeDigest, specDigest } from './task-digest.ts';
 import { digest, scopeDigest, specDigest } from './task-digest.ts';
 /**
@@ -708,12 +784,17 @@ export class DevContour {
    * отличаться могут только названные ключи (`operationalKeys`), а
    * закрепление пакетов — нет.
    */
-  reconfigure(next: Config, keys?: readonly OperationalKey[]) {
+  reconfigure(next: Config, keys?: readonly ApplyKey[]) {
     // Без перезапуска меняется только закрепление пакетов — их revision и
     // digest. Состав пакетов, их роли, файлы и версии — другая конфигурация.
+    // `models` — только runtime, модель и effort привязок: прочие поля ролей
+    // (области записи, профили инструментов, правила вендора) — нет.
     const rest = (c: Config) =>
       keys
-        ? digest({ ...c, ...Object.fromEntries(keys.map((k) => [k, undefined])) })
+        ? digest({
+            ...(keys.includes('models') ? withoutModels(c) : c),
+            ...Object.fromEntries(keys.filter((k) => k !== 'models').map((k) => [k, undefined])),
+          })
         : digest({
             ...c,
             contextPacks: c.contextPacks.map((pack) => ({

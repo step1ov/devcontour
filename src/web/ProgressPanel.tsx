@@ -29,7 +29,7 @@ import { taskStatus } from './status.ts';
 import { heldByInput, inputNextText } from './input-labels.ts';
 import { Badge } from '@/ui/badge.tsx';
 import { Card, CardContent, CardHeader, CardTitle } from '@/ui/card.tsx';
-import { InputPolicyCard, type InputPolicyConfig } from './InputPolicy.tsx';
+import type { InputPolicyConfig } from './InputPolicy.tsx';
 import { findingSeverityLabel } from './review-labels.ts';
 
 // What the operator wants to know while work runs: how far the whole thing is,
@@ -721,7 +721,6 @@ export type PanelProgress = {
 export function ProgressPanel({
   state,
   onSelect,
-  onConfigChanged,
 }: {
   state: {
     /** Задачи текущей работы; итоги по всей истории — в `progress`. */
@@ -763,8 +762,6 @@ export function ProgressPanel({
     };
   };
   onSelect?: (taskId: string) => void;
-  /** Конфигурация изменена из панели: сводку стоит перечитать сразу. */
-  onConfigChanged?: () => void;
 }) {
   // Итоги — агрегаты сервера по всей истории: клиенту не нужны все попытки.
   // Черновик — запланированная работа, а не мусор; скрывается только отменённое.
@@ -792,7 +789,6 @@ export function ProgressPanel({
         gates={state.config.gates}
         packs={state.config.packs}
       />
-      <InputPolicyCard config={state.config} onChanged={onConfigChanged} />
 
       <Card>
         <CardHeader className="pb-3">
