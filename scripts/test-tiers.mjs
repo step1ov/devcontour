@@ -65,6 +65,8 @@ export const fileSeconds = {
   'handoff-rank': 102,
   'integration-review-scope': 101,
   proof: 100,
+  // Оценка по отдельному прогону (~35 с) с запасом на нагрузку полной проверки.
+  'contract-change-siblings': 100,
   'stall-sweep': 99,
   'idle-controller': 92,
   'start-context-commit': 90,
@@ -162,6 +164,10 @@ export const slowTests = {
     'A running server applies the requested configuration and',
     'The operation repins a context pack that pins the previous',
     'A configuration changed outside the operation is refused with',
+  ],
+  'contract-change-siblings': [
+    'A sibling document fixed after its operation started does not make the',
+    'Unreviewed content does not move with a sibling: an edited approved',
   ],
   'contract-change-staleness': [
     'C-F01: a repin retry accepts only the planned result; an edit',

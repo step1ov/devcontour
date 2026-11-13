@@ -55,19 +55,49 @@ export async function sensitiveBaseEntries(
   const changed = (await git(repo.path, 'diff', '--name-only', '-z', '--no-renames', from, to))
     .split('\0')
     .filter(Boolean);
+  const { other, document, documents } = baseRules(h, dataRoot, s, repositoryId);
+  const hit = changed.filter((p) => other(p) || document(p));
+  // Закреплённые редакции артефактов открытой работы на `to` — те же blob.
+  const open = s.tasks.filter((t) => !['done', 'cancelled'].includes(t.status));
+  const pinned = s.contracts.filter((c) => open.some((t) => t.contracts.includes(c.id)));
+  const stale = new Set(
+    await assertArtifactsInBase(repo.path, to, componentArtifacts(pinned, repositoryId)),
+  );
+  return [...new Set([...hit, ...stale])].map((path) => ({
+    path,
+    contractDocument: documents.has(path) && !other(path) && !stale.has(path),
+  }));
+}
+
+/**
+ * Правила чувствительных путей переноса базы для компонента: документы
+ * контрактов (`document`) отдельно от прочего (`other`: артефакты контрактов,
+ * файлы context packs, защищённые и генерируемые пути, файл конфигурации,
+ * каталоги и данные контура). `restricted` — то же прочее без артефактов и
+ * файлов context packs: эти пути не снимает никакое доказательство ревью.
+ */
+function baseRules(
+  h: DevContour,
+  dataRoot: string,
+  s: Readonly<DevContourState>,
+  repositoryId: string,
+) {
+  const repo = repository(h.config, repositoryId);
   const own = (r?: string) => (r ?? 'main') === repositoryId;
   const exact = new Set<string>();
+  const artifacts = new Set<string>();
+  const packFiles = new Set<string>();
   // Документы контрактов — отдельно: снять их может доказательство ревью
   // (`reviewedContractDocument`), остальные пути — только человек.
   const documents = new Set<string>();
   const prefixes: string[] = ['.devcontour/', '.devcontour-local/'];
   for (const c of s.contracts) {
     if (c.source && own(c.repositoryId)) documents.add(c.source);
-    for (const a of c.artifacts ?? []) if (a.repositoryId === repositoryId) exact.add(a.path);
+    for (const a of c.artifacts ?? []) if (a.repositoryId === repositoryId) artifacts.add(a.path);
   }
   for (const pack of h.config.contextPacks)
     if (pack.repositoryId === repositoryId)
-      for (const f of [...pack.files, ...pack.references]) exact.add(f);
+      for (const f of [...pack.files, ...pack.references]) packFiles.add(f);
   for (const p of [...repo.protectedPaths, ...(repo.generatedPaths ?? [])])
     if (p.endsWith('/')) prefixes.push(p);
     else exact.add(p);
@@ -85,24 +115,17 @@ export async function sensitiveBaseEntries(
       exact.add(f);
   if (data === '') prefixes.push('profiles/');
   else if (!data.startsWith('..') && !isAbsolute(data)) prefixes.push(data + '/');
-  const other = (p: string) =>
-    exact.has(p) ||
+  const under = (set: Set<string>, p: string) =>
+    set.has(p) || [...set].some((x) => p.startsWith(x + '/'));
+  const restricted = (p: string) =>
+    under(exact, p) ||
     // Каталог, закоммиченный ссылкой или gitlink, — путь без «/»: тоже он.
-    prefixes.some((x) => p.startsWith(x) || p === x.slice(0, -1)) ||
-    [...exact].some((x) => p.startsWith(x + '/'));
-  const document = (p: string) =>
-    documents.has(p) || [...documents].some((x) => p.startsWith(x + '/'));
-  const hit = changed.filter((p) => other(p) || document(p));
-  // Закреплённые редакции артефактов открытой работы на `to` — те же blob.
-  const open = s.tasks.filter((t) => !['done', 'cancelled'].includes(t.status));
-  const pinned = s.contracts.filter((c) => open.some((t) => t.contracts.includes(c.id)));
-  const stale = new Set(
-    await assertArtifactsInBase(repo.path, to, componentArtifacts(pinned, repositoryId)),
-  );
-  return [...new Set([...hit, ...stale])].map((path) => ({
-    path,
-    contractDocument: documents.has(path) && !other(path) && !stale.has(path),
-  }));
+    prefixes.some((x) => p.startsWith(x) || p === x.slice(0, -1));
+  const other = (p: string) => restricted(p) || under(artifacts, p) || under(packFiles, p);
+  const document = (p: string) => under(documents, p);
+  const artifact = (p: string) => under(artifacts, p);
+  const pack = (p: string) => under(packFiles, p);
+  return { other, document, documents, restricted, artifact, pack };
 }
 
 /** Доказательство: документ контракта на базе — blob, одобренный независимым ревью. */
@@ -208,4 +231,104 @@ export async function reviewedContractDocument(
     authorRuntime: approval.authorRuntime,
     reviewerRuntime: approval.reviewerRuntime,
   };
+}
+
+/** Путь соседнего контракта, который перенос базы операции несёт как одобренный. */
+export interface SiblingContractLift {
+  path: string;
+  /** Зарегистрированная редакция соседнего контракта, одобрившая этот blob. */
+  contractId: string;
+  kind: 'document' | 'artifact';
+  blob: string;
+}
+
+/** Запись дерева `to` по пути: blob обычного файла или `undefined`. */
+async function regularBlob(repoPath: string, to: string, path: string) {
+  let entry: string;
+  try {
+    entry = await git(repoPath, 'ls-tree', '-z', to, '--', path);
+  } catch {
+    return undefined;
+  }
+  const records = entry.split('\0').filter(Boolean);
+  const match = /^(\d+) (\w+) ([0-9a-f]+)\t([\s\S]*)$/.exec(records[0] ?? '');
+  if (records.length !== 1 || !match || match[4] !== path) return undefined;
+  const [, mode, type, blob] = match;
+  if (type !== 'blob' || (mode !== '100644' && mode !== '100755')) return undefined;
+  return blob;
+}
+
+/**
+ * Пути из `paths`, которые операция contract-change вправе перенести в базу
+ * вместе со своим контрактом, потому что это одобренные редакции соседних
+ * контрактов того же этапа. Соседи — зарегистрированные редакции `contracts`
+ * живых операций, прошедших ревью. Редакция годится, только если она —
+ * последняя для своего документа и её одобрение годно для снятия
+ * (`reviewedRedaction`). Тогда снимается:
+ *
+ * - документ — blob на `to` равен blob одобренного текста
+ *   (`reviewedContractDocument`, правило переноса D42 без изменений);
+ * - закреплённый артефакт — blob на `to` равен закреплённому, файл обычный, он
+ *   не файл context pack и не документ контракта, и другой контракт открытой
+ *   работы не закрепляет его в другой редакции.
+ *
+ * Защищённые, генерируемые и конфигурационные пути, каталоги и данные
+ * контура не снимаются никогда. Документ в context pack снимается: его
+ * перезакрепит шаг `context` соседней операции.
+ */
+export async function siblingContractLifts(
+  h: DevContour,
+  dataRoot: string,
+  s: Readonly<DevContourState>,
+  repositoryId: string,
+  paths: string[],
+  to: string,
+  contracts: string[],
+): Promise<Map<string, SiblingContractLift>> {
+  const lifted = new Map<string, SiblingContractLift>();
+  const wanted = new Set(paths);
+  if (!wanted.size || !contracts.length) return lifted;
+  const repo = repository(h.config, repositoryId);
+  const rules = baseRules(h, dataRoot, s, repositoryId);
+  const open = s.tasks.filter((t) => !['done', 'cancelled'].includes(t.status));
+  for (const id of [...new Set(contracts)]) {
+    const c = s.contracts.find((x) => x.id === id);
+    if (!c?.source || (c.repositoryId ?? 'main') !== repositoryId) continue;
+    if (reviewedRedaction(h.config, s, repositoryId, c.source)?.id !== c.id) continue;
+    if (
+      wanted.has(c.source) &&
+      !lifted.has(c.source) &&
+      !rules.restricted(c.source) &&
+      !rules.artifact(c.source)
+    ) {
+      const proof = await reviewedContractDocument(h, s, repositoryId, c.source, to);
+      if (proof?.contractId === c.id)
+        lifted.set(c.source, {
+          path: c.source,
+          contractId: c.id,
+          kind: 'document',
+          blob: proof.blob,
+        });
+    }
+    const own = (c.artifacts ?? []).filter(
+      (a) => a.repositoryId === repositoryId && wanted.has(a.path) && !lifted.has(a.path),
+    );
+    if (!own.length) continue;
+    // Другие контракты открытой работы, закрепляющие тот же путь в другой
+    // редакции: перенос поменял бы и их договор.
+    const others = s.contracts.filter(
+      (x) => x.id !== c.id && open.some((t) => t.contracts.includes(x.id)),
+    );
+    const conflicting = new Set(
+      await assertArtifactsInBase(repo.path, to, componentArtifacts(others, repositoryId)),
+    );
+    for (const a of own) {
+      if (rules.restricted(a.path) || rules.pack(a.path) || rules.document(a.path)) continue;
+      if (conflicting.has(a.path)) continue;
+      const blob = await regularBlob(repo.path, to, a.path);
+      if (blob && blob === a.blob)
+        lifted.set(a.path, { path: a.path, contractId: c.id, kind: 'artifact', blob });
+    }
+  }
+  return lifted;
 }
