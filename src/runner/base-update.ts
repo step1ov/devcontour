@@ -7,6 +7,12 @@ import { SERVER_STOPPING, type DevContour } from '../core/service.ts';
 import { policyFromConfig } from '../harness/policy.ts';
 import { checkoutRootFor, checkoutRootOption } from './checkout-root.ts';
 
+/**
+ * Начало остановки такта «база прогонов отстала» (`Scheduler.assertBaseCurrent`):
+ * по нему перенос базы операцией изменения контракта узнаёт свою паузу (F40).
+ */
+export const STALE_BASE = 'База прогонов отстала от рабочей ветки';
+
 // Прогон ответвляется от ветки интеграции, а контракты, схемы и каркас
 // готовятся на рабочей ветке репозитория. Перенос базы сводит эти линии явно и
 // целиком: очередь стоит, попыток нет, результат — один SHA на репозиторий.

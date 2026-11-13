@@ -106,6 +106,13 @@ export interface HintParamMap {
   /** Ответ сохранён, но не применён (`state`). */
   'apply-saved': { state: string; operator: boolean } & Stops;
   /**
+   * Исходная остановка вопроса не держится (постановка изменилась не только
+   * перепривязкой контракта, или была другая попытка): `input_apply` откажет
+   * (F39). `operatorAnswers` — заменить или снять вопрос может только оператор;
+   * `operator` — approvalMode operator: перенос применяет оператор в панели.
+   */
+  'apply-moved': { operatorAnswers: boolean; operator?: boolean } & Stops;
+  /**
    * Цепочку после ответа ведёт сервер (`InputResumer`): `phase` — фаза
    * прохода (`resume` сводки вопроса), `trigger` — кто ответил. Фазы
    * `failed`, `blocked`, `needs-lead` — проход остановился, `detail` — причина.
@@ -373,6 +380,17 @@ const en: Catalog = {
       repeatedEn(taskId, p.stops)
     );
   },
+  'apply-moved': (p, s) => {
+    const { requestId, taskId } = s.input!;
+    const chain = 'input_context, input_review, input_target, input_apply';
+    return (
+      `The saved answer to ${requestId} cannot be applied: the stop of task ${taskId} no longer holds (its spec changed after the question, not only by a contract-change rebinding, or another attempt ran), so input_apply would be refused. ` +
+      (p.operatorAnswers
+        ? `You may not supersede this question: ask the user to cancel it in the panel (${hrefs.input(taskId)}) or supersede it with the same task (devcontour input-supersede --by operator), then ${p.operator ? 'rebuild and review the answer snapshot (input_context, input_review); the operator applies the carry in the panel' : `carry the answer (${chain})`}.`
+        : `Supersede it with the same task (input_supersede) and carry the answer (${chain}), or cancel it (input_cancel).`) +
+      repeatedEn(taskId, p.stops)
+    );
+  },
   'apply-auto': (p, s) => {
     const { requestId, taskId } = s.input!;
     const chain = 'input_context, input_review, input_target, input_apply';
@@ -606,6 +624,17 @@ const ru: Catalog = {
     const { requestId, taskId } = s.input!;
     return (
       `Ответ на ${requestId} сохранён, но не применён (${p.state}): ${chainRu(p.operator, taskId)}.` +
+      repeatedRu(taskId, p.stops)
+    );
+  },
+  'apply-moved': (p, s) => {
+    const { requestId, taskId } = s.input!;
+    const chain = 'input_context, input_review, input_target, input_apply';
+    return (
+      `Сохранённый ответ на ${requestId} применить нельзя: исходная остановка задачи ${taskId} не держится (постановка изменилась после вопроса не только перепривязкой контракта, или была другая попытка), и input_apply откажет. ` +
+      (p.operatorAnswers
+        ? `Заменить этот вопрос вы не вправе: попросите пользователя снять его в панели (${hrefs.input(taskId)}) или заменить той же задачей (devcontour input-supersede --by operator), затем ${p.operator ? 'соберите и проверьте снимок с ответом (input_context, input_review); перенос применяет оператор в панели' : `перенесите ответ (${chain})`}.`
+        : `Замените его той же задачей (input_supersede) и перенесите ответ (${chain}) или снимите его (input_cancel).`) +
       repeatedRu(taskId, p.stops)
     );
   },

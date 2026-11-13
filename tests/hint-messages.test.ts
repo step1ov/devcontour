@@ -300,6 +300,11 @@ const samples: { [C in HintCode]: (HintSubject & Extract<HintOf, { code: C }>)[]
     { code: 'apply-saved', params: { state: 'answered', operator: false }, input: input1 },
     { code: 'apply-saved', params: { state: 'reviewed', operator: true }, input: input1 },
   ],
+  'apply-moved': [
+    { code: 'apply-moved', params: { operatorAnswers: true }, input: input1 },
+    { code: 'apply-moved', params: { operatorAnswers: false, stops }, input: input1 },
+    { code: 'apply-moved', params: { operatorAnswers: true, operator: true }, input: input1 },
+  ],
   'apply-auto': [
     { code: 'apply-auto', params: { phase: 'reviewing', trigger: 'operator' }, input: input1 },
     {
@@ -510,8 +515,12 @@ test('Подсказки шага: новая конфигурация setup п�
  * Намеренное изменение: добавлены образцы кода `apply-auto` (цепочку после
  * ответа оператора ведёт сервер: идёт, на паузе, остановлен — в том числе
  * исчерпанным бюджетом попыток); прочие образцы байтово прежние.
+ * Намеренное изменение: добавлены образцы кода `apply-moved` (исходная
+ * остановка вопроса не держится, F39); прочие образцы байтово прежние.
+ * Добавлен образец `apply-moved` с `operator` (approvalMode operator: перенос
+ * применяет оператор); прочие образцы байтово прежние.
  */
-const ENGLISH_SAMPLES_SHA256 = '079cb335165f3e63e74a0d32d9007d96c2266b608a17b3a8341edf348b9b513e';
+const ENGLISH_SAMPLES_SHA256 = '5380226c913ef80a6b7ee44a1037ef0abf3e4d0d737d8f033cc82ab47046199d';
 
 test('Подсказки шага: английские тексты образцов закреплены', () => {
   assert.equal(

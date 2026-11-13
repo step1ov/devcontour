@@ -101,6 +101,11 @@ export type AttentionAction =
       choices?: { id: string; label: string; hint?: string; recommended?: boolean }[];
       /** Раунд отклонённого ревью, который подтверждает действие (`input.confirmRejectedRound`). */
       round?: number;
+      /**
+       * Вопрос затрагивает зарегистрированный контракт (`affects: contract`):
+       * форма ответа поясняет порядок — изменение контракта, затем ответ (F38).
+       */
+      contract?: true;
     }
   | { id: 'open'; kind: 'navigate'; href: string }
   | { id: 'handoff'; kind: 'handoff'; command: string };

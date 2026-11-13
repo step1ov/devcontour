@@ -10,6 +10,7 @@ import {
   type ContractChange,
 } from '../src/runner/contract-change.ts';
 import { contractImpact } from '../src/runner/contract-impact.ts';
+import { STALE_BASE, updateBase } from '../src/runner/base-update.ts';
 import { type AgentAdapter, type AgentRequest } from '../src/runner/adapters.ts';
 import { readyTasks } from '../src/core/graph.ts';
 import { command } from '../src/runner/process.ts';
@@ -50,6 +51,69 @@ test('A contract change runs as one command: review, rebind, plan review, base a
     assert.equal(s.store.read().paused, true, 'пауза оператора не снята');
     // Повтор команды по той же редакции ничего не меняет.
     assert.equal((await s.changes().start(s.proposal, 'codex')).status, 'unchanged');
+  } finally {
+    await s.remove();
+  }
+});
+
+const staleBaseError = `TaskFailure: ${STALE_BASE}: main — main без 1 коммитов. Выполните devcontour base-update (ведущий агент — с --by host), иначе исполнитель получит дерево без подготовленной работы.`;
+
+/** Пауза такта очереди — та же запись, что у планировщика (или пауза человека с той же ошибкой). */
+const tickPause = (s: Awaited<ReturnType<typeof stage>>, error: string, reason?: 'operator') =>
+  s.h.store.change('scheduler.error', (st) => {
+    st.paused = true;
+    st.pauseReason = reason;
+    st.pausedAt = new Date().toISOString();
+    return { error };
+  });
+
+test('F40: the base step lifts the runtime pause «base lags behind» once the base caught up; another runtime pause and an operator pause stay', async () => {
+  for (const [error, reason, lifted] of [
+    [staleBaseError, undefined, true],
+    ['Error: provider is down', undefined, false],
+    [staleBaseError, 'operator', false],
+  ] as const) {
+    const s = await stage();
+    try {
+      tickPause(s, error, reason);
+      const started = await s.changes().start(s.proposal, 'codex');
+      const id = (started as { operation: ContractChange }).operation.id;
+      const done = await s.changes().advance(id);
+      assert.equal(done.status, 'completed', done.error);
+      assert.equal(
+        s.sh('rev-parse', `refs/heads/${s.h.config.targetBranch}`),
+        s.sh('rev-parse', 'HEAD'),
+        'база равна рабочей ветке',
+      );
+      const state = s.store.read();
+      assert.equal(state.paused, !lifted, error);
+      if (reason) assert.equal(state.pauseReason, 'operator');
+      // Снятие записано как действие операции, а не запуск человеком.
+      const resumed = s.store
+        .allEvents()
+        .filter((e) => e.type === 'contract-change.queue-resumed')
+        .map((e) => (e as unknown as { data: Record<string, unknown> }).data);
+      assert.deepEqual(resumed, lifted ? [{ operation: id, reason: 'stale-base' }] : []);
+    } finally {
+      await s.remove();
+    }
+  }
+});
+
+test('F40: while a base still lags behind its working branch the pause stays; once moved it is lifted', async () => {
+  const s = await stage();
+  try {
+    tickPause(s, staleBaseError);
+    const lift = () =>
+      (
+        s.changes() as unknown as { liftStaleBasePause(op: { id: string }): Promise<boolean> }
+      ).liftStaleBasePause({ id: 'CC-direct' });
+    // Рабочая ветка впереди базы: снимать нечего.
+    assert.equal(await lift(), false);
+    assert.equal(s.store.read().paused, true);
+    await updateBase(s.h.config, s.root);
+    assert.equal(await lift(), true);
+    assert.equal(s.store.read().paused, false);
   } finally {
     await s.remove();
   }

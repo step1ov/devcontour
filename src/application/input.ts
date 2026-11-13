@@ -52,6 +52,70 @@ import { outsideRoleScope, roleScopeAdvice } from '../core/workflow.ts';
 import { roleBinding } from '../core/repositories.ts';
 import { taskOwner } from '../core/sync-state.ts';
 import { resumeOf, type ResumeView } from './input-resume.ts';
+import {
+  orderContentDigest,
+  reboundByOperation,
+  reboundOf,
+  type ContractChangeTrace,
+} from './input-rebound.ts';
+import { repositories } from '../core/repositories.ts';
+import { specDigest } from '../core/task-digest.ts';
+
+/**
+ * Начало причины движка «работа уже не в исходной остановке» (`proposeTarget`).
+ * Её снимает только перепривязка контракта, которую DevContour проверил сам
+ * (`originOf` → `rebound`): другой текст движка оставляет причину как есть.
+ */
+const ORIGIN_PROBLEM = 'работа уже не в исходной остановке';
+
+/**
+ * Отклонённый ответ на вопрос о контракте (`affects: contract`): находка
+ * ревью «ответ меняет контракт» снимается не исправлением ответа, а
+ * изменением контракта — после него тот же ответ проходит цепочку и
+ * применяется к новой редакции (F39).
+ */
+const contractRoute = (request: InputRequest) =>
+  request.question.affects.includes('contract')
+    ? '; when the findings say the answer needs an amendment of a registered contract, the lead runs contract-change first (the task is rebound to the new revision and approved again), then the same answer passes input_context, input_review, input_target and input_apply'
+    : '';
+
+/** Причина замены, которой применение переносит ответ после перепривязки контракта (F39). */
+const REBOUND_REASON =
+  'Постановка задачи изменилась только перепривязкой контракта к новой редакции (contract-change): проверенный ответ переносится в новую редакцию';
+
+/**
+ * Исходная остановка вопроса: `holds` — постановка та же; `rebound` —
+ * изменилась только перепривязкой контрактов к их новым редакциям, задача
+ * снова утверждена и на попытке вопроса (у вопроса с минимумами — только
+ * перепривязкой, которую провела завершённая операция contract-change);
+ * `pending` — задача в черновике после такой перепривязки или её операция
+ * ещё идёт (ждёт утверждения); `moved` — остановка не держится: другая
+ * постановка, перепривязка без операции у вопроса с минимумами или другая
+ * попытка, применение откажет.
+ */
+export type InputOrigin = 'holds' | 'rebound' | 'pending' | 'moved';
+
+/** Начало причины движка «в графе идут попытки»: это ожидание, а не исправление. */
+const ACTIVE_PROBLEM = 'в графе идут попытки';
+
+/** Применение после перепривязки не перенесло ответ: транзакция откатывается, итог — как у applyInput. */
+class NotCarried extends Error {
+  constructor(
+    readonly result: {
+      requestId: string;
+      mode: 'apply';
+      rebound: true;
+      applied: boolean;
+      changed: boolean;
+      lifecycle: InputRequest['lifecycle'];
+      version: number;
+      active?: { id: string; workId: string }[];
+      blocker?: { code: string; message: string };
+    },
+  ) {
+    super('Ответ не перенесён');
+  }
+}
 
 /**
  * Шаг переноса ответа заменённого вопроса (F14). В черновике — перенос, затем
@@ -404,16 +468,16 @@ export class InputService {
     if (!last.approved) {
       const proposed =
         this.h.config.approvalMode === 'operator'
-          ? this.engine.proposeTarget(request.id, last.contextDigest ?? null).problems
-          : [];
+          ? this.proposed(view, request, last.contextDigest ?? null)
+          : undefined;
       return {
         state: 'review-rejected',
         approved: false,
         round: last.round,
-        ...(proposed.length ? { problems: proposed } : {}),
+        ...(proposed?.problems.length ? { problems: proposed.problems } : {}),
       };
     }
-    const proposed = this.engine.proposeTarget(request.id, last.contextDigest ?? null);
+    const proposed = this.proposed(view, request, last.contextDigest ?? null);
     if (!proposed.problems.length)
       return { state: 'ready-to-apply', approved: true, round: last.round };
     return {
@@ -424,6 +488,80 @@ export class InputService {
     };
   }
 
+  /**
+   * Исходная остановка запроса (F39) — по тем же признакам, что у движка
+   * (`originHolds`): задача на попытке вопроса (остановлена им или готова)
+   * и то же содержание постановки. Изменение только перепривязкой контракта
+   * проверяется точно (`reboundOnly`). Только чтение.
+   */
+  originOf(view: ExecutionView, request: InputRequest): InputOrigin {
+    const work = view.work(request.workId);
+    if (!work || view.attempts(work.id).at(-1)?.id !== request.runId) return 'moved';
+    const basis = request.originBasis;
+    const state = executionOf(this.h).store.stateOf(view);
+    // Записи прежних версий без digest содержания — по digest постановки хоста.
+    let changes: ReturnType<typeof reboundOf>;
+    if (basis.contentDigest === undefined) {
+      const task = state.tasks.find((t) => t.id === work.id);
+      if (!task || specDigest(task) !== basis.orderDigest) return 'moved';
+    } else if (orderContentDigest(work.order) !== basis.contentDigest) {
+      changes = reboundOf(work.order, state.contracts, basis.contentDigest);
+      if (!changes) return 'moved';
+    }
+    // Вопрос с минимумами решает оператор: его ответ переносится на новую
+    // редакцию договора, только если её провела завершённая операция
+    // contract-change (ревью контракта, перепривязка, утверждение плана), а
+    // не одна форма изменения (ручная регистрация и правка задачи).
+    let byOperation: 'yes' | 'pending' | 'no' = 'yes';
+    if (changes && request.floors.length)
+      byOperation = reboundByOperation(
+        changes,
+        repositories(this.h.config).flatMap((r) =>
+          Object.values(this.h.store.localRecords<ContractChangeTrace>('contract-change', r.id)),
+        ),
+        work.id,
+        request.createdAt,
+      );
+    if (byOperation === 'no') return 'moved';
+    const atOrigin =
+      (work.status === 'failed' && work.failureKind === 'needs-input') || work.status === 'ready';
+    if (!atOrigin)
+      // Черновик после перепривязки ждёт утверждения (шаг plan contract-change).
+      return work.status === 'draft' ? 'pending' : 'moved';
+    if (byOperation === 'pending') return 'pending';
+    return changes ? 'rebound' : 'holds';
+  }
+
+  /** Исходная остановка открытого блокирующего вопроса не держится: применение откажет (F39). */
+  private movedOf(view: ExecutionView, request: InputRequest) {
+    return (
+      request.kind === 'question' &&
+      request.blocking &&
+      request.lifecycle === 'answered' &&
+      this.originOf(view, request) === 'moved'
+    );
+  }
+
+  /**
+   * Предложение цели движка с исходной остановкой: после перепривязки
+   * контракта (`rebound`) причина «не в исходной остановке» снимается —
+   * применение перенесёт ответ (`apply`, F39). Только чтение.
+   */
+  private proposed(view: ExecutionView, request: InputRequest, contextDigest: string | null) {
+    const proposed = this.engine.proposeTarget(request.id, contextDigest);
+    const origin = this.originOf(view, request);
+    const answer = latestAnswer(request);
+    const rebound = origin === 'rebound' && answer?.kind === 'clarification';
+    return {
+      ...proposed,
+      origin,
+      rebound,
+      problems: rebound
+        ? proposed.problems.filter((p) => !p.startsWith(ORIGIN_PROBLEM))
+        : proposed.problems,
+    };
+  }
+
   /** Кто действует следующим и что делает. */
   private nextOf(
     request: InputRequest,
@@ -431,9 +569,34 @@ export class InputService {
     task?: Task,
     proposed = false,
     resume?: ResumeView,
+    /** Причины, по которым применение сейчас откажет, и исходная остановка (F39). */
+    blocked: { problems?: string[]; moved?: boolean } = {},
   ) {
     const agent = this.h.config.approvalMode === 'agent';
     const lead = this.leadMayDecide(request);
+    // Исходная остановка не держится (постановка изменилась не только
+    // перепривязкой контракта, перепривязка вопроса с минимумами — без
+    // операции contract-change, или была другая попытка): input_apply
+    // откажет, и проход сервера её не доведёт — раньше его фазы. Выход —
+    // снять вопрос или заменить его той же задачей и перенести ответ; у
+    // вопроса, который ведущий не решает, это делает оператор (F39).
+    if (blocked.moved) {
+      const why =
+        'the stop no longer holds (the task spec changed after the question, not only by a contract-change rebinding, or another attempt ran): input_apply would be refused';
+      if (lead)
+        return {
+          actor: 'lead' as const,
+          next: `${why}; input_supersede with the same task and carry the answer (input_context, input_review, input_target, input_apply), or input_cancel`,
+        };
+      return {
+        actor: 'operator' as const,
+        next:
+          `${why}, and the lead may not supersede this question; the operator cancels it in the panel (${hrefs.input(request.workId)}) or supersedes it with the same task (devcontour input-supersede --by operator), then ` +
+          (agent
+            ? 'the lead carries the answer (input_context, input_review, input_target, input_apply)'
+            : 'the lead rebuilds and reviews the answer snapshot (input_context, input_review) and the operator applies the carry in the panel'),
+      };
+    }
     // Цепочку после ответа ведёт сервер (`InputResumer`): ведущему делать
     // нечего, пока проход идёт; остановку прохода шаг называет.
     if (resume) {
@@ -474,6 +637,15 @@ export class InputService {
         };
       case 'context-review':
       case 'ready-to-apply':
+        // Причины отказа, кроме ожидания идущих попыток доски: сначала их.
+        if (state === 'context-review' && agent) {
+          const real = (blocked.problems ?? []).filter((p) => !p.startsWith(ACTIVE_PROBLEM));
+          if (real.length)
+            return {
+              actor: 'lead' as const,
+              next: `input_apply cannot apply the answer now: resolve the problems first (${real.join('; ').slice(0, 500)}), then input_target and input_apply`,
+            };
+        }
         return agent
           ? { actor: 'lead' as const, next: 'input_target, then input_apply' }
           : {
@@ -484,14 +656,18 @@ export class InputService {
         return agent && lead
           ? {
               actor: 'lead' as const,
-              next: 'the reviewer rejected the answer: read the findings (input_show); correct the answer, or reopen and respecify the task',
+              next:
+                'the reviewer rejected the answer: read the findings (input_show); correct the answer, or reopen and respecify the task' +
+                contractRoute(request),
             }
           : agent
             ? {
                 actor: 'operator' as const,
-                next: proposed
-                  ? `the reviewer rejected the answer to a question the lead may not decide: the operator confirms the lead's proposed correction or corrects the answer in the panel (${hrefs.input(request.workId)})`
-                  : `the reviewer rejected the answer to a question the lead may not decide: the operator reads the findings and corrects the answer in the panel (${hrefs.input(request.workId)}); the lead may propose a corrected answer (input_propose)`,
+                next:
+                  (proposed
+                    ? `the reviewer rejected the answer to a question the lead may not decide: the operator confirms the lead's proposed correction or corrects the answer in the panel (${hrefs.input(request.workId)})`
+                    : `the reviewer rejected the answer to a question the lead may not decide: the operator reads the findings and corrects the answer in the panel (${hrefs.input(request.workId)}); the lead may propose a corrected answer (input_propose)`) +
+                  contractRoute(request),
               }
             : {
                 actor: 'operator' as const,
@@ -533,8 +709,19 @@ export class InputService {
     const task = context.tasks.get(request.workId);
     const state = this.stateOf(view, request, task);
     const proposal = this.proposalOf(request, state.state);
+    // Исходная остановка не держится (F39): проход сервера её не доведёт,
+    // выход — замена или снятие вопроса; фаза прохода называет, кто решает.
+    const moved = this.movedOf(view, request);
     // Продолжение после ответа, которое ведёт сервер (фаза и кто ответил).
-    const resume = resumeOf(this.h, request, state.state, task, context.boards.get(request.workId));
+    const resume = resumeOf(
+      this.h,
+      request,
+      state.state,
+      task,
+      context.boards.get(request.workId),
+      Date.now(),
+      moved ? (this.leadMayDecide(request) ? 'lead' : 'operator') : undefined,
+    );
     // Повторные остановки вопросом по задаче: сигнал оператору и ведущему.
     // Сводка несёт только счёт и предел (вперёд, по текущему `maxAttempts`).
     const stops = questionStops(context.runs.get(request.workId) ?? [], this.h.config.maxAttempts);
@@ -575,7 +762,11 @@ export class InputService {
           }
         : {}),
       ...(resume ? { resume } : {}),
-      ...this.nextOf(request, state.state, task, !!proposal?.current, resume),
+      ...(moved ? { moved: true as const } : {}),
+      ...this.nextOf(request, state.state, task, !!proposal?.current, resume, {
+        problems: state.problems,
+        moved,
+      }),
     };
   }
 
@@ -1447,10 +1638,21 @@ export class InputService {
         findings: record.findings
           .filter((f) => f.status === 'open')
           .map((f) => ({ severity: f.severity, message: f.message.slice(0, 1000) })),
+        // Отклонённый ответ на вопрос, который ведущий не решает, ведёт
+        // оператор: шаг — тот же, что у `input_show` (`nextOf`), без операций
+        // ведущего (input_supersede такого вопроса — только оператору, F38).
         nextStep:
           record.approved || this.h.config.approvalMode === 'operator'
             ? 'input_target'
-            : 'the answer changes the approved spec: reopen and respecify the task, approve it, then input_supersede with the same task',
+            : this.leadMayDecide(request)
+              ? 'the answer changes the approved spec: reopen and respecify the task, approve it, then input_supersede with the same task' +
+                contractRoute(request)
+              : this.nextOf(
+                  request,
+                  'review-rejected',
+                  task,
+                  !!this.proposalOf(request, 'review-rejected')?.current,
+                ).next,
         ...(active.length
           ? {
               activeAttempts: active,
@@ -1496,8 +1698,8 @@ export class InputService {
     try {
       const proposed =
         request.lifecycle === 'superseded'
-          ? this.engine.proposeCarry(request.id, input.contextDigest)
-          : this.engine.proposeTarget(request.id, input.contextDigest);
+          ? { ...this.engine.proposeCarry(request.id, input.contextDigest), rebound: false }
+          : this.engine.read((view) => this.proposed(view, request, input.contextDigest));
       const scope = this.carryScopeProblem(request, task);
       const own = scope ? [scope] : [];
       return {
@@ -1507,6 +1709,9 @@ export class InputService {
         answerDigest: latestAnswer(request)?.digest ?? null,
         targetDigest: proposed.target?.digest ?? null,
         target: proposed.target ?? null,
+        // Постановка изменилась только перепривязкой контракта: применение
+        // перенесёт ответ в новую редакцию (замена и перенос одной записью).
+        ...(proposed.rebound ? { rebound: true } : {}),
         problems: [...own, ...proposed.problems],
       };
     } catch (error) {
@@ -1593,6 +1798,57 @@ export class InputService {
               : {}),
           };
         }
+        // Постановка изменилась только перепривязкой контракта (F39): движок
+        // такую остановку не продолжает, а перенос ответа в новую редакцию
+        // разрешает. Замена той же задачей и перенос — одной записью: ответ
+        // и раунд его ревью те же, цель — та, что назвал input_target.
+        const current = engine.inputRequest(request.id);
+        const answer = latestAnswer(current);
+        if (
+          current.lifecycle === 'answered' &&
+          answer?.kind === 'clarification' &&
+          engine.read((view) => this.originOf(view, current)) === 'rebound'
+        ) {
+          if (answer.digest !== input.answerDigest)
+            throw refuse(
+              'APPROVAL_STALE',
+              `Ответ на запрос ${request.id} изменился: применяется только последний ответ`,
+            );
+          const superseded = engine.supersedeInput(
+            request.id,
+            { by: actor, reason: REBOUND_REASON, successor: request.workId },
+            input.expectedVersion,
+          );
+          const carried = engine.carryInput(request.id, {
+            contextDigest: input.contextDigest,
+            actor: approval,
+            expectedVersion: superseded.request.version,
+            targetDigest: input.targetDigest,
+            ...(input.reset ? { reset: input.reset } : {}),
+          });
+          const result = {
+            requestId: request.id,
+            mode: 'apply' as const,
+            rebound: true as const,
+            applied: carried.carried,
+            changed: carried.changed,
+            lifecycle: carried.request.lifecycle,
+            version: carried.request.version,
+            ...('active' in carried && carried.active ? { active: carried.active } : {}),
+            ...('blocker' in carried && carried.blocker
+              ? { blocker: this.explained(carried.blocker, request.workId) }
+              : {}),
+          };
+          // Не перенесено (идут попытки, исчерпан предел): замена откатывается
+          // вместе с записью, вопрос остаётся отвеченным, как у applyInput.
+          if (!carried.carried)
+            throw new NotCarried({
+              ...result,
+              lifecycle: current.lifecycle,
+              version: current.version,
+            });
+          return result;
+        }
         const applied = engine.applyInput(request.id, {
           answerDigest: input.answerDigest,
           expectedVersion: input.expectedVersion,
@@ -1615,6 +1871,7 @@ export class InputService {
         };
       });
     } catch (error) {
+      if (error instanceof NotCarried) return error.result;
       if (error instanceof HarnessError) throw toDomain(error);
       throw error;
     }

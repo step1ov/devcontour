@@ -17,6 +17,7 @@ import {
 } from './attention-logic.ts';
 import { useAttention } from './AttentionProvider.tsx';
 import { navigate } from './navigation.ts';
+import { CONTRACT_ANSWER_NOTE } from './input-labels.ts';
 import {
   draftKey,
   emptyDraft,
@@ -280,6 +281,11 @@ function CardForm({
             Ответ меняет требования (корректировка доски, а не продолжение)
           </span>
         </label>
+      )}
+      {item.source === 'input' && action.contract && (
+        <p className="text-warning m-0 text-xs" data-contract-answer-note>
+          {CONTRACT_ANSWER_NOTE}
+        </p>
       )}
       <div className="flex flex-wrap gap-2">
         <Button type="submit" size="sm" className={actionClass} disabled={disabled || !ready}>

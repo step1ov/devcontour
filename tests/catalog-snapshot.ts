@@ -164,5 +164,11 @@
 // сервер сам доводит ответ оператора в режиме agent, и его пауза) и
 // session_handoff (код apply-auto: wait, пока проход идёт, apply-input, когда
 // он остановился); прочие операции байтово прежние.
-export const CATALOG_DIGEST = 'd5ef41d391d2efe02e94cfc6399be19f0fd3acad592f11640e42f90e67c85d89';
+// Намеренное изменение: описания input_target и input_apply называют
+// продолжение после одной перепривязки контракта (rebound, F39), описание
+// session_handoff — код apply-moved; прочие операции байтово прежние.
+// Намеренное изменение: описание input_target называет правило вопроса с
+// минимумами (перепривязку проводит завершённая операция contract-change);
+// прочие операции байтово прежние.
+export const CATALOG_DIGEST = '1eca28b4801112bdf4cfe402c51975defaf3e12aa193d9353b936969c60c4a17';
 export const SNAPSHOT_VERSION = '0.4.0-alpha.7';

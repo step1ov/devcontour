@@ -104,6 +104,8 @@ export function controlled(
     prompts?: string[];
     /** Вопрос demo-исполнителя называет критическую область (минимум `declared`). */
     critical?: boolean;
+    /** Затронутые области вопроса demo-исполнителя (вместо `critical`), например `contract`. */
+    affects?: string[];
     /** Готовый demo-исполнитель записывает решение, затрагивающее API (follow-up при пороге 11). */
     assume?: boolean;
     /** Вопрос demo-исполнителя пересказывает значение этой переменной окружения вызова. */
@@ -158,6 +160,7 @@ export function controlled(
           assumptions?: unknown[];
         };
         if (options.critical && data.inputRequest) data.inputRequest.affects = ['api'];
+        if (options.affects && data.inputRequest) data.inputRequest.affects = options.affects;
         if (options.leak && data.inputRequest)
           data.inputRequest.question += ` (token seen: ${request.execution?.env[options.leak] ?? ''})`;
         if (options.assume && data.completed)

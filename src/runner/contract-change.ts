@@ -20,12 +20,13 @@ import {
 import { adapters, type AgentAdapter } from './adapters.ts';
 import { pinArtifacts } from './contract-artifacts.ts';
 import { contractImpact } from './contract-impact.ts';
-import { updateBase } from './base-update.ts';
+import { STALE_BASE, updateBase } from './base-update.ts';
 import { planRepin, stalePins } from './context.ts';
 import { applyConfig, busyWork } from './reconfigure.ts';
 import { loadConfig } from './config.ts';
 import { loadedDigest } from '../core/service.ts';
 import { git, isAncestor } from './process.ts';
+import { queueStopView } from '../core/work-status.ts';
 import {
   siblingContractLifts,
   siblingLiftHolds,
@@ -704,6 +705,42 @@ export class ContractChanges {
     return { wait: detail, waitingFor: ['context-lock'] };
   }
 
+  /**
+   * Снять паузу сбоя такта «база прогонов отстала от рабочей ветки» (F40),
+   * если ни одна база больше не отстаёт. Только паузу этой причины: без
+   * назначенной причины (`runtime`) и с последней ошибкой такта о базе;
+   * паузы оператора, ведущего, штатной остановки, проверки базы и
+   * применения конфигурации не трогает. Проверка и снятие — одной записью.
+   */
+  private async liftStaleBasePause(op: Pick<ContractChange, 'id'>) {
+    for (const r of repositories(this.h.config)) {
+      const behind = Number(
+        await git(r.path, 'rev-list', '--count', `refs/heads/${r.targetBranch}..HEAD`),
+      );
+      if (behind) return false;
+    }
+    try {
+      return this.h.store.atomic(() => {
+        const state = this.h.store.read();
+        if (!state.paused || state.pauseReason) return false;
+        const stop = queueStopView(state, this.h.store.latestEvents(['scheduler.error'], 50));
+        if (stop.reason !== 'runtime' || !stop.stopReason?.startsWith(STALE_BASE)) return false;
+        this.h.pause(false);
+        // Запуск записан как снятие паузы операцией, а не решение человека:
+        // событие называет операцию и причину снятой паузы.
+        this.h.store.appendEvent('contract-change.queue-resumed', {
+          operation: op.id,
+          reason: 'stale-base',
+        });
+        return true;
+      });
+    } catch {
+      // Очередь сейчас не запустить (сервер останавливается, нет готовой
+      // разработки): пауза остаётся, перенос базы от этого не зависит.
+      return false;
+    }
+  }
+
   private revisions(op: ContractChange) {
     const p = op.proposal;
     return this.h.store
@@ -920,6 +957,9 @@ export class ContractChanges {
           lost = true;
         }
         const tip = await git(repo.path, 'rev-parse', target);
+        // База догнала рабочую ветку: пауза сбоя такта «база отстала»
+        // (коммит контракта на рабочую ветку до переноса) больше не нужна (F40).
+        await this.liftStaleBasePause(op);
         this.advanceStep(op, (current) => {
           if (lifted.size)
             this.log(

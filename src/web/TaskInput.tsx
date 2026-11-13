@@ -4,10 +4,12 @@ import { Button } from '@/ui/button.tsx';
 import { Textarea } from '@/ui/textarea.tsx';
 import type { InputService } from '../application/input.ts';
 import {
+  CONTRACT_ANSWER_NOTE,
   inputNextText,
   inputStateLabels,
   repeatedQuestionText,
   resumeText,
+  contractAffected,
 } from './input-labels.ts';
 import { discussionChanged } from './discussion-events.ts';
 import { findingSeverityLabel } from './review-labels.ts';
@@ -102,6 +104,8 @@ export function TaskInput({ taskId, revision }: { taskId: string; revision: stri
     }
   };
   const q = current.question;
+  // Вопрос о контракте: форма поясняет порядок (F38, F39).
+  const contractNote = contractAffected(q.affects);
   // Ответ можно дать или исправить, пока он не применён (в том числе после
   // отклонённого ревью).
   const answerable = [
@@ -313,6 +317,11 @@ export function TaskInput({ taskId, revision }: { taskId: string; revision: stri
             />
             Ответ меняет требования (корректировка доски, а не продолжение)
           </label>
+          {contractNote && (
+            <p className="text-warning m-0 text-xs" data-contract-answer-note>
+              {CONTRACT_ANSWER_NOTE}
+            </p>
+          )}
           <div className="flex flex-wrap gap-2">
             <Button type="submit" size="sm" disabled={busy || !text.trim()}>
               Сохранить ответ

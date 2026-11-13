@@ -37,7 +37,12 @@ import {
   stoppedWorkflows,
   changeSetStopReason,
 } from './overview.ts';
-import { inputNextText, inputStateLabels, repeatedQuestionText } from '../core/input-labels.ts';
+import {
+  inputNextText,
+  inputStateLabels,
+  repeatedQuestionText,
+  contractAffected,
+} from '../core/input-labels.ts';
 import { budgetBlocks } from './context.ts';
 import { budgetCardReason } from '../core/usage.ts';
 import { InputService, inputHolds, type InputProposal } from './input.ts';
@@ -555,11 +560,13 @@ const inputSource: AttentionSourceRule = {
           let question = '';
           let options: { id: string; label: string; consequence: string | null }[] = [];
           let recommended: string | null = null;
+          let affects: readonly string[] = [];
           try {
             const asked = engine.inputRequest(r.requestId).question;
             question = asked.question;
             options = asked.options;
             recommended = asked.recommended;
+            affects = asked.affects;
           } catch {
             /* Запрос не найден: карточка остаётся по сводке. */
           }
@@ -656,6 +663,8 @@ const inputSource: AttentionSourceRule = {
                       label: 'Ответить',
                       input: 'text+option' as const,
                       ...(question ? { prompt: question } : {}),
+                      // Вопрос о контракте: форма поясняет порядок (F38).
+                      ...(contractAffected(affects) ? { contract: true as const } : {}),
                       ...(options.length
                         ? {
                             choices: options.map((o) => ({
