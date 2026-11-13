@@ -1175,6 +1175,17 @@ async function main() {
         // операции по-прежнему печатается в stdout.
         if (['failed', 'stale'].includes((result as { status?: string }).status ?? ''))
           process.exitCode = 1;
+        // Соседи, продолженные вслед за операцией, — отдельные операции: код
+        // выхода остаётся по самой операции, а их отказ называется в stderr.
+        const halted = (
+          (result as { continued?: { id: string; status: string }[] }).continued ?? []
+        ).filter((c) => c.status === 'failed' || c.status === 'stale');
+        if (halted.length)
+          console.error(
+            'Продолженные операции остановились: ' +
+              halted.map((c) => `${c.id} (${c.status})`).join(', ') +
+              '; подробности — в continued и contract-change --id ID',
+          );
       } else if (operation === 'checks-approve') {
         // Ручное техническое подтверждение принятия корпуса (operator mode):
         // команда оператора, в агентском API её нет.

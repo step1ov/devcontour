@@ -114,6 +114,11 @@ export type ContractChange = {
   reviews?: string[];
   /** Подготовленные новые черновики, явно включённые в ревью плана для утверждения. */
   include?: string[];
+  /**
+   * Перенос базы соседней операцией, принёсший одобренную редакцию этой как
+   * соседнюю: её id и новая вершина базы.
+   */
+  carriedBy?: { operation: string; base: string };
   /** Связанная редакция: операция, которую эта продолжила после побочных эффектов. */
   previous?: string;
   next?: string;
@@ -915,16 +920,6 @@ export class ContractChanges {
           lost = true;
         }
         const tip = await git(repo.path, 'rev-parse', target);
-        // Кто перенёс: операция, записавшая сдвиг на нынешнюю вершину.
-        const mover = updated.length
-          ? undefined
-          : this.list().find(
-              (o) =>
-                o.id !== op.id &&
-                o.history.some(
-                  (e) => e.event === 'moved' && e.detail?.includes(`${repo.id}:${tip}`),
-                ),
-            );
         this.advanceStep(op, (current) => {
           if (lifted.size)
             this.log(
@@ -940,14 +935,30 @@ export class ContractChanges {
               'moved',
               updated.map((u) => `${u.repositoryId}:${u.to}`).join(', '),
             );
-          else if (mover || lost)
+          else if (current.carriedBy || lost)
             this.log(
               current,
               'base',
               'carried',
               `база ${repo.id}:${tip} уже содержит ${reviewed.slice(0, 12)}` +
-                (mover ? `: перенесла операция ${mover.id}` : ': ref сдвинут другим переносом'),
+                (current.carriedBy
+                  ? `: перенесла операция ${current.carriedBy.operation} (${current.carriedBy.base})`
+                  : ': ref сдвинут другим переносом'),
             );
+          // Операции, чьи редакции этот перенос принёс как соседние, узнают
+          // о нём из своей записи, а не из истории этой (она ограничена).
+          if (updated.length)
+            for (const id of new Set([...lifted.values()].map((l) => l.contractId))) {
+              const carried = this.list().find(
+                (o) => o.id !== op.id && o.contractId === id && active(o),
+              );
+              if (!carried) continue;
+              carried.carriedBy = {
+                operation: op.id,
+                base: updated.map((u) => `${u.repositoryId}:${u.to}`).join(', '),
+              };
+              this.save(carried);
+            }
         });
         return {};
       }
@@ -1226,6 +1237,14 @@ export class ContractChanges {
       throw new DomainError(
         `Соседний контракт изменился во время переноса базы (${changed.map((l) => l.path).join(', ')}): операция отменена, заменена или зарегистрирована новая редакция. База не сдвинута; продолжите операцию, снятия будут пересчитаны: contract-change --id ${op.id}`,
       );
+  }
+
+  /**
+   * Операция числится выполняющейся, но её lease истёк: процесс, который её
+   * вёл, оборвался посреди шага. Продолжение — `contract-change --id`.
+   */
+  interrupted(op: ContractChange, now = Date.now()) {
+    return op.status === 'running' && op.leaseUntil !== undefined && op.leaseUntil <= now;
   }
 
   /**

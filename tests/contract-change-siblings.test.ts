@@ -374,6 +374,43 @@ test('A sibling abandoned while the base move is in flight: the ref does not mov
   }
 });
 
+test('A newer redaction of the sibling document registered while the base move is in flight: the ref does not move', async () => {
+  const { s, a, b, base } = await twoContracts();
+  try {
+    const before = base();
+    const waiting = await s.changes().advance(a.id);
+    assert.equal(waiting.status, 'waiting');
+    // Сосед жив и с тем же contractId: перенос останавливает сверка самой
+    // редакции (siblingLiftHolds), а не живость операции.
+    const refused = await beforeRefMove(
+      () =>
+        s.store.change('fixture.newer-redaction', (st) => {
+          const c = st.contracts.find((x) => x.id === waiting.contractId)!;
+          st.contracts.push({ ...c, id: c.id + '-newer' });
+        }),
+      () => s.changes().advance(b.id),
+    );
+    assert.equal(refused.status, 'failed');
+    assert.match(refused.error ?? '', /Соседний контракт изменился во время переноса базы/);
+    assert.ok(
+      !s
+        .changes()
+        .get(b.id)
+        .history.some((e) => e.event === 'moved'),
+      'B ref не сдвинул',
+    );
+    // A, ждавший B, продолжается сам и переносит базу уже своим ревью
+    // (свои пути), а не снятием из транзакции B.
+    const moved = s
+      .changes()
+      .get(a.id)
+      .history.some((e) => e.event === 'moved');
+    assert.equal(base() !== before, moved, 'база сдвинута только переносом A');
+  } finally {
+    await s.remove();
+  }
+});
+
 test('Two operations moving the same base: the one that loses the ref race continues', async () => {
   const { s, a, b, base } = await twoContracts();
   try {

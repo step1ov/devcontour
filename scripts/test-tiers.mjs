@@ -175,6 +175,7 @@ export const slowTests = {
     'No adoption when HEAD is rewritten or after the base move',
     'A sibling of another component is neither waited for nor carried',
     'Two operations moving the same base: the one that loses the ref race',
+    'A newer redaction of the sibling document registered while the base move',
   ],
   'contract-change-staleness': [
     'C-F01: a repin retry accepts only the planned result; an edit',
