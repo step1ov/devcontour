@@ -43,6 +43,14 @@ export const CONSOLIDATED = [
   '',
 ].join('\n');
 
+/** Отображение AMENDED → CONSOLIDATED, как его пишет ревьюер в итоге. */
+export const MAPPING = [
+  'Catalog → Catalog',
+  'Prices: REQ-1 (stage 2 amendment) → Prices: REQ-1, price is a number',
+  'Listing: REQ-2 (stage 4 amendment) → Listing: REQ-2, at most 100',
+  'Listing: REQ-3 → Listing: REQ-3',
+].join('\n');
+
 export type Decide = (
   request: AgentRequest,
   subject: string,
@@ -56,7 +64,10 @@ export function reviewers(calls: string[], prompts: string[], decide: Decide = (
       const subject = /Independently review this ([a-z /]+)\./.exec(r.prompt)?.[1] ?? '?';
       calls.push(subject);
       prompts.push(r.prompt);
-      const decision = decide(r, subject) ?? { approved: true, summary: 'Fixture' };
+      const decision = decide(r, subject) ?? {
+        approved: true,
+        summary: subject === 'contract consolidation' ? MAPPING : 'Fixture',
+      };
       return Promise.resolve({
         data: { findings: [], discoveries: [], ...decision },
         log: 'Fixture only; no provider called',

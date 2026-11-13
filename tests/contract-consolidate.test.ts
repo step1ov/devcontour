@@ -238,3 +238,33 @@ test('F20: the CLI flag --consolidate starts the consolidation mode', async () =
     await s.remove();
   }
 });
+
+test('F20 L3: a redaction registered during the consolidation review makes the operation stale, not failed', async () => {
+  const s = await consolidationStage();
+  try {
+    await s.commitDoc(CONSOLIDATED);
+    const op = await start(s);
+    const stale = await s
+      .changes((_r, subject) => {
+        if (subject === 'contract consolidation')
+          s.h.contract(
+            'Catalog API',
+            'REQ-1 REQ-2 REQ-3 v3',
+            undefined,
+            undefined,
+            s.proposal.file,
+          );
+        return undefined;
+      })
+      .advance(op.id);
+    assert.equal(stale.status, 'stale', stale.error);
+    assert.match(stale.error ?? '', /сменилась во время ревью консолидации/);
+    assert.equal(
+      s.store.read().contracts.filter((c) => c.consolidates).length,
+      0,
+      'консолидация не зарегистрирована',
+    );
+  } finally {
+    await s.remove();
+  }
+});

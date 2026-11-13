@@ -14,10 +14,12 @@ import {
   contractContent,
   defaultOwner,
   parseProposal,
+  CONSOLIDATION,
+  CONSOLIDATION_SUBJECT,
   reviewConsolidationRound,
 } from './agent-control.ts';
 import { pinArtifacts } from './contract-artifacts.ts';
-import { idTokens, textChecks } from '../core/contract-text.ts';
+import { headings, idTokens, slug, textChecks } from '../core/contract-text.ts';
 
 export { anchors, headings, idTokens, referencedAnchors, slug } from '../core/contract-text.ts';
 
@@ -35,6 +37,29 @@ export { anchors, headings, idTokens, referencedAnchors, slug } from '../core/co
  * Зарегистрированная редакция несёт `consolidates`, и задачи прежней
  * редакции сохраняют привязку (`supersededBy`).
  */
+
+/** Ревью равносильности, отменённое контуром: ответ отнёсся к устаревшему входу. */
+export class StaleConsolidation extends DomainError {}
+
+/** Начало находки контура о неполном отображении — по нему узнаётся прошлый раунд. */
+const INCOMPLETE = 'Неполное отображение старого текста в новый';
+
+/**
+ * Пропуски отображения в итоге ревью: ID правил и заголовки прежнего текста
+ * (текстом или якорем), которых итог не называет. Отображение ревьюер пишет
+ * в итог; пустой или ленивый итог («ok») не доказывает равносильности.
+ */
+export function mappingGaps(previous: string, summary: string) {
+  const named = new Set(idTokens(summary));
+  const text = summary.toLowerCase();
+  return [
+    ...idTokens(previous).filter((id) => !named.has(id)),
+    ...headings(previous)
+      .map((h) => h.replace(/\{#[^}]*\}\s*$/, '').trim())
+      .filter((h) => h && !text.includes(h.toLowerCase()) && !text.includes(slug(h)))
+      .map((h) => `«${h}»`),
+  ];
+}
 
 /** Предел выдержек соседей и вопросов в запросе ревьюера. */
 const EXCERPTS = 40;
@@ -215,7 +240,17 @@ export async function reviewConsolidation(
     parsed.checks,
     parsed.underTest,
   );
+  // Прошлый раунд этого контракта отклонён контуром за неполное отображение:
+  // его пропуски входят в предложение. Тогда digest предложения другой, и
+  // harness проводит новый раунд, а не возвращает прежнее одобрение.
+  const last = (h.store.read().contractAttempts ?? [])
+    .filter((a) => a.subject === CONSOLIDATION_SUBJECT && a.title === parsed.title)
+    .at(-1);
+  const incomplete = last?.findings.find(
+    (f) => f.rule === CONSOLIDATION && f.message.startsWith(INCOMPLETE),
+  );
   const approval = await reviewConsolidationRound(h, root, author, runtimes, {
+    ...(incomplete ? { incompleteMapping: { round: last!.id, finding: incomplete.message } } : {}),
     title: parsed.title,
     ...(parsed.repositoryId ? { repositoryId: parsed.repositoryId } : {}),
     file: parsed.file!,
@@ -228,15 +263,41 @@ export async function reviewConsolidation(
     siblings: plan.siblings,
     inputs: plan.inputs,
   });
+  // Отображение проверяется по итогу ревью: каждый ID и заголовок прежнего
+  // текста назван. Иначе раунд считается отклонённым — с находкой в истории.
+  const attempt = (h.store.read().contractAttempts ?? []).find(
+    (a) => a.artifact === approval.artifact,
+  );
+  const gaps = mappingGaps(plan.current.content, attempt?.summary ?? '');
+  if (gaps.length) {
+    const message = `${INCOMPLETE}: итог ревью не называет ${gaps.slice(0, 30).join(', ')}`;
+    h.store.change('contract.review', (s) => {
+      const a = s.contractAttempts?.find((x) => x.artifact === approval.artifact);
+      if (!a) return;
+      a.approved = false;
+      a.findings = [...a.findings, { severity: 'blocking', message, rule: CONSOLIDATION }];
+    });
+    throw new DomainError(
+      `Независимое ревью отклонено: ${message}. Артефакты: ${approval.artifact}`,
+    );
+  }
   // Решение относится к просмотренному снимку и к той же действующей
   // редакции: новая редакция документа за время ревью — повод начать заново.
+  if (
+    latestRedaction(h.store.read().contracts, parsed.file!, parsed.repositoryId)?.id !==
+    plan.current.id
+  )
+    throw new StaleConsolidation(
+      `Действующая редакция ${parsed.file} сменилась во время ревью консолидации; проведите её заново`,
+      409,
+    );
   const after = await consolidationPlan(h, parsed, revision);
   if (
     after.current.id !== plan.current.id ||
     contractDigest(after.content, after.pinned.artifacts, 2, parsed.checks, parsed.underTest) !==
       expected
   )
-    throw new DomainError(
+    throw new StaleConsolidation(
       'Контракт, его артефакты или действующая редакция изменились во время ревью; проведите консолидацию заново',
       409,
     );

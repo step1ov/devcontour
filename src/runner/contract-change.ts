@@ -7,7 +7,7 @@ import { fencedRefMove } from 'devcontour-harness';
 import { executionOf } from '../harness/execution.ts';
 import { DomainError, type Contract } from '../core/model.ts';
 import { contractDigest, digest, latestRedaction, type DevContour } from '../core/service.ts';
-import { consolidationPlan, reviewConsolidation } from './consolidation.ts';
+import { consolidationPlan, reviewConsolidation, StaleConsolidation } from './consolidation.ts';
 import { repositories, repository } from '../core/repositories.ts';
 import {
   contractContent,
@@ -816,7 +816,10 @@ export class ContractChanges {
           );
       },
       op.expected.head,
-    );
+    ).catch((error: unknown) => {
+      // Вход изменился во время ревью — устаревшая операция, а не отказ.
+      throw error instanceof StaleConsolidation ? new StaleChange(error.message) : error;
+    });
     return { status: 'approved' as const, contract };
   }
 
