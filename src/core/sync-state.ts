@@ -4,7 +4,15 @@ import { canonicalJson } from 'devcontour-harness';
 import { createHash } from 'node:crypto';
 import { portableTest } from './proof.ts';
 import { validatePreparation } from './preparation.ts';
-import { contractDigest, digest, scopeDigest, specDigest, type DevContour } from './service.ts';
+import {
+  contractDigest,
+  contractRedactionsOf,
+  digest,
+  sameObligations,
+  scopeDigest,
+  specDigest,
+  type DevContour,
+} from './service.ts';
 import { receiptProblems } from '../harness/receipt.ts';
 import { independentReviewer } from '../harness/policy.ts';
 import {
@@ -419,6 +427,9 @@ export function recordsFromState(
         ...(c.pinVersion ? { pinVersion: c.pinVersion } : {}),
         ...(c.checks ? { checks: c.checks } : {}),
         ...(c.underTest?.length ? { underTest: c.underTest } : {}),
+        // Консолидация — часть происхождения: без неё клон считал бы
+        // равносильную редакцию смысловой и требовал корректировки задач.
+        ...(c.consolidates ? { consolidates: c.consolidates } : {}),
         approvedAt: c.approvedAt,
       },
     });
@@ -602,6 +613,7 @@ export function stateFromRecords(
       pinVersion?: number;
       checks?: unknown;
       underTest?: string[];
+      consolidates?: unknown;
       approvedAt: string;
     }) =>
       JSON.stringify({
@@ -613,6 +625,7 @@ export function stateFromRecords(
         checks: c.checks ?? null,
         // Новое поле — только если объявлено: прежние записи сравниваются как раньше.
         ...(c.underTest?.length ? { underTest: c.underTest } : {}),
+        ...(c.consolidates ? { consolidates: c.consolidates } : {}),
         approvedAt: c.approvedAt,
       });
     if (
@@ -624,6 +637,20 @@ export function stateFromRecords(
       throw new Error('Утверждённый контракт неизменяем: ' + record.data.id);
     return previous ?? record.data;
   });
+  // Консолидация переносится только как консолидация редакции того же
+  // документа с теми же обязательствами: иначе клон сохранил бы привязки
+  // задач к договору с другим смыслом. Порядок записей в Git не обязан
+  // совпадать с порядком реестра, поэтому сверяется сама ссылка.
+  for (const c of s.contracts) {
+    if (!c.consolidates) continue;
+    const from = c.source
+      ? contractRedactionsOf(s.contracts, c.source, c.repositoryId).find(
+          (x) => x.id === c.consolidates!.from,
+        )
+      : undefined;
+    if (!from || !sameObligations(from, c.artifacts ?? [], c.checks, c.underTest))
+      throw new Error('Консолидация не относится к редакции того же документа: ' + c.id);
+  }
   s.tasks = all
     .filter((x) => x.record.kind === 'task')
     .map(({ owner, record }) => {

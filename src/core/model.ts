@@ -437,6 +437,14 @@ export interface Contract {
    * назвать helper приёмки реализацией — другой договор с новым ревью.
    */
   underTest?: string[];
+  /**
+   * Консолидация: редакция переписывает текст `from` — последней редакции
+   * того же документа — без изменения смысла; артефакты, checks и underTest
+   * те же. `review` — попытка ревью равносильности (id каталога решения).
+   * Задачи, привязанные к `from`, сохраняют привязку и утверждение
+   * (`supersededBy`). Нет поля — обычная редакция.
+   */
+  consolidates?: { from: string; review: string };
   approvedAt: string;
   approval?: Approval;
 }

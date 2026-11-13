@@ -378,6 +378,16 @@ export const recordSchema = z.discriminatedUnion('kind', [
       pinVersion: z.literal(2).optional(),
       checks: checkDeclaration.optional(),
       underTest: z.array(relativePath).min(1).max(50).optional(),
+      /**
+       * Консолидация прежней редакции (`Contract.consolidates`). Поле
+       * необязательно: запись клона прежней версии без него принимается.
+       */
+      consolidates: z
+        .strictObject({
+          from: syncId,
+          review: z.string().regex(/^[A-Za-z0-9_.-]{1,120}$/),
+        })
+        .optional(),
       approvedAt: date,
     }),
   }),

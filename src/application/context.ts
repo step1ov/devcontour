@@ -14,7 +14,7 @@ import {
   writeFileSync,
 } from 'node:fs';
 import { join } from 'node:path';
-import { DevContour, digest, specDigest } from '../core/service.ts';
+import { currentText, DevContour, digest, specDigest } from '../core/service.ts';
 import {
   DomainError,
   requireValue,
@@ -517,7 +517,10 @@ export class AgentContext {
         );
         if (c.repositoryId && c.repositoryId !== t.repositoryId)
           throw new DomainError('Локальный контракт принадлежит другому компоненту');
-        section('contract', c.id, c.content);
+        // Привязка к редакции до консолидации читает текущий текст того же
+        // смысла: прежний текст в дереве уже заменён.
+        const text = currentText(s.contracts, c.id) ?? c;
+        section('contract', text.id, text.content);
       }
       if (t.failure) section('failure', t.id, t.failure);
       for (const r of (s.reproductions ?? []).filter((r) => r.taskId === t.id).slice(-20))

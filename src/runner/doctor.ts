@@ -43,7 +43,7 @@ import {
   APPLIED_KEYS_KEY,
   APPLIED_KEYS_NAMESPACE,
   DevContour,
-  supersededBy,
+  newerRedaction,
   type AppliedConfigKeys,
 } from '../core/service.ts';
 import { repository } from '../core/repositories.ts';
@@ -1210,7 +1210,7 @@ export function contractSizeChecks(contracts: DevContourState['contracts']): Che
     contracts
       // doctor читает состояние до разбора схемой: запись без текста документа
       // (незавершённая или чужой формы) не мерится, а не роняет весь doctor.
-      .filter((c) => typeof c.content === 'string' && !supersededBy(contracts, c.id))
+      .filter((c) => typeof c.content === 'string' && !newerRedaction(contracts, c.id))
       .flatMap((c) => {
         const size = contractSize(c.content);
         // Текст отказа регистрации («не будет зарегистрирован») здесь неверен:
@@ -1245,7 +1245,7 @@ export async function contractClosureChecks(
   const out: Check[] = [];
   let checked = 0;
   for (const c of contracts) {
-    if (!c.artifacts?.length || supersededBy(contracts, c.id)) continue;
+    if (!c.artifacts?.length || newerRedaction(contracts, c.id)) continue;
     const byRepo = new Map<string, typeof c.artifacts>();
     for (const a of c.artifacts)
       byRepo.set(a.repositoryId, [...(byRepo.get(a.repositoryId) ?? []), a]);
