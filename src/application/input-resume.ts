@@ -67,7 +67,13 @@ export type ResumePhase =
   | 'paused'
   | 'failed'
   | 'blocked'
-  | 'needs-lead';
+  | 'needs-lead'
+  /**
+   * Исходная остановка не держится (F39): проход остановлен, `detail` —
+   * кто решает (`operator` — вопрос с минимумами, `lead`): снять вопрос или
+   * заменить его той же задачей и перенести ответ.
+   */
+  | 'moved';
 export interface ResumeView {
   phase: ResumePhase;
   auto: boolean;
@@ -186,6 +192,8 @@ export function resumeOf(
   task: Task | undefined,
   boardId: string | undefined,
   now = Date.now(),
+  /** Исходная остановка не держится: кто решает выход (F39). */
+  moved?: 'operator' | 'lead',
 ): ResumeView | undefined {
   if (h.config.approvalMode !== 'agent') return undefined;
   if (request.kind !== 'question' || !request.blocking || request.lifecycle !== 'answered')
@@ -201,6 +209,9 @@ export function resumeOf(
     trigger,
     ...extra,
   });
+  // Сдвинутую остановку проход не доводит (применение откажет) и моделей не
+  // вызывает: выход — решение оператора или ведущего.
+  if (moved) return view('moved', { detail: moved });
   if (answer.kind === 'requirement-change')
     return view('needs-lead', { detail: 'requirement-change' });
   // Пауза держит любой шаг прохода — и ревью, и применение — раньше записей.

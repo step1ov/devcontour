@@ -32,17 +32,25 @@ const sameChain = (a: Contract, b: Contract) =>
 /** Предел перебираемых сочетаний прежних редакций: больше — строгая проверка. */
 const MAX_CANDIDATES = 256;
 
+/** Перепривязанный контракт: текущая редакция и та, что была закреплена при вопросе. */
+export interface ReboundChange {
+  id: string;
+  from: string;
+}
+
 /**
  * Постановка `order` отличается от запомненной (`originContent`) только
- * заменой закреплённых контрактов их более поздними редакциями (порядок
- * регистрации в состоянии). Совпадение без замены — не перепривязка.
+ * заменой закреплённых контрактов (всех или части) их более поздними
+ * редакциями той же цепочки (порядок регистрации в состоянии). Итог —
+ * заменённые контракты; `undefined` — не перепривязка (в том числе
+ * совпадение без замены).
  */
-export function reboundOnly(
+export function reboundOf(
   order: WorkOrder,
   contracts: readonly Contract[],
   originContent: string | undefined,
-): boolean {
-  if (!originContent || orderContentDigest(order) === originContent) return false;
+): ReboundChange[] | undefined {
+  if (!originContent || orderContentDigest(order) === originContent) return undefined;
   const choices = order.contracts.map((pinned) => {
     const at = contracts.findIndex((c) => c.id === pinned.id);
     if (at < 0) return [pinned];
@@ -54,7 +62,7 @@ export function reboundOnly(
     return [pinned, ...earlier];
   });
   const total = choices.reduce((n, c) => n * c.length, 1);
-  if (total <= 1 || total > MAX_CANDIDATES) return false;
+  if (total <= 1 || total > MAX_CANDIDATES) return undefined;
   for (let index = 1; index < total; index++) {
     let rest = index;
     const candidate = choices.map((c) => {
@@ -62,7 +70,59 @@ export function reboundOnly(
       rest = Math.floor(rest / c.length);
       return pick;
     });
-    if (orderContentDigest({ ...order, contracts: candidate }) === originContent) return true;
+    if (orderContentDigest({ ...order, contracts: candidate }) === originContent)
+      return order.contracts.flatMap((pinned, i) =>
+        candidate[i].id === pinned.id ? [] : [{ id: pinned.id, from: candidate[i].id }],
+      );
   }
-  return false;
+  return undefined;
+}
+
+/** То же, что `reboundOf`, — признаком. */
+export const reboundOnly = (
+  order: WorkOrder,
+  contracts: readonly Contract[],
+  originContent: string | undefined,
+) => !!reboundOf(order, contracts, originContent);
+
+/** Поля записи операции изменения контракта, которые читает проверка (`ContractChange`). */
+export interface ContractChangeTrace {
+  status: string;
+  contractId?: string;
+  rebound?: string[];
+  held?: string[];
+  startedAt: string;
+}
+
+/** Операция ещё идёт: её перепривязка и утверждение не закончены. */
+const OPEN = new Set(['queued', 'running', 'waiting', 'failed']);
+
+/**
+ * Перепривязку задачи `taskId` провела операция изменения контракта (F39):
+ * для каждого заменённого контракта есть завершённая операция, начатая после
+ * вопроса (`since`), чья новая редакция — этот контракт и чья перепривязка
+ * включает задачу. `pending` — такой ещё нет, но идёт операция, которая
+ * держит или перепривязывает задачу.
+ */
+export function reboundByOperation(
+  changes: readonly ReboundChange[],
+  operations: readonly ContractChangeTrace[],
+  taskId: string,
+  since: string,
+): 'yes' | 'pending' | 'no' {
+  const done = changes.every((c) =>
+    operations.some(
+      (op) =>
+        op.status === 'completed' &&
+        op.contractId === c.id &&
+        !!op.rebound?.includes(taskId) &&
+        op.startedAt >= since,
+    ),
+  );
+  if (done) return 'yes';
+  return operations.some(
+    (op) => OPEN.has(op.status) && (!!op.rebound?.includes(taskId) || !!op.held?.includes(taskId)),
+  )
+    ? 'pending'
+    : 'no';
 }

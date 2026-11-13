@@ -5473,7 +5473,7 @@
     },
     {
       "name": "input_target",
-      "description": "Propose the continuation target for a reviewed answer snapshot (or the carry target of a superseded question) and list why applying would be refused now, including carry writePaths outside the role write scope and a board not yet released (all tasks drafts). When the task spec changed after the question only by a contract-change rebinding (each pinned contract replaced by a later revision of the same contract, the task approved again), the stop still holds for a clarification: the result has rebound true and input_apply carries the answer. Read-only.",
+      "description": "Propose the continuation target for a reviewed answer snapshot (or the carry target of a superseded question) and list why applying would be refused now, including carry writePaths outside the role write scope and a board not yet released (all tasks drafts). When the task spec changed after the question only by rebinding pinned contracts to later revisions of the same contracts (for a question with floors only by a completed contract-change operation started after the question) and the task is approved again, the stop still holds for a clarification: the result has rebound true and input_apply carries the answer. Read-only.",
       "readOnly": true,
       "inputSchema": {
         "$schema": "https://json-schema.org/draft/2020-12/schema",

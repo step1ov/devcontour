@@ -744,6 +744,21 @@ function inputStep(ctx: HostContext, taskId: string): HandoffHostNext | undefine
       code: 'follow-up',
       params: { severity: summary.severity, version: summary.version },
     });
+  // Исходная остановка не держится: input_apply откажет, и проход сервера её
+  // не доведёт — раньше его фазы. Шаг называет реальный выход — замену или
+  // снятие вопроса; у вопроса, который ведущий не решает, это решение
+  // оператора (F39).
+  if (summary.moved)
+    return withDetail(h, {
+      action: summary.actor === 'operator' ? 'operator' : 'apply-input',
+      ...base,
+      code: 'apply-moved',
+      params: {
+        operatorAnswers: summary.actor === 'operator',
+        ...(operator ? { operator: true } : {}),
+        ...stops,
+      },
+    });
   // Цепочку после ответа ведёт сервер (`InputResumer`): пока проход идёт —
   // ждать, не повторяя его операций; остановку прохода шаг называет.
   if (summary.resume)
@@ -773,16 +788,6 @@ function inputStep(ctx: HostContext, taskId: string): HandoffHostNext | undefine
               ...stops,
             },
           }),
-    });
-  // Исходная остановка не держится: input_apply откажет, и шаг называет
-  // реальный выход — замену или снятие вопроса; у вопроса, который ведущий не
-  // решает, это решение оператора (F39).
-  if (summary.moved && (summary.state === 'context-review' || summary.state === 'ready-to-apply'))
-    return withDetail(h, {
-      action: summary.actor === 'operator' ? 'operator' : 'apply-input',
-      ...base,
-      code: 'apply-moved',
-      params: { operatorAnswers: summary.actor === 'operator', ...stops },
     });
   return withDetail(h, {
     action: 'apply-input',

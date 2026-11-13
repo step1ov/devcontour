@@ -630,7 +630,8 @@ export const DEMO_ASK = '[demo:ask]';
 export const DEMO_ASK_PRODUCT = '[demo:ask-product]';
 /**
  * Тот же вопрос о зарегистрированном контракте (`affects: contract,
- * acceptance`): форма ответа панели предлагает «изменение требований» (F38).
+ * acceptance`): форма ответа панели поясняет порядок — изменение контракта,
+ * затем тот же ответ (вид «уточнение», F38, F39).
  */
 export const DEMO_ASK_CONTRACT = '[demo:ask-contract]';
 /**
