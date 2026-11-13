@@ -11,7 +11,20 @@ import { controlled, inputDemos, inputFixture, type InputFixture } from './input
 import { DEMO_ASK } from '../src/runner/adapters.ts';
 import { devcontourHandoff } from '../src/application/handoff.ts';
 import { specDigest } from '../src/core/service.ts';
-import { reboundOnly, orderContentDigest } from '../src/application/input-rebound.ts';
+import {
+  reboundByOperation,
+  reboundOnly,
+  orderContentDigest,
+  type ContractChangeTrace,
+} from '../src/application/input-rebound.ts';
+import { ContractChanges, type ContractChange } from '../src/runner/contract-change.ts';
+import { reviewContract } from '../src/runner/agent-control.ts';
+import { reviewers } from './contract-change-fixture.ts';
+import { updateBase } from '../src/runner/base-update.ts';
+import { execFileSync } from 'node:child_process';
+import { randomUUID } from 'node:crypto';
+import { mkdirSync, writeFileSync } from 'node:fs';
+import { join } from 'node:path';
 import { executionOf } from '../src/harness/execution.ts';
 import { repositories } from '../src/core/repositories.ts';
 import { LeadRunner } from '../src/runner/lead-workflow.ts';
@@ -88,32 +101,35 @@ function rebind(f: InputFixture, taskId: string, from: string) {
 /**
  * След операции изменения контракта — те поля записи `contract-change`,
  * которые читает проверка F39 (статус, новая редакция, перепривязанные и
- * удержанные задачи, начало). Настоящую операцию ведут тесты contract-change.
+ * удержанные задачи, начало и конец). Тип записи — настоящий
+ * `ContractChange`: переименование поля ломает компиляцию теста. Сквозной
+ * сценарий с настоящей операцией — тест «a real contract-change operation».
  */
 function operation(
   f: InputFixture,
   taskId: string,
   contractId: string,
-  status: 'completed' | 'running' | 'abandoned',
+  status: 'completed' | 'running' | 'failed' | 'abandoned',
   id = 'CC-fixture',
 ) {
   const owner = repositories(f.h.config)[0].id;
-  f.store.atomic(() =>
-    f.store.saveLocal('contract-change', owner, id, {
-      id,
-      key: `${owner}:${source}`,
-      owner,
-      status,
-      contractId,
-      rebound: [taskId],
-      held: [taskId],
-      boards: [],
-      history: [],
-      step: 0,
-      startedAt: new Date().toISOString(),
-      ...(status === 'running' ? {} : { finishedAt: new Date().toISOString() }),
-    }),
-  );
+  const record: ContractChangeTrace & Partial<ContractChange> = {
+    id,
+    key: `${owner}:${source}`,
+    owner,
+    status,
+    contractId,
+    rebound: [taskId],
+    held: [taskId],
+    boards: [],
+    history: [],
+    step: 0,
+    startedAt: new Date().toISOString(),
+    ...(status === 'completed' || status === 'abandoned'
+      ? { finishedAt: new Date().toISOString() }
+      : {}),
+  };
+  f.store.atomic(() => f.store.saveLocal('contract-change', owner, id, record));
 }
 
 /** Снимок с ответом, раунд ревью и цель. */
@@ -447,6 +463,178 @@ test('F39: the rebinding check is exact — another contract or an unrelated edi
     );
     // Обратное направление (новая редакция при вопросе, прежняя сейчас) — не преемник.
     assert.equal(reboundOnly(order, contracts, orderContentDigest(swap(v2.id, v2.digest))), false);
+  } finally {
+    await f.cleanup();
+  }
+});
+
+test('F39: a real contract-change operation holds the running attempt at drain; its question on the held task is rebound, re-approved and the same answer goes through', async () => {
+  const base = controlled({ affects: ['contract', 'acceptance'] });
+  let release!: () => void;
+  const gate = new Promise<void>((r) => (release = r));
+  let entered!: () => void;
+  const writing = new Promise<void>((r) => (entered = r));
+  // Исполнитель задачи с вопросом ждёт, пока операция не дойдёт до drain.
+  const runtimes = {
+    ...base,
+    demo: {
+      ...base.demo,
+      execute: async (request: Parameters<(typeof base)['demo']['execute']>[0]) => {
+        if (!request.review && request.task?.title === 'Task bound to a contract asks') {
+          entered();
+          await gate;
+        }
+        return base.demo.execute(request);
+      },
+    },
+  };
+  const f = await inputFixture(runtimes);
+  try {
+    const repo = f.h.config.repository;
+    const sh = (...args: string[]) =>
+      execFileSync('git', ['-c', 'user.name=t', '-c', 'user.email=t@e', ...args], { cwd: repo })
+        .toString()
+        .trim();
+    const write = (text: string) => {
+      mkdirSync(join(repo, 'docs/contracts'), { recursive: true });
+      writeFileSync(join(repo, source), `# Artifact format\n\n${text}\n`);
+      sh('add', source);
+      sh('commit', '-qm', text);
+    };
+    write('Version one.');
+    const proposal = { title: 'Artifact format', file: source };
+    const calls: string[] = [];
+    // AI-согласование (ревью контракта и плана) — только в local mode:
+    // ревьюеры — фикстуры, исполнитель задачи остаётся demo.
+    const local = async <T>(run: () => Promise<T>) => {
+      f.h.config.mode = 'local';
+      try {
+        return await run();
+      } finally {
+        f.h.config.mode = 'demo';
+      }
+    };
+    await local(() => reviewContract(f.h, f.root, proposal, 'codex', reviewers(calls)));
+    const v1 = f.store.read().contracts.at(-1)!;
+    const boardId = f.h.createBoard('Contract question board').id;
+    const taskId = f.h.addTask(boardId, {
+      title: 'Task bound to a contract asks',
+      description: `An observable outcome that needs a decision ${DEMO_ASK}.`,
+      role: f.store.read().tasks[0].role,
+      acceptance: ['The artifact exists.'],
+      contracts: [v1.id],
+    }).id;
+    f.h.approve(boardId);
+    write('Version two.');
+    // База прогонов догоняет рабочую ветку: иначе очередь не выдаст попытку.
+    await updateBase(f.h.config, f.root);
+    // Операция начата до вопроса: попытка, которую она дождётся, ещё впереди.
+    const changes = new ContractChanges(f.h, f.root, reviewers(calls));
+    const started = (await changes.start(proposal, 'codex')) as { operation: ContractChange };
+    assert.ok(started.operation, JSON.stringify(started));
+    // Попытка задачи идёт (исполнитель задержан): операция удерживает задачу
+    // и ждёт её на шаге drain; попытка заканчивается вопросом уже под удержанием.
+    f.h.pause(false);
+    const draining = f.scheduler.drain();
+    await writing;
+    const waiting = await changes.advance(started.operation.id);
+    assert.equal(waiting.status, 'waiting', waiting.error);
+    assert.deepEqual(waiting.waitingFor, [taskId]);
+    assert.ok(f.store.read().tasks.find((t) => t.id === taskId)!.hold, 'задача удержана');
+    release();
+    await draining;
+    f.h.pause(true);
+    const [summary] = f.service.list({ taskId }).requests;
+    assert.equal(summary.actor, 'operator');
+    assert.ok(summary.floors.length > 0, 'вопрос с минимумами');
+    const requestId = summary.requestId;
+    const asked = executionOf(f.h).engine.inputRequest(requestId).createdAt;
+    assert.ok(started.operation.startedAt < asked, 'операция начата до вопроса');
+    assert.ok(
+      waiting.history.some((h) => h.step === 'hold' && h.event === 'done' && h.at < asked),
+      'вопрос задан после удержания',
+    );
+    f.service.answer(
+      {
+        requestId,
+        text: 'Use JSON; the contract wording is amended.',
+        optionId: 'json',
+        expectedVersion: summary.version,
+      },
+      'operator',
+    );
+    const done = await local(() => changes.advance(started.operation.id));
+    assert.equal(done.status, 'completed', done.error);
+    assert.deepEqual(done.rebound, [taskId], 'задача вопроса перепривязана операцией');
+    const task = f.store.read().tasks.find((t) => t.id === taskId)!;
+    assert.deepEqual(task.contracts, [done.contractId]);
+    assert.notEqual(task.status, 'draft', 'шаг plan утвердил задачу заново');
+    const r = await reviewed(f, requestId);
+    assert.deepEqual(r.target.problems, []);
+    assert.equal((r.target as { rebound?: boolean }).rebound, true);
+    const applied = applyInput(f, requestId, r);
+    assert.equal(applied.applied, true);
+    assert.equal(applied.lifecycle, 'superseded');
+  } finally {
+    release();
+    await f.cleanup();
+  }
+});
+
+test('F39: the operation is matched by its rebinding moment, not its start — before the question it does not count', () => {
+  const at = (minute: number) => `2026-01-01T00:${String(minute).padStart(2, '0')}:00.000Z`;
+  const op = (rebindMinute: number): ContractChangeTrace => ({
+    id: 'CC-unit',
+    status: 'completed',
+    contractId: 'C-new',
+    rebound: ['T-unit'],
+    held: ['T-unit'],
+    startedAt: at(0),
+    finishedAt: at(30),
+    history: [
+      { at: at(0), step: 'start', event: 'queued' },
+      { at: at(rebindMinute), step: 'rebind', event: 'done' },
+    ],
+  });
+  const changes = [{ id: 'C-new', from: 'C-old' }];
+  // Вопрос в 10: операция начата раньше, перепривязка в 20 — после вопроса.
+  assert.equal(reboundByOperation(changes, [op(20)], 'T-unit', at(10)), 'yes');
+  // Перепривязка в 5 — до вопроса: ответ на неё не отвечал.
+  assert.equal(reboundByOperation(changes, [op(5)], 'T-unit', at(10)), 'no');
+  // Записи rebind нет (история усечена): момент — конец операции (30), не начало.
+  const trimmed = { ...op(20), history: [] };
+  assert.equal(reboundByOperation(changes, [trimmed], 'T-unit', at(10)), 'yes');
+  assert.equal(reboundByOperation(changes, [trimmed], 'T-unit', at(40)), 'no');
+});
+
+test('F39: a failed operation keeps the stop waiting and names itself with the way out; once abandoned the stop is moved', async () => {
+  const { f, boardId, taskId, v1, requestId } = await answeredQuestion();
+  try {
+    const v2 = rebind(f, taskId, v1.id);
+    f.h.approve(boardId, [taskId]);
+    // Id длиной настоящего (`CC-<uuid>`): подсказка `next` ограничена 500 знаками.
+    const id = 'CC-' + randomUUID();
+    operation(f, taskId, v2.id, 'failed', id);
+    const r = await reviewed(f, requestId);
+    assert.equal((r.target as { rebound?: boolean }).rebound, undefined);
+    // Причина ожидания первая, совета движка заменить вопрос нет.
+    assert.match(r.target.problems[0], new RegExp(`упавшую операцию изменения контракта ${id}`));
+    assert.ok(
+      !r.target.problems.some((p) => p.startsWith('работа уже не в исходной остановке')),
+      r.target.problems.join('; '),
+    );
+    const shown = f.service.show({ requestId });
+    assert.equal(shown.moved, undefined);
+    for (const exit of [
+      `contract-change --id ${id})`,
+      `contract-change --id ${id} --revise --expected-version`,
+      `contract-change --id ${id} --abandon`,
+      'input_target и input_apply',
+    ])
+      assert.ok(shown.next.includes(exit), `${exit} in ${shown.next}`);
+    assert.throws(() => applyInput(f, requestId, r));
+    operation(f, taskId, v2.id, 'abandoned', id);
+    assert.equal(f.service.show({ requestId }).moved, true);
   } finally {
     await f.cleanup();
   }
