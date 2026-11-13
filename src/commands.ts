@@ -1221,10 +1221,12 @@ async function main() {
           result = await changes.advance(revised.operation.id);
         } else if (args.includes('--id')) result = await changes.advance(option('--id', ''));
         else {
+          // --consolidate: переписать документ без изменения смысла (F20).
           const started = await changes.start(
             await readAgentJson(resolve(option('--file', 'contract.json'))),
             authorRuntime(),
             include,
+            args.includes('--consolidate') ? 'consolidate' : undefined,
           );
           for (const w of 'warnings' in started ? (started.warnings ?? []) : [])
             console.error('Предупреждение: ' + w.message);
