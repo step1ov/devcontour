@@ -270,6 +270,19 @@ function captureProcessTree(pid?: number): RuntimeDiagnostics['processTree'] {
  * исполняемые настройки сняты. Один путь для вызовов git над checkout.
  */
 export { hostGitArgs };
+/**
+ * `ancestor` — предок `of` (или тот же commit). Запрос истории, а не перенос:
+ * отказ Git (нет commit, не репозиторий) — тоже «нет».
+ */
+export async function isAncestor(cwd: string, ancestor: string, of: string) {
+  try {
+    await git(cwd, 'merge-base', '--is-ancestor', ancestor, of);
+    return true;
+  } catch {
+    return false;
+  }
+}
+
 export async function git(cwd: string, ...args: string[]) {
   const added = worktreeAddPath(args);
   // Путь убираемого дерева — до удаления: потом настоящий путь уже не узнать.

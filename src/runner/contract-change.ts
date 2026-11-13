@@ -25,7 +25,7 @@ import { planRepin, stalePins } from './context.ts';
 import { applyConfig, busyWork } from './reconfigure.ts';
 import { loadConfig } from './config.ts';
 import { loadedDigest } from '../core/service.ts';
-import { git } from './process.ts';
+import { git, isAncestor } from './process.ts';
 import {
   siblingContractLifts,
   siblingLiftHolds,
@@ -1311,15 +1311,6 @@ async function changedPaths(repoPath: string, ...range: string[]) {
   )
     .split('\0')
     .filter(Boolean);
-}
-
-async function isAncestor(repoPath: string, ancestor: string, of: string) {
-  try {
-    await git(repoPath, 'merge-base', '--is-ancestor', ancestor, of);
-    return true;
-  } catch {
-    return false;
-  }
 }
 
 /** Документ и артефакты предложения операции — пути, которые она переносит. */
