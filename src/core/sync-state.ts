@@ -430,6 +430,8 @@ export function recordsFromState(
         // Консолидация — часть происхождения: без неё клон считал бы
         // равносильную редакцию смысловой и требовал корректировки задач.
         ...(c.consolidates ? { consolidates: c.consolidates } : {}),
+        // Порядок редакций после sync задают ссылки, а не порядок ключей.
+        ...(c.previous ? { previous: c.previous } : {}),
         approvedAt: c.approvedAt,
       },
     });
@@ -614,6 +616,7 @@ export function stateFromRecords(
       checks?: unknown;
       underTest?: string[];
       consolidates?: unknown;
+      previous?: string;
       approvedAt: string;
     }) =>
       JSON.stringify({
@@ -626,6 +629,7 @@ export function stateFromRecords(
         // Новое поле — только если объявлено: прежние записи сравниваются как раньше.
         ...(c.underTest?.length ? { underTest: c.underTest } : {}),
         ...(c.consolidates ? { consolidates: c.consolidates } : {}),
+        ...(c.previous ? { previous: c.previous } : {}),
         approvedAt: c.approvedAt,
       });
     if (
@@ -637,6 +641,16 @@ export function stateFromRecords(
       throw new Error('Утверждённый контракт неизменяем: ' + record.data.id);
     return previous ?? record.data;
   });
+  // Известные контракты сохраняют местный порядок реестра, новые идут за
+  // ними в порядке записей. Порядок редакций документа всё равно задают
+  // ссылки (`orderRedactions`); местный порядок — запасной для записей без них.
+  const local = new Map(old.contracts.map((c, i) => [c.id, i]));
+  const incoming = new Map(s.contracts.map((c, i) => [c.id, i]));
+  s.contracts.sort(
+    (a, b) =>
+      (local.get(a.id) ?? local.size + incoming.get(a.id)!) -
+      (local.get(b.id) ?? local.size + incoming.get(b.id)!),
+  );
   // Консолидация переносится только как консолидация редакции того же
   // документа с теми же обязательствами: иначе клон сохранил бы привязки
   // задач к договору с другим смыслом. Порядок записей в Git не обязан

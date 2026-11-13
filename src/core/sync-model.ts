@@ -388,6 +388,8 @@ export const recordSchema = z.discriminatedUnion('kind', [
           review: z.string().regex(/^[A-Za-z0-9_.-]{1,120}$/),
         })
         .optional(),
+      /** Предыдущая редакция документа (`Contract.previous`); у прежних записей нет. */
+      previous: syncId.optional(),
       approvedAt: date,
     }),
   }),

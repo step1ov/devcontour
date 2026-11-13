@@ -3,7 +3,6 @@ import assert from 'node:assert/strict';
 import { fixture, input } from './helpers.ts';
 import {
   currentText,
-  meaningOf,
   meaningRedactionsSinceConsolidation,
   newerRedaction,
   supersededBy,
@@ -47,8 +46,6 @@ test('F20: a consolidation keeps bindings: the predecessor is not superseded, ap
     assert.equal(supersededBy(contracts(), f.c1.id), undefined);
     assert.equal(newerRedaction(contracts(), f.c1.id)?.id, c2.id, 'текст заменён');
     assert.equal(currentText(contracts(), f.c1.id)?.id, c2.id);
-    assert.equal(meaningOf(contracts(), c2.id), f.c1.id);
-    assert.equal(meaningOf(contracts(), f.c1.id), f.c1.id);
     // Задача прежней редакции утверждаема без перепривязки, с прежним digest.
     assert.deepEqual(f.h.approvable(f.store.read(), f.task()), { [f.c1.id]: f.c1.digest });
     assert.deepEqual(f.task().contractDigests, before.contractDigests);
@@ -60,7 +57,6 @@ test('F20: a consolidation keeps bindings: the predecessor is not superseded, ap
     });
     assert.equal(supersededBy(contracts(), f.c1.id), undefined);
     assert.equal(currentText(contracts(), f.c1.id)?.id, c3.id);
-    assert.equal(meaningOf(contracts(), c3.id), f.c1.id);
     // Смысловая редакция после консолидаций заменяет все прежние id.
     const c4 = f.h.contract('API', 'REQ-1, REQ-2, REQ-3.\n', agent, undefined, SOURCE);
     for (const id of [f.c1.id, c2.id, c3.id])
