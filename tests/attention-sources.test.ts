@@ -370,6 +370,45 @@ test('S6 план в режиме operator: утверждение снимае�
   }
 });
 
+test('S13 операция изменения контракта с истёкшим lease посреди шага — карточка «прервано»; живой lease — нет', async () => {
+  const f = fixture();
+  try {
+    const b = f.h.createBoard('Board');
+    const held = f.h.addTask(b.id, input('Held'));
+    f.h.approve(b.id);
+    const op = 'CC-' + randomUUID();
+    f.h.hold([held.id], op, 'contract change');
+    const save = (leaseUntil: number) =>
+      f.store.atomic(() =>
+        f.store.saveLocal('contract-change', 'main', op, {
+          id: op,
+          key: 'main:openapi',
+          owner: 'main',
+          status: 'running',
+          version: 2,
+          step: 5,
+          order: 3,
+          token: 'fixture-token',
+          leaseUntil,
+          held: [held.id],
+          startedAt: '2026-01-01T00:00:00.000Z',
+          history: [{ at: '2026-01-01T00:01:00.000Z', step: 'base', event: 'done' }],
+        }),
+      );
+    save(Date.now() + 600_000);
+    assert.equal(byKey(await engineItems(f), `contract-change:${op}`), undefined);
+    save(Date.now() - 1);
+    const card = byKey(await engineItems(f), `contract-change:${op}`)!;
+    assert.ok(card, 'прерванная операция видна ведущему');
+    assert.equal(card.actor, 'lead');
+    assert.match(card.title, /прервано/);
+    assert.match(card.reason, new RegExp(`шаге context; продолжите: contract-change --id ${op}`));
+    assert.deepEqual(card.impact.taskIds, [held.id]);
+  } finally {
+    f.cleanup();
+  }
+});
+
 test('S13 упавшая операция изменения контракта держит задачи: одна карточка ведущего', async () => {
   const f = fixture();
   try {

@@ -693,20 +693,36 @@ const inputSource: AttentionSourceRule = {
 };
 
 /**
- * S13. Операция изменения контракта упала или устарела: её удержанные
- * задачи ждут ведущего. Появление — операция и момент перехода в этот
- * статус (возобновлённая и снова упавшая операция — новое появление).
+ * S13. Операция изменения контракта упала, устарела, прервана (lease истёк
+ * посреди шага) или ждёт на шаге базы соседей, которые больше не идут к
+ * базе: её удержанные задачи ждут ведущего. Появление — операция и момент перехода в этот статус
+ * (возобновлённая и снова упавшая операция — новое появление).
  */
 const contractChangeSource: AttentionSourceRule = {
   id: 'contract-change',
   engine: true,
   collect: (ctx) => {
     const { h } = engineOf(ctx);
-    return new ContractChanges(h, ctx.root ?? '')
+    const changes = new ContractChanges(h, ctx.root ?? '');
+    return changes
       .list()
-      .filter((op) => op.status === 'failed' || op.status === 'stale')
+      .filter(
+        (op) =>
+          op.status === 'failed' ||
+          op.status === 'stale' ||
+          changes.stalledWait(op) ||
+          changes.interrupted(op, ctx.now),
+      )
       .map((op): Candidate => {
-        const entered = op.history.findLast((e) => e.event === op.status)?.at ?? op.startedAt;
+        const cut = op.status === 'running';
+        const entered =
+          (cut ? op.history.at(-1) : op.history.findLast((e) => e.event === op.status))?.at ??
+          op.startedAt;
+        // Ожидание соседей на шаге базы, которые больше не идут к базе: само
+        // оно не продолжится. `cut` — процесс, ведший операцию, оборвался
+        // (например, по таймауту оболочки во время продолжения соседом):
+        // lease истёк, шаг не закончен.
+        const stalled = op.status === 'waiting';
         const held = [
           ...new Set([
             ...op.held,
@@ -720,11 +736,20 @@ const contractChangeSource: AttentionSourceRule = {
           source: 'contract-change',
           category: 'technical',
           actor: 'lead',
-          title:
-            op.status === 'failed'
-              ? `Изменение контракта ${op.key} остановлено`
-              : `Изменение контракта ${op.key} устарело`,
-          reason: ctx.redact(op.error ?? 'Причина не записана'),
+          title: cut
+            ? `Изменение контракта ${op.key} прервано`
+            : stalled
+              ? `Изменение контракта ${op.key} ждёт завершённых соседей`
+              : op.status === 'failed'
+                ? `Изменение контракта ${op.key} остановлено`
+                : `Изменение контракта ${op.key} устарело`,
+          reason: ctx.redact(
+            cut
+              ? `Процесс, ведший операцию, прервался на шаге ${changes.view(op).next ?? '—'}; продолжите: contract-change --id ${op.id}`
+              : stalled
+                ? `Операции ${(op.waitingFor ?? []).join(', ')}, которых ждёт перенос базы, больше не идут к базе. Продолжите: contract-change --id ${op.id} — перенос, отказ с выходом или новое ожидание`
+                : (op.error ?? 'Причина не записана'),
+          ),
           since: entered,
           subject: { kind: 'operation', id: op.id, href: hrefs.contracts() },
           actions: [handoffOf(ctx)],
