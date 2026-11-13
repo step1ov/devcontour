@@ -252,6 +252,8 @@ function TaskLive({
           >
             {resumeBadge(task.inputResume)}
           </Badge>
+        ) : 'inputAnswered' in task && task.inputAnswered ? (
+          <Badge variant="secondary">Ответ дан: ведущий применяет</Badge>
         ) : (
           <Badge variant="destructive">Ждёт ответа</Badge>
         )}

@@ -1,5 +1,6 @@
 import { join, resolve } from 'node:path';
 import { InputService, inputHolds, questionVerdicts, stopQuestions } from './input.ts';
+import type { ResumeView } from './input-resume.ts';
 import { z } from 'zod';
 import type { DevContour } from '../core/service.ts';
 import { loadedDigest, specDigest } from '../core/service.ts';
@@ -156,6 +157,7 @@ function uiTask(
   t: Task,
   now: number,
   inputs: ReadonlyMap<string, string> = inputHolds(h),
+  held: HeldInputs = heldInputs(h, inputs),
 ) {
   const { recoveryHistory: _history, sharedCompletion, failure, hold, recovery, ...rest } = t;
   return {
@@ -186,7 +188,7 @@ function uiTask(
     specDigest: specDigest(t),
     // Вопрос держит задачу, а ответ уже ведёт сервер: доска называет фазу
     // прохода, а не «Ждёт ответа».
-    ...inputResumeOf(h, t.id, inputs.get(t.id)),
+    ...inputResumeOf(inputs.get(t.id), held),
     blockers: blockers(t, state, inputs),
     progress: taskProgress(h, state, t, now),
     checks: clip(checksSummary(t)),
@@ -541,9 +543,10 @@ function buildSummary(
     workspaceTaskIds = [...ids];
     for (const id of ids) include.add(id);
   }
+  const held = heldInputs(h, inputs);
   const tasks = state.tasks
     .filter((t) => include.has(t.id))
-    .map((t) => ({ ...uiTask(h, state, t, now, inputs), boardId: boardOf.get(t.id) }));
+    .map((t) => ({ ...uiTask(h, state, t, now, inputs, held), boardId: boardOf.get(t.id) }));
   const lastRun = new Map<string, Run>();
   for (const r of state.runs) if (include.has(r.taskId)) lastRun.set(r.taskId, r);
   const runs = [
@@ -1023,13 +1026,29 @@ export function panelTaskSearch(h: DevContour, query: Record<string, string | un
   };
 }
 
-/** Фаза продолжения после ответа на вопрос, который держит задачу (`resume` сводки). */
-function inputResumeOf(h: DevContour, taskId: string, requestId: string | undefined) {
-  if (!requestId || h.config.approvalMode !== 'agent') return {};
-  const resume = new InputService(h)
-    .list({ taskId })
-    .requests.find((r) => r.requestId === requestId)?.resume;
-  return resume ? { inputResume: resume } : {};
+/** Сводки держащих вопросов: один просмотр запросов на ответ панели, а не на задачу. */
+type HeldInputs = ReadonlyMap<string, { state: string; resume?: ResumeView }>;
+function heldInputs(h: DevContour, inputs: ReadonlyMap<string, string>): HeldInputs {
+  if (!inputs.size) return new Map();
+  const held = new Set(inputs.values());
+  return new Map(
+    new InputService(h)
+      .list()
+      .requests.filter((r) => held.has(r.requestId))
+      .map((r) => [r.requestId, { state: r.state, ...(r.resume ? { resume: r.resume } : {}) }]),
+  );
+}
+
+/**
+ * Вопрос, который держит задачу, на доске: фаза прохода сервера после ответа
+ * оператора (`inputResume`) или ответ, который доводит ведущий
+ * (`inputAnswered`) — вместо «Ждёт ответа», когда ответ уже есть.
+ */
+function inputResumeOf(requestId: string | undefined, held: HeldInputs | undefined) {
+  const summary = requestId ? held?.get(requestId) : undefined;
+  if (!summary) return {};
+  if (summary.resume) return { inputResume: summary.resume };
+  return summary.state === 'awaiting-answer' ? {} : { inputAnswered: true as const };
 }
 
 /** Очередь всех досок: незавершённые и неотменённые задачи страницами. */

@@ -183,7 +183,7 @@ export function resumeText(r: ResumeLabel): string {
     case 'paused':
       return r.detail === 'operator'
         ? `${accepted} — продолжу после снятия паузы: очередь остановлена оператором, проверка ответа ждёт запуска очереди`
-        : `${accepted} — очередь остановлена (${r.detail === 'runtime' ? 'отказ рантайма' : r.detail === 'reconfigure' ? 'применение конфигурации' : 'остановка сервера'}); DevContour проверит ответ после снятия паузы`;
+        : `${accepted} — очередь остановлена (${r.detail === 'runtime' ? 'отказ рантайма' : r.detail === 'reconfigure' ? 'применение конфигурации' : r.detail === 'base-check' ? 'проверка базы' : 'остановка сервера'}); DevContour проверит ответ после снятия паузы`;
     case 'failed':
       return `DevContour не смог проверить ответ${r.detail ? `: ${r.detail}` : ''}. Нужен ведущий агент: устранить причину и провести проверку ответа вручную (session_handoff назовёт шаг)`;
     case 'blocked':

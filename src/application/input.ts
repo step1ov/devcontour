@@ -1263,7 +1263,12 @@ export class InputService {
    * `input-<id>` и снимком в запросе reviewer. Отказ до вызова модели, если
    * снимка нет или в нём не этот ответ. Одобрение не активирует снимок.
    */
-  async review(raw: unknown, signal?: AbortSignal) {
+  async review(
+    raw: unknown,
+    signal?: AbortSignal,
+    /** `leased` — аренда ревью взята, вызова модели ещё не было (проход сервера учитывает ревью здесь). */
+    hooks: { leased?: () => void } = {},
+  ) {
     const input = inputOperationInputs.input_review.parse(raw);
     const request = this.request(input.requestId);
     const answer = latestAnswer(request);
@@ -1289,10 +1294,17 @@ export class InputService {
     const board = this.boardOf(task.id);
     const release = this.leaseReview(request.id);
     try {
+      hooks.leased?.();
       return await this.reviewUnderLease(request, input, snapshot, task, board, signal);
     } finally {
       release();
     }
+  }
+
+  /** Ревью ответа на запрос уже идёт (аренда другого процесса или ведущего): только чтение. */
+  reviewLeaseHeld(requestId: string, now = Date.now()) {
+    const held = this.h.store.localRecord<InputReviewLease>(REVIEW_LEASE, undefined, requestId);
+    return !!held && held.leaseUntil > now;
   }
 
   /**

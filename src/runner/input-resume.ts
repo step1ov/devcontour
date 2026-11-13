@@ -48,7 +48,11 @@ const messageOf = (e: unknown) => (e instanceof Error ? e.message : String(e)).s
 
 export class InputResumer {
   private flights = new Map<string, Promise<void>>();
-  /** Перепроверки без записи (ожидание попыток, причины цели): ID запроса → срок и шаг. */
+  /**
+   * Перепроверки без записи (ожидание попыток, чужая аренда ревью, причины
+   * цели): `ID запроса:digest ответа` → срок и шаг. Новый ответ начинает
+   * с нуля; записи запросов, которые проход больше не ведёт, удаляются.
+   */
   private rechecks = new Map<string, { at: number; delay: number }>();
   private scanned?: { revision: number; at: number };
   private controller = new AbortController();
@@ -106,10 +110,10 @@ export class InputResumer {
     });
   }
 
-  private recheck(requestId: string, base: number, max = base) {
-    const prev = this.rechecks.get(requestId);
+  private recheck(key: string, base: number, max = base) {
+    const prev = this.rechecks.get(key);
     const delay = prev ? Math.min(prev.delay * 2, max) : base;
-    this.rechecks.set(requestId, { at: Date.now() + delay, delay });
+    this.rechecks.set(key, { at: Date.now() + delay, delay });
   }
 
   /**
@@ -132,34 +136,43 @@ export class InputResumer {
       !timed
     )
       return;
-    this.scanned = { revision, at: now };
     const { engine } = executionOf(this.h);
     // Дешёвый отбор по запросам движка; сводка — только по кандидатам.
-    const candidates = engine
-      .inputRequests()
-      .filter(
-        (r) =>
-          r.kind === 'question' &&
-          r.blocking &&
-          r.lifecycle === 'answered' &&
-          latestAnswer(r)?.actor.kind === 'operator',
-      );
-    for (const request of candidates) {
-      if (this.flights.size >= RESUME_PARALLEL) return;
+    const candidates = engine.inputRequests().flatMap((r) => {
+      const answer = latestAnswer(r);
+      return r.kind === 'question' &&
+        r.blocking &&
+        r.lifecycle === 'answered' &&
+        answer?.actor.kind === 'operator'
+        ? [{ request: r, key: `${r.id}:${answer.digest}` }]
+        : [];
+    });
+    // Перепроверки запросов, которые проход больше не ведёт (применил ведущий,
+    // задача закончилась, пришёл новый ответ), не держат просмотр каждый такт.
+    const live = new Set(candidates.map((c) => c.key));
+    for (const key of this.rechecks.keys()) if (!live.has(key)) this.rechecks.delete(key);
+    for (const { request, key } of candidates) {
+      // Остальные начнут следующие такты: окончание полёта меняет данные.
+      if (this.flights.size >= RESUME_PARALLEL) break;
       if (this.flights.has(request.id)) continue;
-      const summary = this.service
-        .list({ taskId: request.workId })
-        .requests.find((r) => r.requestId === request.id);
-      const resume = summary?.resume;
-      const recheck = this.rechecks.get(request.id);
+      const recheck = this.rechecks.get(key);
+      if (recheck && recheck.at > now) continue;
+      let resume;
+      try {
+        resume = this.service
+          .list({ taskId: request.workId })
+          .requests.find((r) => r.requestId === request.id)?.resume;
+      } catch {
+        continue;
+      }
       const due =
         resume?.phase === 'pending' ||
         resume?.phase === 'applying' ||
-        (resume?.phase === 'retry' && (!resume.until || Date.parse(resume.until) <= now)) ||
-        ((resume?.phase === 'waiting-active' || resume?.phase === 'blocked') &&
-          (!recheck || recheck.at <= now));
+        resume?.phase === 'waiting-active' ||
+        resume?.phase === 'blocked' ||
+        (resume?.phase === 'retry' && (!resume.until || Date.parse(resume.until) <= now));
       if (!due) continue;
-      const flight = this.drive(request.id)
+      const flight = this.drive(request.id, key)
         .catch(() => {
           /* Причина записана в проход; следующий такт прочитает свежее состояние. */
         })
@@ -168,9 +181,11 @@ export class InputResumer {
         });
       this.flights.set(request.id, flight);
     }
+    // Отметка просмотра — после полного прохода: оборванный просмотр повторится.
+    this.scanned = { revision, at: now };
   }
 
-  private async drive(requestId: string) {
+  private async drive(requestId: string, key: string) {
     await new Promise<void>((resolve) => setImmediate(resolve));
     const signal = this.controller.signal;
     if (signal.aborted || this.h.config.approvalMode !== 'agent' || resumeHeld(this.h)) return;
@@ -215,27 +230,44 @@ export class InputResumer {
           });
         return;
       }
+      // Ревью уже ведёт другой (ведущий агент, другой процесс): ждать без
+      // записей и журнала, проверка — только чтением.
+      if (service.reviewLeaseHeld(requestId)) {
+        this.recheck(key, RESUME_ACTIVE_RECHECK_MS, RESUME_ACTIVE_RECHECK_MAX_MS);
+        return;
+      }
       const rounds = () => engine.read((v) => inputReviewRounds(v, requestId).length);
       const before = rounds();
-      // Ревью учтено до вызова модели: перезапуск лишнего вызова не получает.
+      // Ревью учитывается, когда аренда взята, до вызова модели: перезапуск
+      // лишнего вызова не получает, а запись и журнал говорят о настоящем ревью.
       const reviewing = record('reviewing', {
         reviews: base.reviews + 1,
         leaseUntil: Date.now() + this.h.config.runTimeoutMs + this.h.config.leaseMs,
       });
-      this.save(reviewing, { authorRuntime: author.runtime, authorSource: author.source });
+      let leased = false;
       let review;
       try {
         const context = await service.context({ requestId });
+        // Пауза или остановка за время снимка: модель не вызывается.
+        if (signal.aborted || resumeHeld(this.h)) return;
         review = await service.review(
           { requestId, contextDigest: context.contextDigest, authorRuntime: author.runtime },
           signal,
+          {
+            leased: () => {
+              leased = true;
+              this.save(reviewing, {
+                authorRuntime: author.runtime,
+                authorSource: author.source,
+              });
+            },
+          },
         );
         contextDigest = review.contextDigest ?? context.contextDigest;
       } catch (error) {
-        // Ревью уже ведёт другой (ведущий агент): этот проход его не считает.
+        // Аренду взял другой между проверкой и ревью: ждать, ничего не записывая.
         if (codeOf(error) === 'REVIEW_IN_PROGRESS') {
-          if (prior) this.save(prior);
-          else this.h.store.atomic(() => this.h.store.deleteLocal(RESUME, undefined, requestId));
+          this.recheck(key, RESUME_ACTIVE_RECHECK_MS, RESUME_ACTIVE_RECHECK_MAX_MS);
           return;
         }
         // Остановка сервера оборвала ревью без раунда: попытка возвращается.
@@ -248,7 +280,7 @@ export class InputResumer {
             notBefore:
               Date.now() + (stopping ? 0 : RESUME_BACKOFF_MS * 2 ** Math.max(0, reviews - 1)),
           }),
-          { error: messageOf(error) },
+          { error: messageOf(error), ...(leased ? {} : { stage: 'context' }) },
         );
         return;
       }
@@ -259,9 +291,10 @@ export class InputResumer {
         this.save(record('rejected'), { round: review.round });
         return;
       }
-      // Режим или пауза могли смениться за время ревью: применение — потом.
-      if (this.h.config.approvalMode !== 'agent' || resumeHeld(this.h)) {
-        this.save(record('waiting-active'));
+      // Режим, пауза или остановка могли смениться за время ревью: раунд
+      // записан, применение — после (идущее ревью пауза не обрывает).
+      if (signal.aborted || this.h.config.approvalMode !== 'agent' || resumeHeld(this.h)) {
+        this.save(record('reviewed'));
         return;
       }
     } else {
@@ -273,12 +306,12 @@ export class InputResumer {
       if (!contextDigest) return;
     }
     const blocked = (problems: string[]) => {
-      this.recheck(requestId, RESUME_BLOCKED_RECHECK_MS);
+      this.recheck(key, RESUME_BLOCKED_RECHECK_MS);
       if (prior?.phase === 'blocked' && prior.problems?.join() === problems.join()) return;
       this.save(record('blocked', { problems }), { problems });
     };
     const waiting = () => {
-      this.recheck(requestId, RESUME_ACTIVE_RECHECK_MS, RESUME_ACTIVE_RECHECK_MAX_MS);
+      this.recheck(key, RESUME_ACTIVE_RECHECK_MS, RESUME_ACTIVE_RECHECK_MAX_MS);
       // Запись и журнал — только при входе в ожидание.
       if (prior?.phase !== 'waiting-active') this.save(record('waiting-active'), {});
     };
@@ -305,7 +338,7 @@ export class InputResumer {
         { origin: 'server' },
       );
       if (applied.applied) {
-        this.rechecks.delete(requestId);
+        this.rechecks.delete(key);
         this.save(record('applied'), { applied: true });
         return;
       }

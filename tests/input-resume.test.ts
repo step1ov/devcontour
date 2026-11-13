@@ -25,6 +25,7 @@ import {
 } from '../src/application/input-resume.ts';
 import { resumeBadge, resumeText } from '../src/core/input-labels.ts';
 import { panelSummary } from '../src/application/panel.ts';
+import { executionOf } from '../src/harness/execution.ts';
 import type { AgentAdapter } from '../src/runner/adapters.ts';
 
 after(() => inputDemos.close());
@@ -83,10 +84,10 @@ test('Operator answers a critical question with no lead session: the server revi
       'идущий проход — не действие',
     );
     // Шаг ведущего — ждать (проход или живое задание доски), а не цепочка.
+    // (Код `apply-auto` без задания доски — во втором тесте.)
     const step = devcontourHandoff(f.h, {}).host.next!;
     assert.equal(step.action, 'wait', JSON.stringify(step));
     assert.notEqual(step.code, 'apply-saved');
-    if (step.code === 'apply-auto') assert.match(step.detail, /Do not run them yourself/);
 
     await tick(lead);
     const applied = f.service.list({ taskId }).requests[0];
@@ -105,8 +106,11 @@ test('Operator answers a critical question with no lead session: the server revi
       ],
     );
     assert.equal(log[0].authorRuntime, 'codex');
-    // Применение — обычное событие ведущего (актёр agent).
-    assert.equal(events(f, 'input.applied').length, 1);
+    // Применение — событие ведущего (актёр agent) с происхождением: проход сервера.
+    const journal = events(f, 'input.applied');
+    assert.equal(journal.length, 1);
+    assert.equal(journal[0].origin, 'server');
+    assert.equal(journal[0].trigger, 'operator-answer');
 
     await f.scheduler.drain();
     await tick(lead);
@@ -446,7 +450,7 @@ test('Author runtime: task approval before the board job, journaled with its sou
   }
 });
 
-test('Reviews run as flights: the lead tick does not wait for them; two answers at once', async () => {
+test('Reviews run as flights: the lead tick does not wait for them; at most two at once of three answers', async () => {
   const base = controlled({ critical: true });
   let release!: () => void;
   const gate = new Promise<void>((resolve) => (release = resolve));
@@ -466,29 +470,26 @@ test('Reviews run as flights: the lead tick does not wait for them; two answers 
   };
   const f = await inputFixture(runtimes);
   try {
-    const one = await question(f);
-    const two = await question(f);
-    new LeadWorkflow(f.h).start({ kind: 'board', id: one.boardId, authorRuntime: 'codex' });
+    const qs = [await question(f), await question(f), await question(f)];
+    new LeadWorkflow(f.h).start({ kind: 'board', id: qs[0].boardId, authorRuntime: 'codex' });
     const lead = new LeadRunner(f.h, f.root, runtimes);
     await tick(lead);
-    f.service.answerInTask(one.taskId, one.requestId, {
-      text: 'Keep JSON.',
-      expectedVersion: one.version,
-    });
-    f.service.answerInTask(two.taskId, two.requestId, {
-      text: 'Keep JSON.',
-      expectedVersion: two.version,
-    });
-    // Такт возвращается, пока оба ревью ждут reviewer.
+    for (const q of qs)
+      f.service.answerInTask(q.taskId, q.requestId, {
+        text: 'Keep JSON.',
+        expectedVersion: q.version,
+      });
+    // Такт возвращается, пока ревью ждут reviewer; третье — после них.
     await lead.tick();
     for (let i = 0; i < 50 && started < 2; i++) await new Promise((r) => setTimeout(r, 20));
-    assert.equal(started, 2);
-    await lead.tick();
-    assert.equal(f.service.list({ taskId: one.taskId }).requests[0].resume?.phase, 'reviewing');
+    for (let i = 0; i < 3; i++) await lead.tick();
+    await new Promise((r) => setTimeout(r, 100));
+    assert.equal(started, 2, 'не больше двух ревью одновременно');
     release();
     await lead.settled();
-    await tick(lead);
-    for (const q of [one, two])
+    for (let i = 0; i < 3; i++) await tick(lead);
+    assert.equal(started, 3);
+    for (const q of qs)
       assert.equal(
         f.service.list({ taskId: q.taskId }).requests[0].state,
         'applied-awaiting-claim',
@@ -589,3 +590,216 @@ test('A leftover reviewing record at the limit stops the pass with a lead card; 
     await f.cleanup();
   }
 });
+
+test('A lead apply of its own answer carries no server origin', async () => {
+  const runtimes = controlled();
+  const f = await inputFixture(runtimes);
+  try {
+    const { taskId, requestId, version } = await question(f);
+    const lead = new LeadRunner(f.h, f.root, runtimes);
+    await tick(lead);
+    f.service.answer(
+      { requestId, text: 'Keep JSON.', optionId: 'json', expectedVersion: version },
+      'lead',
+    );
+    await tick(lead);
+    assert.equal(f.service.list({ taskId }).requests[0].resume, undefined);
+    // Применение ведущим — без происхождения прохода сервера.
+    const context = await f.service.context({ requestId });
+    await f.service.review({
+      requestId,
+      contextDigest: context.contextDigest,
+      authorRuntime: 'codex',
+    });
+    const target = f.service.target({ requestId, contextDigest: context.contextDigest });
+    const leadApplied = f.service.apply(
+      {
+        requestId,
+        answerDigest: context.answerDigest,
+        expectedVersion: target.version,
+        contextDigest: context.contextDigest,
+        targetDigest: target.targetDigest!,
+      },
+      'lead',
+    );
+    assert.equal(leadApplied.applied, true);
+    const own = events(f, 'input.applied');
+    assert.equal(own.length, 1);
+    assert.equal(own[0].origin, undefined);
+    assert.equal(own[0].trigger, undefined);
+  } finally {
+    await f.cleanup();
+  }
+});
+
+test('A held review lease: the pass waits by a read-only check with no record or journal, then reviews once', async () => {
+  const prompts: string[] = [];
+  const runtimes = controlled({ critical: true, prompts });
+  const f = await inputFixture(runtimes);
+  try {
+    const { taskId, boardId, requestId, version } = await question(f);
+    new LeadWorkflow(f.h).start({ kind: 'board', id: boardId, authorRuntime: 'codex' });
+    const lead = new LeadRunner(f.h, f.root, runtimes);
+    await tick(lead);
+    // Ревью этого ответа ведёт ведущий (аренда другого процесса).
+    f.store.atomic(() =>
+      f.store.saveLocal('input-review-lease', undefined, requestId, {
+        token: 'fixture-lead',
+        startedAt: new Date().toISOString(),
+        leaseUntil: Date.now() + 600_000,
+      }),
+    );
+    f.service.answerInTask(taskId, requestId, { text: 'Keep JSON.', expectedVersion: version });
+    for (let i = 0; i < 5; i++) await tick(lead);
+    assert.equal(reviews(prompts), 0);
+    assert.equal(events(f, 'input.resume').length, 0, 'журнал — только о настоящем ревью');
+    assert.equal(resumeRecord(f.h, requestId), undefined);
+    // Аренда снята, срок перепроверки подошёл: одно ревью и применение.
+    f.store.atomic(() => f.store.deleteLocal('input-review-lease', undefined, requestId));
+    (lead.resumer as unknown as { rechecks: Map<string, unknown> }).rechecks.clear();
+    await tick(lead);
+    assert.equal(reviews(prompts), 1);
+    assert.equal(f.service.list({ taskId }).requests[0].state, 'applied-awaiting-claim');
+  } finally {
+    await f.cleanup();
+  }
+});
+
+test('A new operator answer during a running review: the old answer is not applied, the new one gets its own pass', async () => {
+  const prompts: string[] = [];
+  const base = controlled({ critical: true, prompts });
+  let release!: () => void;
+  let gate = new Promise<void>((resolve) => (release = resolve));
+  const runtimes: Record<string, AgentAdapter> = {
+    ...base,
+    demo: {
+      ...base.demo,
+      execute: async (request) => {
+        if (request.review && !request.task?.id) await gate;
+        return base.demo.execute(request);
+      },
+    } satisfies AgentAdapter,
+  };
+  const f = await inputFixture(runtimes);
+  try {
+    const { taskId, boardId, requestId, version } = await question(f);
+    new LeadWorkflow(f.h).start({ kind: 'board', id: boardId, authorRuntime: 'codex' });
+    const lead = new LeadRunner(f.h, f.root, runtimes);
+    await tick(lead);
+    f.service.answerInTask(taskId, requestId, { text: 'First answer.', expectedVersion: version });
+    await lead.tick();
+    for (let i = 0; i < 50 && resumeRecord(f.h, requestId)?.phase !== 'reviewing'; i++)
+      await new Promise((r) => setTimeout(r, 20));
+    f.service.answerInTask(taskId, requestId, {
+      text: 'Second answer.',
+      optionId: 'json',
+      expectedVersion: f.service.show({ requestId }).version,
+    });
+    release();
+    await lead.settled();
+    gate = Promise.resolve();
+    for (let i = 0; i < 3; i++) await tick(lead);
+    const shown = f.service.show({ requestId });
+    assert.equal(shown.state, 'applied-awaiting-claim', JSON.stringify(shown.resume));
+    const second = shown.answers.at(-1)!;
+    assert.equal(second.revision, 2);
+    assert.equal(shown.target?.answerDigest, second.digest, 'применён второй ответ');
+    assert.equal(events(f, 'input.applied').length, 1);
+    assert.equal(resumeRecord(f.h, requestId)!.revision, 2);
+  } finally {
+    release();
+    await f.cleanup();
+  }
+});
+
+test('A shutdown abort during a review gives the attempt back', async () => {
+  const base = controlled({ critical: true });
+  let entered = false;
+  const runtimes: Record<string, AgentAdapter> = {
+    ...base,
+    demo: {
+      ...base.demo,
+      execute: async (request) => {
+        if (request.review && !request.task?.id) {
+          entered = true;
+          await new Promise<void>((_, reject) =>
+            request.signal.addEventListener('abort', () => reject(new Error('aborted'))),
+          );
+        }
+        return base.demo.execute(request);
+      },
+    } satisfies AgentAdapter,
+  };
+  const f = await inputFixture(runtimes);
+  try {
+    const { taskId, boardId, requestId, version } = await question(f);
+    new LeadWorkflow(f.h).start({ kind: 'board', id: boardId, authorRuntime: 'codex' });
+    const lead = new LeadRunner(f.h, f.root, runtimes);
+    await tick(lead);
+    f.service.answerInTask(taskId, requestId, { text: 'Keep JSON.', expectedVersion: version });
+    await lead.tick();
+    for (let i = 0; i < 100 && !entered; i++) await new Promise((r) => setTimeout(r, 20));
+    assert.ok(entered);
+    assert.equal(resumeRecord(f.h, requestId)!.reviews, 1, 'учтено до вызова');
+    await lead.stop();
+    const rec = resumeRecord(f.h, requestId)!;
+    assert.equal(rec.phase, 'failed');
+    assert.equal(rec.reviews, 0, 'обрыв без раунда не считается');
+    assert.equal(f.service.list({ taskId }).requests[0].resume, undefined, 'сервера нет');
+  } finally {
+    await f.cleanup();
+  }
+});
+
+/**
+ * Применение устаревает до выдачи (движок, `staleTargets`): запрос снова
+ * `answered`, без цели, с причиной. В fixture причину не вызвать без смены
+ * политики исполнения, поэтому тест пишет ровно ту запись, что движок.
+ */
+function staleApplied(f: InputFixture, requestId: string, reason: 'policy' | 'context') {
+  const { store, engine } = executionOf(f.h);
+  const r = engine.inputRequest(requestId);
+  const owner = f.store.read().tasks.find((t) => t.id === r.workId)!.repositoryId;
+  const { target, ...rest } = r;
+  store.transact('run.context', (tx) =>
+    tx.putLocal('input-requests', owner, r.id, {
+      ...rest,
+      lifecycle: 'answered',
+      stale: { targetDigest: target!.digest, reason, at: new Date().toISOString() },
+      version: r.version + 1,
+    }),
+  );
+}
+
+for (const reason of ['policy', 'context'] as const)
+  test(`A stale apply (${reason}): the approved round of the same answer covers it; no second paid review, no counted attempt`, async () => {
+    const prompts: string[] = [];
+    const runtimes = controlled({ critical: true, prompts });
+    const f = await inputFixture(runtimes);
+    try {
+      const { taskId, boardId, requestId, version } = await question(f);
+      new LeadWorkflow(f.h).start({ kind: 'board', id: boardId, authorRuntime: 'codex' });
+      const lead = new LeadRunner(f.h, f.root, runtimes);
+      await tick(lead);
+      // Пауза ведущего держит выдачу, но не проход: ответ применяется, попытки нет.
+      f.h.pause(true, 'operator', 'lead');
+      f.service.answerInTask(taskId, requestId, { text: 'Keep JSON.', expectedVersion: version });
+      await tick(lead);
+      assert.equal(f.service.list({ taskId }).requests[0].state, 'applied-awaiting-claim');
+      assert.equal(reviews(prompts), 1);
+      staleApplied(f, requestId, reason);
+      assert.equal(f.service.show({ requestId }).state, 'stale');
+      await tick(lead);
+      await tick(lead);
+      const after = f.service.show({ requestId });
+      assert.equal(after.state, 'applied-awaiting-claim', JSON.stringify(after.resume));
+      // `policy`: раунд покрывает ответ — ревью не нужно. `context`: снимок
+      // строится заново, но он тот же — раунд повторно используется, вызова
+      // модели нет, и попытка ревью не засчитана.
+      assert.equal(reviews(prompts), 1, 'второго вызова ревьюера нет');
+      assert.equal(resumeRecord(f.h, requestId)!.reviews, 1);
+      assert.equal(events(f, 'input.applied').length, 2);
+    } finally {
+      await f.cleanup();
+    }
+  });

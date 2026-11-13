@@ -37,7 +37,9 @@ export interface ResumeRecord {
   revision: number;
   trigger: 'operator' | 'lead' | 'host';
   author?: { runtime: 'codex' | 'claude'; source: ResumeAuthorSource };
-  phase: 'reviewing' | 'waiting-active' | 'failed' | 'blocked' | 'applied' | 'rejected';
+  /** `reviewed` — раунд одобрен, применение отложено паузой или сменой режима. */
+  phase:
+    'reviewing' | 'reviewed' | 'waiting-active' | 'failed' | 'blocked' | 'applied' | 'rejected';
   /**
    * Ревью прохода по этому ответу: учтено до вызова модели (перезапуск
    * лишнего вызова не получает) и возвращено, если раунд не записан
@@ -87,14 +89,17 @@ const AUTO = new Set<ResumePhase>([
 
 /**
  * Пауза, при которой проход ждёт: остановка сервера, применение
- * конфигурации, отказ рантайма и пауза человека — пока оператор остановил
+ * конфигурации, отказ рантайма, проверка базы и пауза человека — пока оператор остановил
  * очередь, проход моделей не вызывает. Пауза ведущего (`queue_set`) держит
  * только выдачу; исходная пауза «очередь ещё не запускали» прохода не держит.
  */
 export const resumeHeld = (h: DevContour) => {
   const s = h.store.read();
   if (!s.paused) return undefined;
-  if (['shutdown', 'reconfigure', 'runtime'].includes(s.pauseReason ?? '')) return s.pauseReason;
+  // Проверка базы тоже держит проход: пока база не подтверждена, ревью ответа
+  // по ней — лишний платный вызов, а выдачи всё равно нет.
+  if (['shutdown', 'reconfigure', 'runtime', 'base-check'].includes(s.pauseReason ?? ''))
+    return s.pauseReason;
   return s.pauseReason === 'operator' && !pausedByLead(s) ? 'operator' : undefined;
 };
 
