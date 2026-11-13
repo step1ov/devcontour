@@ -468,6 +468,23 @@ test('F39: the rebinding check is exact — another contract or an unrelated edi
   }
 });
 
+test('F20 H2: the rebinding check follows the approval order of redactions, not their registry position (Git sync builds it in key order)', async () => {
+  const { f, taskId, requestId } = await answeredQuestion();
+  try {
+    const v2 = f.h.contract('Artifact format', 'Version two.', undefined, undefined, source);
+    const { engine, store } = executionOf(f.h);
+    const origin = engine.inputRequest(requestId).originBasis.contentDigest!;
+    const order = engine.read((v) => v.work(taskId)!.order);
+    // Реестр в обратном порядке, как после sync с ключами UUID.
+    const contracts = [...store.read((v) => store.stateOf(v).contracts)].reverse();
+    const swap = (id: string, digest: string) => ({ ...order, contracts: [{ id, digest }] });
+    assert.equal(reboundOnly(swap(v2.id, v2.digest), contracts, origin), true);
+    assert.equal(reboundOnly(order, contracts, orderContentDigest(swap(v2.id, v2.digest))), false);
+  } finally {
+    await f.cleanup();
+  }
+});
+
 test('F39: a real contract-change operation holds the running attempt at drain; its question on the held task is rebound, re-approved and the same answer goes through', async () => {
   const base = controlled({ affects: ['contract', 'acceptance'] });
   let release!: () => void;

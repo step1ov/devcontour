@@ -11,6 +11,7 @@
 // договор) проверку не проходит.
 import { digestOf, type WorkOrder } from 'devcontour-harness';
 import type { Contract } from '../core/model.ts';
+import { orderRedactions } from '../core/service.ts';
 import type { ContractChange } from '../runner/contract-change.ts';
 
 /**
@@ -42,7 +43,7 @@ export interface ReboundChange {
 /**
  * Постановка `order` отличается от запомненной (`originContent`) только
  * заменой закреплённых контрактов (всех или части) их более поздними
- * редакциями той же цепочки (порядок регистрации в состоянии). Итог —
+ * редакциями той же цепочки (порядок утверждения, `orderRedactions`). Итог —
  * заменённые контракты; `undefined` — не перепривязка (в том числе
  * совпадение без замены).
  */
@@ -53,12 +54,13 @@ export function reboundOf(
 ): ReboundChange[] | undefined {
   if (!originContent || orderContentDigest(order) === originContent) return undefined;
   const choices = order.contracts.map((pinned) => {
-    const at = contracts.findIndex((c) => c.id === pinned.id);
-    if (at < 0) return [pinned];
-    const current = contracts[at];
-    const earlier = contracts
-      .slice(0, at)
-      .filter((c) => sameChain(c, current))
+    const current = contracts.find((c) => c.id === pinned.id);
+    if (!current) return [pinned];
+    // Порядок утверждения редакций — по их ссылкам (`orderRedactions`), а не
+    // по позиции в реестре: после Git sync он собран в порядке ключей UUID.
+    const chain = orderRedactions(contracts.filter((c) => sameChain(c, current)));
+    const earlier = chain
+      .slice(0, chain.indexOf(current))
       .map((c) => ({ id: c.id, digest: c.digest }));
     return [pinned, ...earlier];
   });
