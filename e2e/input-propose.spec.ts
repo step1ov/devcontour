@@ -128,7 +128,8 @@ test.describe('Lead proposal for an operator question', () => {
     // Ответить иначе — прежняя форма рядом.
     await expect(card.getByLabel('Ответ исполнителю')).toBeVisible();
     await proposal.getByRole('button', { name: 'Подтвердить ответ ведущего' }).click();
-    await expect(card).toContainText('Ответ сохранён');
+    // Дальше сервер сам проверяет и применяет ответ (режим agent): состояние
+    // проходит «Ответ сохранён» за секунды, поэтому проверяется сам ответ.
     await expect(card.locator('[data-input-answer]')).toContainText('оператор, вариант json');
     await expect(card.locator('[data-input-proposal]')).toHaveCount(0);
     const answer = await lastAnswer(request, base, q.requestId);

@@ -1043,6 +1043,7 @@ export function panelQueue(h: DevContour, query: Record<string, string | undefin
           actor: r.actor,
           kind: r.kind,
           operatorMode: h.config.approvalMode === 'operator',
+          ...(r.resume ? { resume: r.resume } : {}),
         }
       : { requestId };
   };

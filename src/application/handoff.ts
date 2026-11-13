@@ -744,6 +744,20 @@ function inputStep(ctx: HostContext, taskId: string): HandoffHostNext | undefine
       code: 'follow-up',
       params: { severity: summary.severity, version: summary.version },
     });
+  // Цепочку после ответа ведёт сервер (`InputResumer`): пока проход идёт —
+  // ждать, не повторяя его операций; остановку прохода шаг называет.
+  if (summary.resume)
+    return withDetail(h, {
+      action: summary.resume.auto ? 'wait' : 'apply-input',
+      ...base,
+      code: 'apply-auto',
+      params: {
+        phase: summary.resume.phase,
+        trigger: summary.resume.trigger,
+        ...(summary.resume.detail ? { detail: summary.resume.detail } : {}),
+        ...stops,
+      },
+    });
   if (summary.state === 'awaiting-answer')
     return withDetail(h, {
       action: 'answer-input',

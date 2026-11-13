@@ -3,7 +3,12 @@ import { Badge } from '@/ui/badge.tsx';
 import { Button } from '@/ui/button.tsx';
 import { Textarea } from '@/ui/textarea.tsx';
 import type { InputService } from '../application/input.ts';
-import { inputNextText, inputStateLabels, repeatedQuestionText } from './input-labels.ts';
+import {
+  inputNextText,
+  inputStateLabels,
+  repeatedQuestionText,
+  resumeText,
+} from './input-labels.ts';
 import { discussionChanged } from './discussion-events.ts';
 import { findingSeverityLabel } from './review-labels.ts';
 
@@ -74,6 +79,8 @@ export function TaskInput({ taskId, revision }: { taskId: string; revision: stri
     messageRef?: string;
   }[];
   const latest = answers.at(-1);
+  const resume = current.resume;
+  const resumeLine = resume ? resumeText(resume) : '';
   const proposal = current.proposal;
   const proposalOption = proposal?.optionId
     ? current.question.options.find((o) => o.id === proposal.optionId)?.label
@@ -205,12 +212,26 @@ export function TaskInput({ taskId, revision }: { taskId: string; revision: stri
           )}
         </div>
       )}
-      {current.state === 'stale' && (
+      {current.state === 'stale' && !resume && (
         <p className="text-muted-foreground mt-2 mb-0 text-xs">
           Применённый ответ устарел до попытки: ведущий строит контекст заново.
         </p>
       )}
-      {current.state !== 'awaiting-answer' && current.next !== 'none' && (
+      {/* Цепочку после ответа ведёт сервер: что он делает сейчас или, если
+          проход остановился, кто нужен и что сделать. */}
+      {resume && resumeLine && (
+        <p
+          className={
+            'mt-2 mb-0 rounded-md p-2 text-xs ' +
+            (resume.auto ? 'bg-raised' : 'border-warning/30 text-warning border')
+          }
+          role="status"
+          data-input-resume={resume.phase}
+        >
+          {resumeLine}
+        </p>
+      )}
+      {current.state !== 'awaiting-answer' && current.next !== 'none' && !resumeLine && (
         <p className="text-muted-foreground mt-2 mb-0 text-xs" data-input-next>
           {/* Текст называет, кто действует; `next` сводки — указание ведущему агенту. */}
           Дальше:{' '}

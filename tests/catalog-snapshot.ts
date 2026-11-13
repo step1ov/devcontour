@@ -160,5 +160,9 @@
 // input_answer; описания input_answer и session_handoff называют её и
 // params.proposed шага answer-operator; optionId input_propose — непустой;
 // прочие операции байтово прежние.
-export const CATALOG_DIGEST = 'd1236ef6c0505c2c0065d5900d8680f690d3285f0e753e8e4ce92e7ffe2e0ca5';
+// Намеренное изменение: описания input_list (поле resume — проход, которым
+// сервер сам доводит ответ в режиме agent) и session_handoff (код apply-auto:
+// wait, пока проход идёт, apply-input, когда он остановился); прочие операции
+// байтово прежние.
+export const CATALOG_DIGEST = '7a6027c7a8164d1de4dc241b1cd3293d36424d45eb4775d703508af396ea423e';
 export const SNAPSHOT_VERSION = '0.4.0-alpha.7';

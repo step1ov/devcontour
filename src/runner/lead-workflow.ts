@@ -23,6 +23,7 @@ import { executionOf } from '../harness/execution.ts';
 import type { AgentAdapter } from './adapters.ts';
 import { analyzeRecovery, applyCases } from './recovery.ts';
 import { checkBase } from './base-check.ts';
+import { InputResumer } from './input-resume.ts';
 
 /** Код отказа, у которого есть `code` (ошибки движка, переведённые в доменные). */
 const codeOf = (e: unknown) => (e as { code?: unknown } | undefined)?.code;
@@ -53,13 +54,16 @@ export class LeadRunner {
    */
   startRetry = { limit: 4, delayMs: 15_000 };
   private startWaits = new Map<string, { count: number; notBefore: number }>();
+  /** Продолжение после ответа на вопрос исполнителя (режим `agent`). */
+  readonly resumer: InputResumer;
   constructor(
     readonly h: DevContour,
     readonly root: string,
-    /** Рантаймы ведущего: ревью плана доски и разбор повторяющегося свойства. */
+    /** Рантаймы ведущего: ревью плана доски, разбор повторяющегося свойства и ревью ответа. */
     readonly runtimes: Record<'codex' | 'claude', AgentAdapter> = adapters,
   ) {
     this.workflow = new LeadWorkflow(h);
+    this.resumer = new InputResumer(h, root, runtimes);
   }
   start() {
     this.stopping = false;
@@ -81,6 +85,8 @@ export class LeadRunner {
     this.timer = undefined;
     this.controller?.abort();
     for (const flight of this.joints.values()) void flight.runner.stop();
+    // Без сервера цепочку после ответа снова ведёт ведущий агент.
+    this.resumer.stop();
   }
   async stop() {
     this.halt();
@@ -137,6 +143,18 @@ export class LeadRunner {
     return this.pending;
   }
   private async advance() {
+    // Ответы на вопросы исполнителя: сервер доводит цепочку после ответа
+    // сам — с заданием доски и без него (оно только ждёт `waiting:input`).
+    if (!this.stopping && this.h.config.approvalMode === 'agent') {
+      const controller = (this.controller = new AbortController());
+      try {
+        await this.resumer.tick(controller.signal);
+      } catch {
+        /* Причины — в записях прохода; задания идут дальше. */
+      } finally {
+        this.controller = undefined;
+      }
+    }
     const owners = [undefined, ...repositories(this.h.config).map((r) => r.id)];
     for (const owner of owners)
       for (const saved of this.workflow.list(owner)) {

@@ -300,6 +300,30 @@ const samples: { [C in HintCode]: (HintSubject & Extract<HintOf, { code: C }>)[]
     { code: 'apply-saved', params: { state: 'answered', operator: false }, input: input1 },
     { code: 'apply-saved', params: { state: 'reviewed', operator: true }, input: input1 },
   ],
+  'apply-auto': [
+    { code: 'apply-auto', params: { phase: 'reviewing', trigger: 'operator' }, input: input1 },
+    { code: 'apply-auto', params: { phase: 'grace', trigger: 'lead' }, input: input1 },
+    {
+      code: 'apply-auto',
+      params: { phase: 'failed', trigger: 'operator', detail: 'reviewer is down' },
+      input: input1,
+    },
+    {
+      code: 'apply-auto',
+      params: { phase: 'blocked', trigger: 'operator', detail: 'graph changed' },
+      input: input1,
+    },
+    {
+      code: 'apply-auto',
+      params: { phase: 'needs-lead', trigger: 'lead', detail: 'requirement-change' },
+      input: input1,
+    },
+    {
+      code: 'apply-auto',
+      params: { phase: 'needs-lead', trigger: 'operator', detail: 'author-runtime', stops },
+      input: input1,
+    },
+  ],
   'apply-carry': [
     { code: 'apply-carry', params: { order: 'draft' }, input: input1 },
     { code: 'apply-carry', params: { order: 'unreleased' }, input: input1 },
@@ -474,8 +498,10 @@ test('Подсказки шага: новая конфигурация setup п�
  * (`input_propose`) вместо «ждите»; добавлены образцы с `version` и
  * `proposed`; добавлены образцы `apply-rejected` с `operatorAnswers` и
  * `proposed`; прочие образцы байтово прежние.
+ * Намеренное изменение: добавлены образцы кода `apply-auto` (цепочку после
+ * ответа ведёт сервер); прочие образцы байтово прежние.
  */
-const ENGLISH_SAMPLES_SHA256 = '77db091366ccd05e377458831c483a5813b280bcb778dde3a8832a86a0f09039';
+const ENGLISH_SAMPLES_SHA256 = '5acf2aad6463eeb65c368e109739ddb5a11e7235ed55021d2a0eb9ac6477fd22';
 
 test('Подсказки шага: английские тексты образцов закреплены', () => {
   assert.equal(

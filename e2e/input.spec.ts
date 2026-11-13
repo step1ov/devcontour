@@ -173,52 +173,36 @@ test('The operator answers the writer question in the panel; the answer reaches 
   // В списке задача помечена ожиданием ответа.
   await expect(page.locator('[data-input-waiting]').first()).toBeVisible();
 
+  // Очередь на паузе, чтобы увидеть «применён, ждёт попытки»: пауза держит
+  // выдачу, а не продолжение ответа.
+  expect((await request.post('/api/scheduler', { headers, data: { start: false } })).ok()).toBe(
+    true,
+  );
   await card.getByLabel('JSON').check();
   await card.getByLabel('Ответ исполнителю').fill('Оставьте JSON, как сейчас.');
   await card.getByRole('button', { name: 'Сохранить ответ' }).click();
-  await expect(card).toContainText('Ответ сохранён');
   await expect(card.locator('[data-input-answer]')).toContainText('Оставьте JSON');
   // Ответ оператора — сообщение обсуждения задачи со ссылкой на версию ответа.
   const thread = inspector.getByRole('list', { name: 'Сообщения обсуждения' });
   await expect(thread).toContainText('ответ на вопрос, r1');
   await expect(thread).toContainText('Оставьте JSON, как сейчас.');
-  // Режим agent: применять в панели нечего, следующий шаг — ведущего.
+  // Режим agent: применять в панели нечего, и сессия ведущего не нужна —
+  // сервер сам проверяет ответ (demo-ревью, детерминированное) и применяет его.
   await expect(card.getByRole('button', { name: 'Применить ответ' })).toHaveCount(0);
-  await expect(card.locator('[data-input-next]')).toContainText('ведущий');
-
-  // Ведущий: снимок, ревью (demo — детерминированное), цель, применение.
-  // Очередь на паузе, чтобы увидеть «применён, ждёт попытки».
   const { requests } = (await agent(request, 'input_list', { taskId: task.id })) as {
     requests: { requestId: string }[];
   };
   const requestId = requests[0].requestId;
-  const context = (await agent(request, 'input_context', { requestId })) as {
-    contextDigest: string;
-    answerDigest: string;
+  await expect
+    .poll(
+      async () => ((await agent(request, 'input_show', { requestId })) as { state: string }).state,
+      { timeout: 60000 },
+    )
+    .toBe('applied-awaiting-claim');
+  const shown = (await agent(request, 'input_show', { requestId })) as {
+    reviews: { approved: boolean }[];
   };
-  const review = await agent(request, 'input_review', {
-    requestId,
-    contextDigest: context.contextDigest,
-    authorRuntime: 'codex',
-  });
-  expect(review.approved).toBe(true);
-  await expect(card).toContainText('Контекст с ответом проверен');
-  const target = (await agent(request, 'input_target', {
-    requestId,
-    contextDigest: context.contextDigest,
-  })) as { version: number; targetDigest: string; problems: string[] };
-  expect(target.problems).toEqual([]);
-  expect((await request.post('/api/scheduler', { headers, data: { start: false } })).ok()).toBe(
-    true,
-  );
-  const applied = await agent(request, 'input_apply', {
-    requestId,
-    answerDigest: context.answerDigest,
-    expectedVersion: target.version,
-    contextDigest: context.contextDigest,
-    targetDigest: target.targetDigest,
-  });
-  expect(applied.applied).toBe(true);
+  expect(shown.reviews.map((r) => r.approved)).toEqual([true]);
   await expect(card).toContainText('Ответ применён, ждёт попытки');
   await expect(card).not.toContainText('Передано в новую попытку');
 
