@@ -41,12 +41,12 @@ async function reviewed(f: InputFixture, requestId: string, text: string) {
     'operator',
   );
   const context = await f.service.context({ requestId });
-  await f.service.review({
+  const review = await f.service.review({
     requestId,
     contextDigest: context.contextDigest,
     authorRuntime: 'codex',
   });
-  return f.service.show({ requestId });
+  return { ...f.service.show({ requestId }), reviewNextStep: review.nextStep };
 }
 
 test('Labels follow the plan sequence; an answer-saved card names the context preparation as the next step', () => {
@@ -187,6 +187,8 @@ test('Agent mode: a rejected round is review-rejected, not "needs preparation"',
     const rejected = await reviewed(f, requestId, 'Produce YAML instead.');
     assert.equal(rejected.state, 'review-rejected');
     assert.equal(rejected.actor, 'lead');
+    // Вопрос без минимумов решает ведущий: шаг ревью — его маршрут.
+    assert.match(rejected.reviewNextStep, /input_supersede/);
   } finally {
     await f.cleanup();
   }
@@ -200,6 +202,10 @@ test('Agent mode, critical question: after a rejected review the next actor is t
     assert.equal(rejected.state, 'review-rejected');
     assert.equal(rejected.actor, 'operator');
     assert.match(rejected.next, /operator/);
+    // F38: шаг результата ревью — тот же, что у input_show: маршрут
+    // оператора, без операций ведущего (input_supersede — только оператору).
+    assert.equal(rejected.reviewNextStep, rejected.next);
+    assert.doesNotMatch(rejected.reviewNextStep, /input_supersede|reopen and respecify/);
   } finally {
     await f.cleanup();
   }

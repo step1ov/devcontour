@@ -8,7 +8,7 @@ import { DomainError } from '../src/core/model.ts';
 import { join } from 'node:path';
 import { executionOf } from '../src/harness/execution.ts';
 import { dumpDatabase } from './attention-fixture.ts';
-import { inputStateLabels } from '../src/core/input-labels.ts';
+import { inputStateLabels, suggestedAnswerKind } from '../src/core/input-labels.ts';
 import { byKey } from './attention-fixture.ts';
 
 after(() => inputDemos.close());
@@ -188,5 +188,32 @@ test('Применение ответа с карточки: отклонённ�
     assert.equal(done.resolved, true);
   } finally {
     await f.cleanup();
+  }
+});
+
+test('F38: вопрос о контракте — форма ответа предлагает «изменение требований», прочие вопросы — уточнение', async () => {
+  assert.equal(suggestedAnswerKind(['contract', 'acceptance']), 'requirement-change');
+  assert.equal(suggestedAnswerKind(['api']), 'clarification');
+  assert.equal(suggestedAnswerKind([]), 'clarification');
+  assert.equal(suggestedAnswerKind(undefined), 'clarification');
+  for (const [affects, kind] of [
+    [['contract', 'acceptance'], 'requirement-change'],
+    [['api'], undefined],
+  ] as const) {
+    const f = await inputFixture(controlled({ affects: [...affects] }));
+    try {
+      const { boardId, taskId } = f.askingTask('Asking task');
+      await untilQuestion(f, boardId);
+      const [request] = f.service.list({ taskId }).requests;
+      const card = byKey(
+        (await new AttentionService(f.store, f.h, { root: f.root }).active()).items,
+        `input:${request.requestId}`,
+      )!;
+      assert.equal(card.actor, 'operator');
+      const answer = card.actions.find((a) => a.id === 'answer') as { answerKind?: string };
+      assert.equal(answer.answerKind, kind);
+    } finally {
+      await f.cleanup();
+    }
   }
 });

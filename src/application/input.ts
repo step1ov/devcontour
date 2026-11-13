@@ -1447,10 +1447,15 @@ export class InputService {
         findings: record.findings
           .filter((f) => f.status === 'open')
           .map((f) => ({ severity: f.severity, message: f.message.slice(0, 1000) })),
+        // Отклонённый ответ на вопрос, который ведущий не решает, ведёт
+        // оператор: шаг — тот же, что у `input_show` (`nextOf`), без операций
+        // ведущего (input_supersede такого вопроса — только оператору, F38).
         nextStep:
           record.approved || this.h.config.approvalMode === 'operator'
             ? 'input_target'
-            : 'the answer changes the approved spec: reopen and respecify the task, approve it, then input_supersede with the same task',
+            : this.leadMayDecide(request)
+              ? 'the answer changes the approved spec: reopen and respecify the task, approve it, then input_supersede with the same task'
+              : this.nextOf(request, 'review-rejected', task).next,
         ...(active.length
           ? {
               activeAttempts: active,

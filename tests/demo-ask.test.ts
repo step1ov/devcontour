@@ -1,6 +1,11 @@
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
-import { DEMO_ASK, DEMO_ASK_PRODUCT, demoAdapter } from '../src/runner/adapters.ts';
+import {
+  DEMO_ASK,
+  DEMO_ASK_CONTRACT,
+  DEMO_ASK_PRODUCT,
+  demoAdapter,
+} from '../src/runner/adapters.ts';
 
 // Fixture demo-исполнителя (не модель): `[demo:ask]` спрашивает без
 // критической области — в режиме agent отвечает ведущий; `[demo:ask-product]`
@@ -29,6 +34,16 @@ test('The demo writer asks the product-area question only for [demo:ask-product]
   );
   const plain = await ask(`Result ${DEMO_ASK}.`);
   assert.deepEqual(plain?.affects, []);
+});
+
+test('The demo writer asks the contract question for [demo:ask-contract]', async () => {
+  assert.ok(!DEMO_ASK_CONTRACT.includes(DEMO_ASK), 'the markers do not contain each other');
+  const contract = await ask(`Result ${DEMO_ASK} ${DEMO_ASK_CONTRACT}.`);
+  assert.deepEqual(contract?.affects, ['contract', 'acceptance']);
+  assert.deepEqual((await ask(`Result ${DEMO_ASK_CONTRACT}.`))?.affects, [
+    'contract',
+    'acceptance',
+  ]);
 });
 
 test('A demo review with no task outside the input review is refused with a clear error', async () => {

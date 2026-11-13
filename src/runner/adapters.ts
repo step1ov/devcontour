@@ -629,6 +629,11 @@ export const DEMO_ASK = '[demo:ask]';
  */
 export const DEMO_ASK_PRODUCT = '[demo:ask-product]';
 /**
+ * Тот же вопрос о зарегистрированном контракте (`affects: contract,
+ * acceptance`): форма ответа панели предлагает «изменение требований» (F38).
+ */
+export const DEMO_ASK_CONTRACT = '[demo:ask-contract]';
+/**
  * Маркер описания задачи: demo-исполнитель доводит работу до конца и
  * записывает две развилки, решённые им самим ниже порога вопросов
  * (`assumptions`). Fixture, не решения модели.
@@ -741,8 +746,9 @@ export const demoAdapter: AgentAdapter = {
     // останавливается вопросом исполнителя, пока в закреплённом контексте нет
     // ответа (`input/<id>.md`). Это не вопрос модели.
     const askProduct = !!r.task.description?.includes(DEMO_ASK_PRODUCT);
+    const askContract = !!r.task.description?.includes(DEMO_ASK_CONTRACT);
     if (
-      (askProduct || r.task.description?.includes(DEMO_ASK)) &&
+      (askProduct || askContract || r.task.description?.includes(DEMO_ASK)) &&
       !/### input\/IR-[a-f0-9]{24}\.md/.test(r.prompt)
     )
       return {
@@ -759,7 +765,7 @@ export const demoAdapter: AgentAdapter = {
             recommended: 'json',
             severity: 8,
             rationale: 'Формат артефакта виден проверкам задачи',
-            affects: askProduct ? ['product'] : [],
+            affects: askContract ? ['contract', 'acceptance'] : askProduct ? ['product'] : [],
           },
           assumptions: [],
         },

@@ -214,3 +214,19 @@ export function resumeBadge(r: ResumeLabel): string {
       return 'Ответ принят: нужен ведущий';
   }
 }
+
+/**
+ * Вид ответа по умолчанию в форме панели (F38). Вопрос, который затрагивает
+ * зарегистрированный контракт (`affects: contract` — структурный сигнал
+ * исполнителя), обычно меняет его формулировку: такой ответ — изменение
+ * требований, а не уточнение (ревью ответа уточнение, меняющее контракт,
+ * отклонит). Оператор может осознанно выбрать другой вид.
+ */
+export const suggestedAnswerKind = (
+  affects: readonly string[] | undefined,
+): 'clarification' | 'requirement-change' =>
+  affects?.includes('contract') ? 'requirement-change' : 'clarification';
+
+/** Пояснение формы ответа на вопрос, затрагивающий контракт: порядок шагов. */
+export const CONTRACT_ANSWER_NOTE =
+  'Вопрос затрагивает зарегистрированный контракт: ответ, меняющий его формулировку, — изменение требований, а не уточнение. Порядок: сначала изменение контракта (contract-change), затем контекст ответа, ревью и применение (input_context → input_review → input_target → input_apply).';

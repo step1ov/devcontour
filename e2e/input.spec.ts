@@ -178,6 +178,9 @@ test('The operator answers the writer question in the panel; the answer reaches 
   expect((await request.post('/api/scheduler', { headers, data: { start: false } })).ok()).toBe(
     true,
   );
+  // Вопрос без области контракта: форма предлагает уточнение, без пояснения F38.
+  await expect(card.getByLabel(/Ответ меняет требования/)).not.toBeChecked();
+  await expect(card.locator('[data-contract-answer-note]')).toHaveCount(0);
   await card.getByLabel('JSON').check();
   await card.getByLabel('Ответ исполнителю').fill('Оставьте JSON, как сейчас.');
   await card.getByRole('button', { name: 'Сохранить ответ' }).click();
@@ -306,6 +309,38 @@ test('A cancelled question leaves a retryable task: the retry button returns aft
   expect(fresh[0].state).toBe('awaiting-answer');
   await expect(card).toContainText('Нужен ответ');
   await expect(retry).toHaveCount(0);
+});
+
+test('A question about a registered contract: the answer form preselects a requirement change and names the order', async ({
+  page,
+  request,
+}) => {
+  test.slow();
+  const { board, task } = await askingTask(
+    request,
+    'Вопрос о контракте',
+    '',
+    ' [demo:ask-contract]',
+  );
+  await page.goto(`/?tab=list&board=${board}&task=${task}`);
+  const card = page
+    .getByRole('complementary', { name: 'Детали задачи' })
+    .getByRole('region', { name: 'Вопрос исполнителя' });
+  await expect(card).toContainText('Нужен ответ');
+  const kind = card.getByLabel(/Ответ меняет требования/);
+  await expect(kind).toBeChecked();
+  const note = card.locator('[data-contract-answer-note]');
+  await expect(note).toContainText('contract-change');
+  await expect(note).toContainText('input_context → input_review → input_target → input_apply');
+  // Оператор может осознанно сменить вид: выбор не возвращается опросом.
+  await kind.uncheck();
+  await page.waitForTimeout(2500);
+  await expect(kind).not.toBeChecked();
+  await kind.check();
+  await card.getByLabel('YAML').check();
+  await card.getByLabel('Ответ исполнителю').fill('Нужна поправка формулировки контракта.');
+  await card.getByRole('button', { name: 'Сохранить ответ' }).click();
+  await expect(card.locator('[data-input-answer]')).toContainText('изменение требований');
 });
 
 test.describe('approvalMode operator', () => {
