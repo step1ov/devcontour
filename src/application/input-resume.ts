@@ -8,6 +8,7 @@ import type { DevContour } from '../core/service.ts';
 import type { Task } from '../core/model.ts';
 import { LeadWorkflow } from '../core/lead-workflow.ts';
 import { repositories } from '../core/repositories.ts';
+import { pausedByLead } from '../core/work-status.ts';
 
 /** Локальные записи прохода (`local_workflow`): ключ — ID запроса; `@driver` — признак живого сервера. */
 export const RESUME = 'input-resume';
@@ -77,12 +78,17 @@ const AUTO = new Set<ResumePhase>([
   'paused',
 ]);
 
-/** Пауза, при которой проход ждёт: остановка сервера, применение конфигурации, отказ рантайма. */
+/**
+ * Пауза, при которой проход ждёт: остановка сервера, применение
+ * конфигурации, отказ рантайма и пауза человека — пока оператор остановил
+ * очередь, проход моделей не вызывает. Пауза ведущего (`queue_set`) держит
+ * только выдачу; исходная пауза «очередь ещё не запускали» прохода не держит.
+ */
 export const resumeHeld = (h: DevContour) => {
   const s = h.store.read();
-  return s.paused && ['shutdown', 'reconfigure', 'runtime'].includes(s.pauseReason ?? '')
-    ? s.pauseReason
-    : undefined;
+  if (!s.paused) return undefined;
+  if (['shutdown', 'reconfigure', 'runtime'].includes(s.pauseReason ?? '')) return s.pauseReason;
+  return s.pauseReason === 'operator' && !pausedByLead(s) ? 'operator' : undefined;
 };
 
 /** Сервер ведёт проход: его отметка свежая. */
@@ -158,6 +164,9 @@ export function resumeOf(
   });
   if (answer.kind === 'requirement-change')
     return view('needs-lead', { detail: 'requirement-change' });
+  // Пауза держит любой шаг прохода — и ревью, и применение (моделей нет).
+  const held = resumeHeld(h);
+  if (held) return view('paused', { detail: held });
   const saved = resumeRecord(h, request.id);
   const record = saved?.answerDigest === answer.digest ? saved : undefined;
   const reviewing = state === 'answer-saved' || state === 'stale';
@@ -172,8 +181,6 @@ export function resumeOf(
   if (!reviewing && record?.phase === 'blocked')
     return view('blocked', { detail: (record.problems ?? []).join('; ') });
   if (!reviewing && record?.phase === 'waiting-active') return view('waiting-active');
-  const held = resumeHeld(h);
-  if (held) return view('paused', { detail: held });
   if (reviewing && !resumeAuthor(h, task, boardId))
     return view('needs-lead', { detail: 'author-runtime' });
   if (reviewing && trigger !== 'operator') {

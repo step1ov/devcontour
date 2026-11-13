@@ -32,7 +32,7 @@ test.describe('Continuation after an answer', () => {
     await demo?.close();
   });
 
-  test('The task card names the server pass and its stop; the answer is applied without the lead', async ({
+  test('The task card names the server pass, its stop and an operator pause; the answer is applied without the lead after the pause', async ({
     page,
     request,
   }) => {
@@ -71,7 +71,7 @@ test.describe('Continuation after an answer', () => {
         { timeout: 120000 },
       )
       .toBe(1);
-    // Пауза держит выдачу, но не продолжение ответа.
+    // Пауза оператора держит и выдачу, и проход сервера (без вызова модели).
     expect(
       (await request.post(base + '/api/scheduler', { headers, data: { start: false } })).ok(),
     ).toBe(true);
@@ -117,12 +117,18 @@ test.describe('Continuation after an answer', () => {
     await card.getByLabel('JSON').check();
     await card.getByLabel('Ответ исполнителю').fill('Оставьте JSON, как в контракте.');
     await card.getByRole('button', { name: 'Сохранить ответ' }).click();
-    await expect(card).toContainText('Ответ применён, ждёт попытки');
-    await expect(line).toHaveCount(0);
-    const { requests } = (await agent(request, base, 'input_list', { taskId: task.id })) as {
+    await expect(line).toHaveAttribute('data-input-resume', 'paused');
+    await expect(line).toContainText('Ответ принят — продолжу после снятия паузы');
+    const held = (await agent(request, base, 'input_list', { taskId: task.id })) as {
       requests: { state: string }[];
     };
-    expect(requests[0].state).toBe('applied-awaiting-claim');
+    expect(held.requests[0].state).toBe('answer-saved');
+    // Пауза снята: сервер проверяет и применяет ответ, новая попытка его получает.
+    expect(
+      (await request.post(base + '/api/scheduler', { headers, data: { start: true } })).ok(),
+    ).toBe(true);
+    await expect(card).toContainText('Передано в новую попытку', { timeout: 60000 });
+    await expect(line).toHaveCount(0);
     expect(errors).toEqual([]);
   });
 });

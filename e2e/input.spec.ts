@@ -173,8 +173,8 @@ test('The operator answers the writer question in the panel; the answer reaches 
   // В списке задача помечена ожиданием ответа.
   await expect(page.locator('[data-input-waiting]').first()).toBeVisible();
 
-  // Очередь на паузе, чтобы увидеть «применён, ждёт попытки»: пауза держит
-  // выдачу, а не продолжение ответа.
+  // Очередь на паузе оператора: проход сервера ждёт её снятия и моделей не
+  // вызывает — карточка и доска говорят это прямо.
   expect((await request.post('/api/scheduler', { headers, data: { start: false } })).ok()).toBe(
     true,
   );
@@ -186,26 +186,25 @@ test('The operator answers the writer question in the panel; the answer reaches 
   const thread = inspector.getByRole('list', { name: 'Сообщения обсуждения' });
   await expect(thread).toContainText('ответ на вопрос, r1');
   await expect(thread).toContainText('Оставьте JSON, как сейчас.');
-  // Режим agent: применять в панели нечего, и сессия ведущего не нужна —
-  // сервер сам проверяет ответ (demo-ревью, детерминированное) и применяет его.
+  // Режим agent: применять в панели нечего, и сессия ведущего не нужна.
   await expect(card.getByRole('button', { name: 'Применить ответ' })).toHaveCount(0);
+  const resume = card.locator('[data-input-resume]');
+  await expect(resume).toHaveAttribute('data-input-resume', 'paused');
+  await expect(resume).toContainText('Ответ принят — продолжу после снятия паузы');
   const { requests } = (await agent(request, 'input_list', { taskId: task.id })) as {
-    requests: { requestId: string }[];
+    requests: { requestId: string; state: string }[];
   };
   const requestId = requests[0].requestId;
-  await expect
-    .poll(
-      async () => ((await agent(request, 'input_show', { requestId })) as { state: string }).state,
-      { timeout: 60000 },
-    )
-    .toBe('applied-awaiting-claim');
-  const shown = (await agent(request, 'input_show', { requestId })) as {
-    reviews: { approved: boolean }[];
-  };
-  expect(shown.reviews.map((r) => r.approved)).toEqual([true]);
-  await expect(card).toContainText('Ответ применён, ждёт попытки');
-  await expect(card).not.toContainText('Передано в новую попытку');
+  expect(requests[0].state).toBe('answer-saved');
+  // Доска задач: метка называет фазу прохода, а не «Ждёт ответа».
+  await page.goto(`/?tab=kanban&board=${board.id}&task=${task.id}`);
+  await expect(waitingColumn.locator('[data-input-resume="paused"]')).toContainText(
+    'Ответ принят: после паузы',
+  );
+  await page.goto(`/?tab=list&board=${board.id}&task=${task.id}`);
 
+  // Снятие паузы: сервер проверяет ответ (demo-ревью, детерминированное),
+  // применяет его, и новая попытка завершает задачу.
   expect((await request.post('/api/scheduler', { headers, data: { start: true } })).ok()).toBe(
     true,
   );
@@ -213,6 +212,10 @@ test('The operator answers the writer question in the panel; the answer reaches 
     .poll(async () => (await taskState(request, task.id))?.status, { timeout: 60000 })
     .toBe('done');
   await expect(card).toContainText('Передано в новую попытку');
+  const shown = (await agent(request, 'input_show', { requestId })) as {
+    reviews: { approved: boolean }[];
+  };
+  expect(shown.reviews.map((r) => r.approved)).toEqual([true]);
   // «Ход попыток»: остановка вопросом и продолжение после ответа идут с одним
   // номером бюджета — пометки их различают.
   const attempts = inspector.getByRole('region', { name: 'Ход попыток' });

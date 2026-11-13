@@ -23,7 +23,8 @@ import {
   resumeRecord,
   type ResumeRecord,
 } from '../src/application/input-resume.ts';
-import { resumeText } from '../src/core/input-labels.ts';
+import { resumeBadge, resumeText } from '../src/core/input-labels.ts';
+import { panelSummary } from '../src/application/panel.ts';
 import type { AgentAdapter } from '../src/runner/adapters.ts';
 
 after(() => inputDemos.close());
@@ -281,5 +282,44 @@ test('A lead answer waits for the grace period; requirement changes and operator
     assert.equal(reviews(prompts), 0);
   } finally {
     await g.cleanup();
+  }
+});
+
+test('An operator pause holds the pass with no model call; the board names the phase; lifting the pause continues', async () => {
+  const prompts: string[] = [];
+  const runtimes = controlled({ critical: true, prompts });
+  const f = await inputFixture(runtimes);
+  try {
+    const { taskId, boardId, requestId, version } = await question(f);
+    new LeadWorkflow(f.h).start({ kind: 'board', id: boardId, authorRuntime: 'codex' });
+    const lead = new LeadRunner(f.h, f.root, runtimes);
+    await lead.tick();
+    f.h.pause(true);
+    f.service.answerInTask(taskId, requestId, { text: 'Keep JSON.', expectedVersion: version });
+    await lead.tick();
+    await lead.tick();
+    const r = f.service.list({ taskId }).requests[0];
+    assert.equal(r.state, 'answer-saved');
+    assert.deepEqual(r.resume, {
+      phase: 'paused',
+      auto: true,
+      trigger: 'operator',
+      detail: 'operator',
+    });
+    assert.match(resumeText(r.resume), /^Ответ принят — продолжу после снятия паузы/);
+    assert.equal(reviews(prompts), 0, 'на паузе оператора моделей нет');
+    // Доска: метка фазы прохода вместо «Ждёт ответа».
+    const summary = panelSummary(f.h, f.root, { board: boardId }) as unknown as {
+      tasks: { id: string; inputResume?: { phase: string } }[];
+    };
+    assert.equal(summary.tasks.find((t) => t.id === taskId)?.inputResume?.phase, 'paused');
+    assert.equal(resumeBadge(r.resume), 'Ответ принят: после паузы');
+
+    f.h.pause(false);
+    await lead.tick();
+    assert.equal(reviews(prompts), 1);
+    assert.equal(f.service.list({ taskId }).requests[0].state, 'applied-awaiting-claim');
+  } finally {
+    await f.cleanup();
   }
 });

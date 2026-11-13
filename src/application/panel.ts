@@ -184,6 +184,9 @@ function uiTask(
       : {}),
     recoveryCount: _history?.length ?? 0,
     specDigest: specDigest(t),
+    // Вопрос держит задачу, а ответ уже ведёт сервер: доска называет фазу
+    // прохода, а не «Ждёт ответа».
+    ...inputResumeOf(h, t.id, inputs.get(t.id)),
     blockers: blockers(t, state, inputs),
     progress: taskProgress(h, state, t, now),
     checks: clip(checksSummary(t)),
@@ -1018,6 +1021,15 @@ export function panelTaskSearch(h: DevContour, query: Record<string, string | un
       boardId: boardOf.get(t.id),
     })),
   };
+}
+
+/** Фаза продолжения после ответа на вопрос, который держит задачу (`resume` сводки). */
+function inputResumeOf(h: DevContour, taskId: string, requestId: string | undefined) {
+  if (!requestId || h.config.approvalMode !== 'agent') return {};
+  const resume = new InputService(h)
+    .list({ taskId })
+    .requests.find((r) => r.requestId === requestId)?.resume;
+  return resume ? { inputResume: resume } : {};
 }
 
 /** Очередь всех досок: незавершённые и неотменённые задачи страницами. */

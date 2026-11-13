@@ -183,7 +183,9 @@ export function resumeText(r: ResumeLabel): string {
     case 'retry':
       return `Проверка ответа не удалась${r.detail ? ` (${r.detail})` : ''} — DevContour повторит её${r.until ? ' в ' + clock(r.until) : ' автоматически'}`;
     case 'paused':
-      return `${accepted} — очередь остановлена (${r.detail === 'runtime' ? 'отказ рантайма' : r.detail === 'reconfigure' ? 'применение конфигурации' : 'остановка сервера'}); DevContour проверит ответ после снятия паузы`;
+      return r.detail === 'operator'
+        ? `${accepted} — продолжу после снятия паузы: очередь остановлена оператором, проверка ответа ждёт запуска очереди`
+        : `${accepted} — очередь остановлена (${r.detail === 'runtime' ? 'отказ рантайма' : r.detail === 'reconfigure' ? 'применение конфигурации' : 'остановка сервера'}); DevContour проверит ответ после снятия паузы`;
     case 'failed':
       return `DevContour не смог проверить ответ${r.detail ? `: ${r.detail}` : ''}. Нужен ведущий агент: устранить причину и провести проверку ответа вручную (session_handoff назовёт шаг)`;
     case 'blocked':
@@ -194,5 +196,25 @@ export function resumeText(r: ResumeLabel): string {
         : 'DevContour не знает, чей рантайм автора проверять: нужен ведущий агент — запустить задание доски или провести проверку ответа вручную';
     default:
       return '';
+  }
+}
+
+/** Короткая метка доски для фазы продолжения после ответа (полный текст — `resumeText`). */
+export function resumeBadge(r: ResumeLabel): string {
+  switch (r.phase) {
+    case 'pending':
+    case 'reviewing':
+      return 'Ответ принят: проверка';
+    case 'applying':
+    case 'waiting-active':
+      return 'Ответ принят: применение';
+    case 'grace':
+      return 'Ответ ведущего принят';
+    case 'retry':
+      return 'Ответ принят: повтор проверки';
+    case 'paused':
+      return 'Ответ принят: после паузы';
+    default:
+      return 'Ответ принят: нужен ведущий';
   }
 }
