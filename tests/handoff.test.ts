@@ -1828,3 +1828,61 @@ test('session_handoff: задача, отменённая до выдачи, —
     f.cleanup();
   }
 });
+
+test('session_handoff: завершённая доска — без остановки CONTROLLER_BUSY; repairs без вытесненного задания', () => {
+  const f = fixture();
+  try {
+    const board = f.h.createBoard('Finished board', '', 'main');
+    const task = f.h.addTask(board.id, input('Task before the change'));
+    const flow = new LeadWorkflow(f.h);
+    const request = { kind: 'board', id: board.id, authorRuntime: 'codex', maxAttempts: 3 };
+    // Прежнее задание доски израсходовало восстановление и устарело правкой.
+    const old = flow.start(request);
+    atStage(f.h, old.key, old.owner, 0, { repairs: 1 });
+    const edited = f.h.editTask(task.id, input('Task after the change'), specDigest(task));
+    assert.equal(flow.claim(old.key, old.owner), undefined);
+    assert.equal(flow.get(old.key, old.owner).status, 'stale');
+    f.h.approve(board.id);
+    assert.ok(f.h.leader('server'), 'сервер держит роль controller');
+    // Пока работа открыта, остановка выдачи о другом controller остаётся.
+    const open = devcontourHandoff(f.h, { boardId: board.id });
+    assert.ok(open.pack.summary.open > 0);
+    assert.ok(
+      open.pack.stops.some((s) => s.code === 'CONTROLLER_BUSY'),
+      JSON.stringify(open.pack.stops),
+    );
+    complete(f.h, edited.id);
+    f.h.accept(board.id, MERGED);
+    tick();
+    const current = flow.start(request);
+    assert.notEqual(current.key, old.key);
+    atStage(f.h, current.key, current.owner, 2, { status: 'completed', attempts: 1 });
+    assert.ok(f.h.leader('server'));
+
+    const value = devcontourHandoff(f.h, { boardId: board.id });
+    const pack = handoffPackSchema.parse(value.pack);
+    assert.equal(pack.controller?.live, true);
+    assert.equal(pack.summary.open, 0);
+    assert.equal(pack.next.action, 'none');
+    assert.deepEqual(
+      pack.stops.filter((s) => s.code === 'CONTROLLER_BUSY'),
+      [],
+      'сервер с ролью controller — обычное состояние завершённой доски',
+    );
+    // Прежнее задание вытеснено текущим (завершённым): его счётчик не
+    // выдаёт себя за счётчик доски.
+    assert.deepEqual(pack.repairs, []);
+    assert.equal(value.host.next, undefined);
+    assert.doesNotMatch(handoffResponse(value, 'md').markdown!, /controller-busy|CONTROLLER_BUSY/);
+
+    // Без нового задания прежнее остаётся единственным заданием доски и
+    // называется, как прежде.
+    f.h.store.atomic(() => f.h.store.deleteLocal('lead', current.owner, current.key));
+    assert.deepEqual(
+      devcontourHandoff(f.h, { boardId: board.id }).pack.repairs.map((r) => [r.status, r.used]),
+      [['stale', 1]],
+    );
+  } finally {
+    f.cleanup();
+  }
+});
