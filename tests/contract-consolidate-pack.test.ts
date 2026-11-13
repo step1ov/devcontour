@@ -1,7 +1,8 @@
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
 import { writeFile } from 'node:fs/promises';
-import { join } from 'node:path';
+import { join, resolve } from 'node:path';
+import { command } from '../src/runner/process.ts';
 import { type ContractChange } from '../src/runner/contract-change.ts';
 import { pinContext } from '../src/runner/context.ts';
 import { loadConfig } from '../src/runner/config.ts';
@@ -66,6 +67,27 @@ test('H1: after a consolidation the context pack holds the new text and a task b
     assert.deepEqual(s.task(s.api.id).contracts, [s.c1.id]);
     const snapshot = await context(s, s.api.id);
     assert.ok(JSON.stringify(snapshot).includes('REQ-3. Sorted by name.'));
+    // CLI context-show — тот же путь (currentContracts) в отдельном процессе.
+    const run = await command(
+      [
+        process.execPath,
+        '--import',
+        import.meta.resolve('tsx'),
+        resolve('src/cli.ts'),
+        'context-show',
+        '--task',
+        s.api.id,
+        '--data',
+        s.root,
+      ],
+      process.cwd(),
+      {
+        timeoutMs: 120000,
+        env: { PATH: process.env.PATH, HOME: process.env.HOME, TMPDIR: process.env.TMPDIR },
+      },
+    );
+    assert.equal(run.code, 0, run.stderr);
+    assert.ok(run.stdout.includes('REQ-3. Sorted by name.'), run.stdout.slice(0, 500));
   } finally {
     await s.remove();
   }
