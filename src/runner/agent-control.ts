@@ -25,6 +25,7 @@ import { assertUnderTest, unguardedDependencies, unguardedMessage } from './arti
 import {
   type Approval,
   type ContractAttempt,
+  CONTRACT_CONTENT_CONSOLIDATE,
   CONTRACT_CONTENT_MAX,
   CONTRACT_CONTENT_WARN,
   DomainError,
@@ -173,13 +174,23 @@ export function proposalLimitIssues(input: unknown): LimitIssue[] {
 /** Как вынести часть правил из длинного контракта (docs/cli.md, «Файл-продолжение»). */
 export const CONTINUATION =
   'Вынесите часть правил в файл-продолжение: второй контракт отдельным файлом, который в начале называет основной контракт и перечисляет, какие его правила меняет или дополняет; задачи привязывают оба контракта (docs/cli.md, «Файл-продолжение»)';
+/**
+ * Первый выход для длинного контракта (F20): консолидация. Поправки этапов
+ * занимают место, а переписанный без изменения смысла текст короче и
+ * сохраняет привязки задач.
+ */
+export const CONSOLIDATE_HINT =
+  'Консолидируйте документ: перепишите накопленные поправки в описание текущего поведения без изменения смысла (те же ID правил, якоря, artifacts и checks) и проведите его командой contract-change --consolidate; задачи сохранят привязку (docs/cli.md, «Консолидация контракта»)';
+/** Совет при пределе: сначала консолидация, затем продолжение. */
+const consolidateThenContinue = `${CONSOLIDATE_HINT}. Если правила не помещаются и после консолидации — ${CONTINUATION[0].toLowerCase()}${CONTINUATION.slice(1)}`;
 export const thousands = (n: number) => n.toLocaleString('ru-RU').replace(/\s/g, ' ');
 
 /**
  * Размер документа контракта относительно предела записи. Документ из
  * файла схема предложения не видит: без этой проверки превышение
  * обнаруживалось только при регистрации — после оплаченного ревью.
- * `refusal` — документ больше предела, `warning` — от 90 % предела.
+ * `refusal` — документ больше предела, `warning` — от 90 % предела,
+ * `hint` — от 75 %: совет консолидировать документ (F20).
  */
 export interface ContractSize {
   chars: number;
@@ -187,6 +198,7 @@ export interface ContractSize {
   warnAt: number;
   refusal?: string;
   warning?: string;
+  hint?: string;
 }
 export function contractSize(content: string): ContractSize {
   const chars = content.length;
@@ -194,12 +206,17 @@ export function contractSize(content: string): ContractSize {
   if (chars > CONTRACT_CONTENT_MAX)
     return {
       ...base,
-      refusal: `Документ контракта — ${thousands(chars)} знаков при пределе ${thousands(CONTRACT_CONTENT_MAX)}, длиннее на ${thousands(chars - CONTRACT_CONTENT_MAX)}: такой контракт не будет зарегистрирован, ревью не начато. ${CONTINUATION}.`,
+      refusal: `Документ контракта — ${thousands(chars)} знаков при пределе ${thousands(CONTRACT_CONTENT_MAX)}, длиннее на ${thousands(chars - CONTRACT_CONTENT_MAX)}: такой контракт не будет зарегистрирован, ревью не начато. ${consolidateThenContinue}.`,
     };
   if (chars >= CONTRACT_CONTENT_WARN)
     return {
       ...base,
-      warning: `Документ контракта — ${thousands(chars)} знаков из ${thousands(CONTRACT_CONTENT_MAX)} допустимых (осталось ${thousands(CONTRACT_CONTENT_MAX - chars)}): следующая правка может превысить предел. ${CONTINUATION}.`,
+      warning: `Документ контракта — ${thousands(chars)} знаков из ${thousands(CONTRACT_CONTENT_MAX)} допустимых (осталось ${thousands(CONTRACT_CONTENT_MAX - chars)}): следующая правка может превысить предел. ${consolidateThenContinue}.`,
+    };
+  if (chars >= CONTRACT_CONTENT_CONSOLIDATE)
+    return {
+      ...base,
+      hint: `Документ контракта — ${thousands(chars)} знаков из ${thousands(CONTRACT_CONTENT_MAX)} допустимых, больше 75 % предела. ${CONSOLIDATE_HINT}.`,
     };
   return base;
 }
@@ -741,7 +758,7 @@ export async function reviewContract(
       pinned.artifacts.length
         ? undefined
         : 'Контракт без artifacts: закреплён только документ; схемы и файлы приёмки, на которые он ссылается, могут измениться без ревью',
-      size.warning,
+      size.warning ?? size.hint,
     ]
       .filter(Boolean)
       .join('. ') || undefined;

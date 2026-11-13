@@ -247,6 +247,13 @@ export const taskIngest = taskInput.extend({
  */
 export const CONTRACT_CONTENT_MAX = 60000;
 export const CONTRACT_CONTENT_WARN = 54000;
+/**
+ * С 75 % предела документ пора консолидировать (F20): переписать накопленные
+ * поправки в описание текущего поведения без изменения смысла.
+ */
+export const CONTRACT_CONTENT_CONSOLIDATE = 45000;
+/** Столько смысловых редакций документа подряд без консолидации — совет консолидировать. */
+export const CONTRACT_CONSOLIDATE_AFTER = 6;
 export interface Task extends TaskInput {
   sharedCompletion?: { receipt: CompletionReceipt; sourceCommit: string };
   /**

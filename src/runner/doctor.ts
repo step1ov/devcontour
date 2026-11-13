@@ -3,7 +3,13 @@ import { access, mkdir, readFile, readdir, realpath, rm, writeFile } from 'node:
 import { constants, existsSync, statSync } from 'node:fs';
 import { delimiter, dirname, isAbsolute, join, resolve } from 'node:path';
 import { randomUUID } from 'node:crypto';
-import { emptyState, type Config, type DevContourState, type Role } from '../core/model.ts';
+import {
+  CONTRACT_CONSOLIDATE_AFTER,
+  emptyState,
+  type Config,
+  type DevContourState,
+  type Role,
+} from '../core/model.ts';
 import {
   codeReviewVendor,
   declaredRoles,
@@ -43,11 +49,18 @@ import {
   APPLIED_KEYS_KEY,
   APPLIED_KEYS_NAMESPACE,
   DevContour,
+  meaningRedactionsSinceConsolidation,
   newerRedaction,
   type AppliedConfigKeys,
 } from '../core/service.ts';
 import { repository } from '../core/repositories.ts';
-import { artifactGuard, CONTINUATION, contractSize, thousands } from './agent-control.ts';
+import {
+  artifactGuard,
+  CONSOLIDATE_HINT,
+  CONTINUATION,
+  contractSize,
+  thousands,
+} from './agent-control.ts';
 import { unguardedMessage } from './artifact-closure.ts';
 import {
   Store,
@@ -1202,8 +1215,10 @@ export function checkoutsCheck(config: Config, root: string): Check {
 /**
  * Действующие контракты у предела размера документа. Контракт растёт
  * поправками от этапа к этапу, а предел обнаруживался только отказом
- * следующей редакции на review-contract. Предупреждение — с порога
- * `contractSize`; готовность не снимает.
+ * следующей редакции на review-contract. Предупреждение — с порога совета
+ * `contractSize` (75 % предела: консолидировать) и после
+ * `CONTRACT_CONSOLIDATE_AFTER` смысловых редакций документа с последней
+ * консолидации; готовность не снимает.
  */
 export function contractSizeChecks(contracts: DevContourState['contracts']): Check[] {
   return (
@@ -1213,21 +1228,36 @@ export function contractSizeChecks(contracts: DevContourState['contracts']): Che
       .filter((c) => typeof c.content === 'string' && !newerRedaction(contracts, c.id))
       .flatMap((c) => {
         const size = contractSize(c.content);
+        const name = `Контракт ${c.id} (${c.title}${c.source ? `, ${c.source}` : ''})`;
         // Текст отказа регистрации («не будет зарегистрирован») здесь неверен:
         // контракт уже зарегистрирован и действует, отказ получит следующая
         // редакция.
         const detail = size.refusal
-          ? `документ — ${thousands(size.chars)} знаков при пределе ${thousands(size.max)}, длиннее на ${thousands(size.chars - size.max)}. Контракт зарегистрирован и действует, но следующая его редакция будет отклонена до ревью. ${CONTINUATION}.`
-          : size.warning;
-        return detail
-          ? [
-              {
-                id: `contract-size:${c.id}`,
-                status: 'degraded' as const,
-                detail: `Контракт ${c.id} (${c.title}${c.source ? `, ${c.source}` : ''}): ${detail}`,
-              },
-            ]
-          : [];
+          ? `документ — ${thousands(size.chars)} знаков при пределе ${thousands(size.max)}, длиннее на ${thousands(size.chars - size.max)}. Контракт зарегистрирован и действует, но следующая его редакция будет отклонена до ревью. ${CONSOLIDATE_HINT}. Если правила не помещаются и после консолидации — ${CONTINUATION[0].toLowerCase()}${CONTINUATION.slice(1)}.`
+          : (size.warning ?? size.hint);
+        const redactions = c.source
+          ? meaningRedactionsSinceConsolidation(contracts, c.source, c.repositoryId)
+          : 0;
+        return [
+          ...(detail
+            ? [
+                {
+                  id: `contract-size:${c.id}`,
+                  status: 'degraded' as const,
+                  detail: `${name}: ${detail}`,
+                },
+              ]
+            : []),
+          ...(redactions >= CONTRACT_CONSOLIDATE_AFTER
+            ? [
+                {
+                  id: `contract-consolidate:${c.id}`,
+                  status: 'degraded' as const,
+                  detail: `${name}: ${redactions} смысловых редакций документа с последней консолидации — поправки копятся в тексте. ${CONSOLIDATE_HINT}.`,
+                },
+              ]
+            : []),
+        ];
       })
   );
 }

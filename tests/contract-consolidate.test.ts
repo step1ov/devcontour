@@ -60,7 +60,7 @@ test('F20: a consolidation completes without rebind or plan review; ready tasks 
     const run = s.h.claim('test');
     assert.equal(run?.taskId, s.api.id);
     await devcontourHooks(s.h).prepared!({
-      attempt: { id: run!.id, token: run!.token, workId: s.api.id },
+      attempt: { id: run.id, token: run.token, workId: s.api.id },
       baseSha: s.sh('rev-parse', 'devcontour/accepted'),
     } as never);
     // Перенос, принёсший документ, доказан ревью консолидации и при открытой
