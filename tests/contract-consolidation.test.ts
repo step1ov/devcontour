@@ -3,6 +3,7 @@ import assert from 'node:assert/strict';
 import { fixture, input } from './helpers.ts';
 import {
   contractDigest,
+  contractForks,
   contractRedactionsOf,
   currentText,
   meaningRedactionsSinceConsolidation,
@@ -12,7 +13,7 @@ import {
 import { reviewedRedaction } from '../src/runner/sensitive-paths.ts';
 import { recordSchema } from '../src/core/sync-model.ts';
 import { recordsFromState, stateFromRecords } from '../src/core/sync-state.ts';
-import type { Approval } from '../src/core/model.ts';
+import type { Approval, Contract } from '../src/core/model.ts';
 import { AgentContext } from '../src/application/context.ts';
 
 const SOURCE = 'docs/contracts/api.md';
@@ -203,7 +204,7 @@ test('F20: sync carries consolidates; a record of an older peer without it still
     ]);
     assert.throws(
       () => stateFromRecords(f.h, empty, forged as never, new Map()),
-      /Консолидация .* не принята: нет консолидируемой редакции/,
+      /Редакция контракта .* не принята: консолидация: нет консолидируемой редакции/,
     );
   } finally {
     f.cleanup();
@@ -214,12 +215,20 @@ test('F20: sync carries consolidates; a record of an older peer without it still
 type Records = Record<string, { kind: string; data: ContractData }>;
 type ContractData = {
   id: string;
+  previous?: string;
   content: string;
   digest: string;
   consolidates?: { from: string; review: string };
 };
-function reimport(f: ReturnType<typeof registry>, patch: (records: Records) => void) {
-  const empty = { ...f.store.read(), contracts: [], tasks: [], boards: [] };
+function reimport(
+  f: ReturnType<typeof registry>,
+  patch: (records: Records) => void,
+  /** Клон, который уже знает записи (повторный импорт), а не пустой. */
+  known = false,
+) {
+  const empty = known
+    ? f.store.read()
+    : { ...f.store.read(), contracts: [], tasks: [], boards: [] };
   const exported = recordsFromState(f.h, f.store.read());
   for (const records of exported.values()) patch(records as unknown as Records);
   return stateFromRecords(f.h, empty, exported, new Map());
@@ -261,7 +270,7 @@ test('F20 M1: import re-checks a consolidation: the immediately preceding redact
           const rec = contractRecord(r, c.id);
           if (rec) rec.data.consolidates = { from: f.c1.id, review: 'R-1' };
         }),
-      /не непосредственно предыдущую/,
+      /не непосредственно предыдущей редакции/,
     );
     // Подделанный текст: пропал ID правила (digest пересчитан честно).
     assert.throws(
@@ -328,4 +337,150 @@ test('F20 M1: a concurrent amendment of the consolidated redaction replaces the 
   } finally {
     f.cleanup();
   }
+});
+
+test('F20 R2-H1: import checks run once, for records new to the clone: a later sibling linking to a removed anchor or a consolidation accepted under older rules does not block sync', () => {
+  const f = registry();
+  try {
+    const a = f.h.contract(
+      'API',
+      '# API\n\n## Old\n\nREQ-1 old rule.\n\n## New\n\nREQ-2.\n',
+      agent,
+      undefined,
+      SOURCE,
+    );
+    // Законная консолидация: на «Old» никто не ссылается.
+    f.h.contract(
+      'API',
+      '# API\n\n## New\n\nREQ-1, REQ-2.\n',
+      agent,
+      undefined,
+      SOURCE,
+      [],
+      undefined,
+      [],
+      {
+        from: a.id,
+        review: 'R-1',
+      },
+    );
+    // Позже сосед ссылается на убранный раздел.
+    f.h.contract(
+      'Orders',
+      'See api.md#old for prices.',
+      agent,
+      undefined,
+      'docs/contracts/orders.md',
+    );
+    reimport(f, () => {});
+    reimport(f, () => {}, true);
+    // Консолидация, принятая этим клоном раньше (здесь — зарегистрированная
+    // без проверки текста, как запись прежних правил), не пересуживается при
+    // повторном импорте; новому клону она не передаётся.
+    const lossy = f.h.contract('API', 'REQ-2 only.', agent, undefined, SOURCE, [], undefined, [], {
+      from: f.store.read().contracts.find((c) => c.source === SOURCE && c.consolidates)!.id,
+      review: 'R-2',
+    });
+    assert.ok(lossy.consolidates);
+    reimport(f, () => {}, true);
+    assert.throws(() => reimport(f, () => {}), /нет ID правил REQ-1/);
+  } finally {
+    f.cleanup();
+  }
+});
+
+test('F20 R2-L2: previous must name a redaction of the same document; a consolidation without previous is refused', () => {
+  const f = registry();
+  try {
+    const c = f.h.contract('API', 'REQ-1 REQ-2', agent, undefined, SOURCE, [], undefined, [], {
+      from: f.c1.id,
+      review: 'R-1',
+    });
+    const other = f.h.contract('Orders', 'Orders.', agent, undefined, 'docs/contracts/orders.md');
+    assert.throws(
+      () =>
+        reimport(f, (r) => {
+          const rec = contractRecord(r, c.id);
+          if (rec) rec.data.previous = other.id;
+        }),
+      /previous не называет редакцию того же документа/,
+    );
+    assert.throws(
+      () =>
+        reimport(f, (r) => {
+          const rec = contractRecord(r, c.id);
+          if (rec) delete rec.data.previous;
+        }),
+      /не непосредственно предыдущей редакции/,
+    );
+  } finally {
+    f.cleanup();
+  }
+});
+
+const record = (id: string, extra: Partial<Contract> = {}): Contract => ({
+  id,
+  title: 'API',
+  content: id,
+  digest: 'd-' + id,
+  source: SOURCE,
+  approvedAt: '2026-01-01T00:00:00.000Z',
+  ...extra,
+});
+const order = (cs: Contract[]) => contractRedactionsOf(cs, SOURCE, undefined).map((c) => c.id);
+
+test('F20 R2-L1: equal approval times are ordered by id, the same on every clone', () => {
+  const x = record('C-b'),
+    y = record('C-a');
+  assert.deepEqual(order([x, y]), ['C-a', 'C-b']);
+  assert.deepEqual(order([y, x]), ['C-a', 'C-b']);
+});
+
+test('F20: mixed legacy records (no links, ordered by time) and new records (ordered by links)', () => {
+  const l1 = record('C-z', { approvedAt: '2026-01-01T00:00:00.000Z' });
+  const l2 = record('C-y', { approvedAt: '2026-01-02T00:00:00.000Z' });
+  // Новые записи: часы клона отстают, порядок задают ссылки.
+  const n3 = record('C-x', { approvedAt: '2025-01-01T00:00:00.000Z', previous: l2.id });
+  const f4 = record('C-w', {
+    approvedAt: '2025-01-01T00:00:00.000Z',
+    previous: n3.id,
+    consolidates: { from: n3.id, review: 'R' },
+  });
+  const n5 = record('C-v', { approvedAt: '2024-01-01T00:00:00.000Z', previous: f4.id });
+  for (const cs of [
+    [l1, l2, n3, f4, n5],
+    [n5, f4, n3, l2, l1],
+    [f4, l1, n5, l2, n3],
+  ])
+    assert.deepEqual(order(cs), ['C-z', 'C-y', 'C-x', 'C-w', 'C-v']);
+  assert.equal(supersededBy([l1, l2, n3, f4, n5], n3.id)?.id, n5.id);
+  assert.equal(currentText([l1, l2, n3, f4], n3.id)?.id, f4.id);
+});
+
+test('F20 R2-M1: a fork — two amendments of the same redaction — is detected with the winner', () => {
+  const p = record('C-p');
+  const m1 = record('C-m1', { previous: p.id, approvedAt: '2026-01-02T00:00:00.000Z' });
+  const m2 = record('C-m2', { previous: p.id, approvedAt: '2026-01-03T00:00:00.000Z' });
+  assert.deepEqual(contractForks([p, m1, m2]), [
+    { source: SOURCE, base: p.id, branches: [m1.id, m2.id], winner: m2.id },
+  ]);
+  // Поправка после консолидации P и параллельная поправка P — тоже развилка.
+  const f = record('C-f', {
+    previous: p.id,
+    consolidates: { from: p.id, review: 'R' },
+    approvedAt: '2026-01-02T00:00:00.000Z',
+  });
+  const n = record('C-n', { previous: f.id, approvedAt: '2026-01-04T00:00:00.000Z' });
+  assert.deepEqual(contractForks([p, f, n, m2])[0]?.branches.sort(), [m2.id, n.id].sort());
+  // Цепочка без развилки и поправка консолидации — не развилка.
+  assert.deepEqual(contractForks([p, f, n]), []);
+  assert.deepEqual(contractForks([p, f, m2]), []);
+});
+
+test('F20 R2-L2: a consolidation record without previous is not an equivalent redaction', () => {
+  const p = record('C-p');
+  const linked = record('C-f', { previous: p.id, consolidates: { from: p.id, review: 'R' } });
+  const bare = record('C-f', { consolidates: { from: p.id, review: 'R' } });
+  assert.equal(supersededBy([p, linked], p.id), undefined);
+  assert.equal(supersededBy([p, bare], p.id)?.id, bare.id);
 });

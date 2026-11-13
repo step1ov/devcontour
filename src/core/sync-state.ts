@@ -8,7 +8,6 @@ import {
   contractDigest,
   contractRedactionsOf,
   digest,
-  newerRedaction,
   sameObligations,
   scopeDigest,
   specDigest,
@@ -653,36 +652,39 @@ export function stateFromRecords(
       (local.get(a.id) ?? local.size + incoming.get(a.id)!) -
       (local.get(b.id) ?? local.size + incoming.get(b.id)!),
   );
-  // Консолидация переносится, только если она консолидирует непосредственно
-  // предыдущую редакцию того же документа (`previous` = `from`), с теми же
-  // обязательствами и проходит те же детерминированные проверки текста, что
-  // и при регистрации: короче, ID правил и якоря, на которые ссылаются
-  // соседние контракты, на месте. Иначе запись чужого клона сохраняла бы
-  // местные привязки задач к тексту, равносильность которого ничем не
-  // подтверждена здесь. Параллельная поправка той же редакции заменяет
-  // консолидацию по порядку редакций (`orderRedactions`), а не отвергается.
+  // Новые для этого клона записи контрактов проверяются один раз, при
+  // первом импорте: принятые ранее не пересуживаются (поздний сосед или
+  // новые правила проверки иначе навсегда закрыли бы sync — историю удалить
+  // нельзя). `previous` — редакция того же документа. Консолидация
+  // принимается, только если консолидирует непосредственно предыдущую
+  // редакцию (`previous` = `from`), с теми же обязательствами, и её текст
+  // проходит проверки пары: короче, ID правил на месте. Это чистые функции
+  // двух записей; ссылки соседних документов на якоря здесь не проверяются —
+  // они зависят от чужих, в том числе более поздних, записей. Параллельная
+  // поправка той же редакции не отвергается: порядок редакций
+  // (`orderRedactions`) ставит её после консолидации, и она заменяет обе.
+  const known = new Set(old.contracts.map((c) => c.id));
   for (const c of s.contracts) {
-    if (!c.consolidates) continue;
+    if (known.has(c.id)) continue;
     const refuse = (why: string) => {
-      throw new Error(`Консолидация ${c.id} не принята: ${why}`);
+      throw new Error(`Редакция контракта ${c.id} не принята: ${why}`);
     };
-    const from = c.source
-      ? contractRedactionsOf(s.contracts, c.source, c.repositoryId).find(
-          (x) => x.id === c.consolidates!.from,
-        )
-      : undefined;
-    if (!from) refuse('нет консолидируемой редакции того же документа');
-    if (c.previous !== undefined && c.previous !== from!.id)
-      refuse('консолидирует не непосредственно предыдущую редакцию');
+    const redactions = c.source ? contractRedactionsOf(s.contracts, c.source, c.repositoryId) : [];
+    if (c.previous !== undefined && !redactions.some((x) => x.id === c.previous && x.id !== c.id))
+      refuse('previous не называет редакцию того же документа');
+    if (!c.consolidates) continue;
+    const from = redactions.find((x) => x.id === c.consolidates!.from);
+    if (!from) refuse('консолидация: нет консолидируемой редакции того же документа');
+    if (c.previous !== from!.id)
+      refuse('консолидация не непосредственно предыдущей редакции (previous ≠ from)');
     if (!sameObligations(from!, c.artifacts ?? [], c.checks, c.underTest))
-      refuse('artifacts, checks или underTest отличаются от консолидируемой редакции');
-    const siblings = s.contracts.filter(
-      (x) => x.source !== c.source && !newerRedaction(s.contracts, x.id),
-    );
-    const checks = textChecks(from!.content, c.content, c.source!, siblings);
-    if (checks.longer) refuse('текст не короче консолидируемого');
-    if (checks.lost.length) refuse('нет ID правил ' + checks.lost.slice(0, 20).join(', '));
-    if (checks.broken.length) refuse('нет разделов ' + checks.broken.slice(0, 20).join('; '));
+      refuse(
+        'консолидация: artifacts, checks или underTest отличаются от консолидируемой редакции',
+      );
+    const checks = textChecks(from!.content, c.content, c.source!, []);
+    if (checks.longer) refuse('консолидация: текст не короче консолидируемого');
+    if (checks.lost.length)
+      refuse('консолидация: нет ID правил ' + checks.lost.slice(0, 20).join(', '));
   }
   s.tasks = all
     .filter((x) => x.record.kind === 'task')

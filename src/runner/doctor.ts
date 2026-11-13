@@ -50,6 +50,7 @@ import {
   APPLIED_KEYS_KEY,
   APPLIED_KEYS_NAMESPACE,
   DevContour,
+  contractForks,
   meaningRedactionsSinceConsolidation,
   newerRedaction,
   type AppliedConfigKeys,
@@ -1057,6 +1058,7 @@ export async function doctor(
   // с ним отклоняется до ревью (review-contract, contract-change).
   checks.push(...(await contractClosureChecks(config, state?.contracts ?? [])));
   checks.push(...contractSizeChecks(state?.contracts ?? []));
+  checks.push(...contractForkChecks(state?.contracts ?? []));
   // Состояние прочитано не полностью: контракты баз компонентов не видны, и
   // отсутствие находок закрепления ничего не доказывает.
   if (stateCheck)
@@ -1263,6 +1265,21 @@ export function contractSizeChecks(contracts: DevContourState['contracts']): Che
         ];
       })
   );
+}
+
+/**
+ * Развилки истории документов контрактов (`contractForks`): две поправки
+ * одной редакции, сделанные параллельно на разных клонах. Действует
+ * последняя по порядку, поправка другой в текущий договор не вошла. Выход —
+ * редакция, сводящая обе поправки (contract-change). Готовность не снимает.
+ */
+export function contractForkChecks(contracts: DevContourState['contracts']): Check[] {
+  const valid = contracts.filter((c) => typeof c.content === 'string');
+  return contractForks(valid).map((f) => ({
+    id: `contract-fork:${f.repositoryId ?? 'main'}:${f.source}`,
+    status: 'degraded' as const,
+    detail: `Контракт ${f.source}: редакции ${f.branches.join(', ')} параллельно поправили одну редакцию ${f.base}; действует ${f.winner}, поправки остальных в текущий договор не вошли. Сведите их новой редакцией через contract-change.`,
+  }));
 }
 
 /**

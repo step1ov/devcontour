@@ -302,7 +302,7 @@ function equivalenceChain(contracts: readonly Contract[], c: Contract) {
 }
 /** `r` консолидирует именно `before` и зарегистрирована сразу после неё. */
 const consolidatesDirectly = (r: Contract, before: Contract) =>
-  r.consolidates?.from === before.id && (r.previous ?? before.id) === before.id;
+  r.consolidates?.from === before.id && r.previous === before.id;
 /**
  * Действующий текст договора, к которому привязан `id`: последняя
  * консолидация в его цепочке равносильных редакций или он сам. Исполнитель
@@ -362,18 +362,24 @@ export function contractRedactionsOf(
  * «последней» становилась случайная редакция. Порядок задают ссылки
  * `previous` (предыдущая редакция при регистрации) и `consolidates.from`:
  * редакция идёт после той, на которую ссылается. Записи прежних версий без
- * ссылок упорядочиваются временем утверждения, при равенстве — порядком
- * реестра. Консолидация встаёт сразу за редакцией, которую консолидирует:
+ * ссылок упорядочиваются временем утверждения, при равенстве — id. Консолидация встаёт сразу за редакцией, которую консолидирует:
  * параллельная ей поправка того же предшественника идёт после и заменяет
  * обе (её текст несёт поправку, а смысл консолидации прежний).
  */
 export function orderRedactions(list: readonly Contract[]): Contract[] {
-  const fallback = list
-    .map((c, i) => ({ c, i }))
-    .sort((a, b) =>
-      a.c.approvedAt < b.c.approvedAt ? -1 : a.c.approvedAt > b.c.approvedAt ? 1 : a.i - b.i,
-    )
-    .map((x) => x.c);
+  // Время, затем id: позиция в реестре на разных клонах разная, и при равном
+  // времени клоны иначе выбрали бы разные «последние» редакции.
+  const fallback = [...list].sort((a, b) =>
+    a.approvedAt < b.approvedAt
+      ? -1
+      : a.approvedAt > b.approvedAt
+        ? 1
+        : a.id < b.id
+          ? -1
+          : a.id > b.id
+            ? 1
+            : 0,
+  );
   const ids = new Set(list.map((c) => c.id));
   const parents = (c: Contract) =>
     [c.previous, c.consolidates?.from].filter((p): p is string => !!p && p !== c.id && ids.has(p));
@@ -394,6 +400,58 @@ export function orderRedactions(list: readonly Contract[]): Contract[] {
     placed.add(next.id);
   }
   return out;
+}
+/**
+ * Развилки истории документа: две и больше смысловых редакций (не прямые
+ * консолидации) с одной и той же действующей предшественницей — её
+ * `previous`, приведённой через прямые консолидации к смысловой редакции.
+ * Так бывает, когда два клона поправили одну редакцию параллельно: после sync
+ * действует последняя по порядку (`winner`), а поправка другой выпадает из
+ * текущего договора без сигнала. `branches` — редакции развилки по порядку.
+ */
+export function contractForks(contracts: readonly Contract[]) {
+  const forks: {
+    source: string;
+    repositoryId?: string;
+    base: string;
+    branches: string[];
+    winner: string;
+  }[] = [];
+  const documents = new Map<string, Contract>();
+  for (const c of contracts)
+    if (c.source) documents.set(`${c.repositoryId ?? 'main'}\0${c.source}`, c);
+  for (const sample of documents.values()) {
+    const all = contractRedactionsOf(contracts, sample.source!, sample.repositoryId);
+    const byId = new Map(all.map((c) => [c.id, c]));
+    // Смысловая редакция за цепочкой прямых консолидаций.
+    const meaning = (id: string) => {
+      let c = byId.get(id);
+      for (let guard = 0; c && guard < all.length; guard++) {
+        const from = c.consolidates && byId.get(c.consolidates.from);
+        if (!from || !consolidatesDirectly(c, from)) break;
+        c = from;
+      }
+      return c?.id ?? id;
+    };
+    const groups = new Map<string, Contract[]>();
+    for (const c of all) {
+      if (!c.previous) continue;
+      const from = c.consolidates && byId.get(c.consolidates.from);
+      if (from && consolidatesDirectly(c, from)) continue;
+      const base = meaning(c.previous);
+      groups.set(base, [...(groups.get(base) ?? []), c]);
+    }
+    for (const [base, branches] of groups)
+      if (branches.length > 1)
+        forks.push({
+          source: sample.source!,
+          ...(sample.repositoryId ? { repositoryId: sample.repositoryId } : {}),
+          base,
+          branches: branches.map((c) => c.id),
+          winner: all.at(-1)!.id,
+        });
+  }
+  return forks;
 }
 /**
  * Последняя редакция документа контракта — единое определение для

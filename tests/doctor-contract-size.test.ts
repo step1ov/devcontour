@@ -11,7 +11,7 @@ import {
   type Contract,
 } from '../src/core/model.ts';
 import { contractSize } from '../src/runner/agent-control.ts';
-import { contractSizeChecks, doctor } from '../src/runner/doctor.ts';
+import { contractForkChecks, contractSizeChecks, doctor } from '../src/runner/doctor.ts';
 import { config } from './helpers.ts';
 
 const contract = (id: string, chars: number, extra: Partial<Contract> = {}): Contract => ({
@@ -56,11 +56,18 @@ test('doctor не предупреждает о заменённой редак�
   // только по действующей.
   const source = 'docs/contracts/api.md';
   const old = contract('C-api-1', CONTRACT_CONTENT_WARN + 100, { source });
-  const current = contract('C-api-2', 1000, { source });
+  // Порядок редакций — по ссылке previous, а не по позиции в реестре.
+  const current = contract('C-api-2', 1000, { source, previous: old.id });
   assert.deepEqual(contractSizeChecks([old, current]), []);
+  assert.deepEqual(contractSizeChecks([current, old]), []);
+  // Записи без ссылок — по времени утверждения: более поздняя действует.
+  const later = contract('C-api-0', CONTRACT_CONTENT_WARN + 100, {
+    source,
+    approvedAt: '2026-11-02T00:00:00.000Z',
+  });
   assert.deepEqual(
-    contractSizeChecks([current, old]).map((c) => c.id),
-    ['contract-size:C-api-1'],
+    contractSizeChecks([later, contract('C-api-3', 1000, { source })]).map((c) => c.id),
+    ['contract-size:C-api-0'],
   );
 });
 
@@ -106,6 +113,7 @@ test('F20: doctor suggests a consolidation after six amendments of a large docum
   // Консолидация обнуляет счёт; дальше считаются только смысловые редакции.
   const consolidated = contract('C-8', CONTRACT_CONSOLIDATE_MIN, {
     source,
+    previous: 'C-7',
     consolidates: { from: 'C-7', review: 'R' },
   });
   assert.deepEqual(ids([...seven, consolidated]), []);
@@ -140,4 +148,27 @@ test('doctor() показывает contract-size по состоянию и г�
   } finally {
     rmSync(root, { recursive: true, force: true });
   }
+});
+
+test('F20 R2-M1: doctor names a fork of a contract document with both amendments and the winner', () => {
+  const source = 'docs/contracts/api.md';
+  const p = contract('C-p', 1000, { source });
+  const m1 = contract('C-m1', 1000, {
+    source,
+    previous: 'C-p',
+    approvedAt: '2026-11-02T00:00:00.000Z',
+  });
+  const m2 = contract('C-m2', 1000, {
+    source,
+    previous: 'C-p',
+    approvedAt: '2026-11-03T00:00:00.000Z',
+  });
+  assert.deepEqual(contractForkChecks([p, m1]), []);
+  const [check] = contractForkChecks([p, m1, m2]);
+  assert.equal(check?.id, 'contract-fork:main:docs/contracts/api.md');
+  assert.equal(check.status, 'degraded');
+  assert.match(
+    check.detail,
+    /редакции C-m1, C-m2 параллельно поправили одну редакцию C-p; действует C-m2/,
+  );
 });

@@ -10,7 +10,8 @@ import {
 } from '../src/core/service.ts';
 import { canonical } from '../src/core/sync-model.ts';
 import { syncGit } from '../src/runner/git-sync.ts';
-import { fixture, type Peer } from './git-sync-fixture.ts';
+import { fixture, git, type Peer } from './git-sync-fixture.ts';
+import { contractForkChecks } from '../src/runner/doctor.ts';
 
 const SOURCE = 'docs/contracts/api.md';
 
@@ -100,6 +101,44 @@ test('H2: a consolidation keeps its predecessor current after Git sync', () => {
     assert.equal(latestRedaction(contracts, SOURCE, 'main')?.id, c2.id);
     assert.equal(supersededBy(contracts, c1.id), undefined);
     assert.equal(currentText(contracts, c1.id)?.id, c2.id);
+  } finally {
+    f.cleanup();
+  }
+});
+
+test('F20 R2-M1: two clones amend the same redaction; after sync both converge on the same winner and doctor names the fork', () => {
+  const f = fixture();
+  try {
+    const a = f.create('alice');
+    const p = a.h.contract('API', 'REQ-1.', undefined, 'main', SOURCE);
+    syncGit(a.h, { member: 'alice' });
+    a.commit();
+    const b = f.create('bob', a);
+    syncGit(b.h, { member: 'bob' });
+    const m1 = a.h.contract('API', 'REQ-1. REQ-2 by alice.', undefined, 'main', SOURCE);
+    const m2 = b.h.contract('API', 'REQ-1. REQ-3 by bob.', undefined, 'main', SOURCE);
+    assert.equal(m1.previous, p.id);
+    assert.equal(m2.previous, p.id);
+    syncGit(a.h);
+    a.commit();
+    b.pull();
+    syncGit(b.h);
+    b.commit();
+    for (const path of ['repo', 'workspace'] as const)
+      git(a[path], 'pull', '--ff-only', b[path], 'main');
+    syncGit(a.h);
+    const latest = (x: Peer) => latestRedaction(x.store.read().contracts, SOURCE, 'main')?.id;
+    assert.equal(latest(a), latest(b));
+    const winner = [m1, m2].sort((x, y) =>
+      x.approvedAt === y.approvedAt ? (x.id < y.id ? -1 : 1) : x.approvedAt < y.approvedAt ? -1 : 1,
+    )[1].id;
+    assert.equal(latest(a), winner);
+    for (const x of [a, b]) {
+      const [fork] = contractForkChecks(x.store.read().contracts);
+      assert.equal(fork?.id, 'contract-fork:main:' + SOURCE);
+      assert.ok(fork.detail.includes(m1.id) && fork.detail.includes(m2.id));
+      assert.match(fork.detail, new RegExp(`действует ${winner}`));
+    }
   } finally {
     f.cleanup();
   }
