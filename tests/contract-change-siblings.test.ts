@@ -333,11 +333,10 @@ test('No adoption when HEAD is rewritten or after the base move: stale unless th
       assert.equal(done.status, 'completed', done.error);
       assert.equal(s.changes().get(b.id).expected.head, reviewed, 'HEAD не принят');
       assert.ok(done.history.some((e) => e.event === 'head-moved'));
-      // База, больше не несущая проверенную редакцию, — устаревание.
-      execFileSync('git', ['update-ref', 'refs/heads/devcontour/accepted', `${reviewed}~1`], {
-        cwd: s.repo,
-      });
+      // Для A это правка своего документа после ревью: устаревание с
+      // объяснением, а не завершение по прежнему тексту.
       const stale = await s.changes().advance(a.id);
+      assert.match(stale.error ?? '', /меняет документ или артефакты этой операции после её ревью/);
       assert.equal(stale.status, 'stale');
     } finally {
       await s.remove();

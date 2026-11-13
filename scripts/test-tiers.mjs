@@ -9,6 +9,8 @@
 // files at the end and names those of 30 s and more that are missing here.
 // tests/test-selection.test.ts checks that every entry names an existing file.
 export const fileSeconds = {
+  // Оценка по отдельному прогону (~210 с) с запасом на нагрузку полной проверки.
+  'contract-change-registered': 560,
   runner: 540,
   'contract-change-staleness': 493,
   preview: 443,
@@ -20,8 +22,6 @@ export const fileSeconds = {
   'product-scenarios': 379,
   'product-scope': 375,
   'product-proof': 371,
-  // Оценка по отдельному прогону (~125 с) с запасом на нагрузку полной проверки.
-  'contract-change-registered': 370,
   engineering: 368,
   'runner-base': 349,
   'input-carry-order': 346,
@@ -175,6 +175,9 @@ export const slowTests = {
     'A pinned artifact of a contract registered without an operation is carried',
     'A registered document pinned in a context pack: the operation repins',
     'A newer redaction of a registered document, or an operation taking it',
+    'After a carried base step context packs are pinned at the base',
+    'After the base step the operation is stale once the base no longer holds',
+    'An artifact pinned differently by two current contracts without open work',
   ],
   'contract-change-siblings': [
     'A sibling document fixed after its operation started does not make the',

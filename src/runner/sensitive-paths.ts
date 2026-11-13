@@ -266,18 +266,10 @@ export interface SiblingContract {
 
 /** Запись дерева `to` по пути: blob и режим обычного файла или `undefined`. */
 async function regularFile(repoPath: string, to: string, path: string) {
-  let entry: string;
-  try {
-    entry = await git(repoPath, 'ls-tree', '-z', to, '--', path);
-  } catch {
+  const entry = await treeEntry(repoPath, to, path);
+  if (!entry || entry.type !== 'blob' || (entry.mode !== '100644' && entry.mode !== '100755'))
     return undefined;
-  }
-  const records = entry.split('\0').filter(Boolean);
-  const match = /^(\d+) (\w+) ([0-9a-f]+)\t([\s\S]*)$/.exec(records[0] ?? '');
-  if (records.length !== 1 || !match || match[4] !== path) return undefined;
-  const [, mode, type, blob] = match;
-  if (type !== 'blob' || (mode !== '100644' && mode !== '100755')) return undefined;
-  return { mode, blob };
+  return { mode: entry.mode, blob: entry.blob };
 }
 
 /** Другие контракты открытой работы закрепляют `path` в другой редакции. */
@@ -459,11 +451,29 @@ export async function registeredContractLifts(
   const repo = repository(h.config, repositoryId);
   const rules = baseRules(h, dataRoot, s, repositoryId);
   const own = (r?: string) => (r ?? 'main') === repositoryId;
-  // Последняя годная редакция документа, зарегистрированная не незавершённой операцией.
+  // Последняя годная редакция документа, зарегистрированная не незавершённой
+  // операцией. Поправка, заменившая по смыслу редакцию с принятыми задачами,
+  // требует операции: корректировки принятых задач (`corrections`) создаёт
+  // только contract-change.
   const current = (source: string) => {
     const c = reviewedRedaction(h.config, s, repositoryId, source);
-    return c && !options.excluded.has(c.id) ? c : undefined;
+    if (!c || options.excluded.has(c.id)) return undefined;
+    const done = s.tasks.filter((t) => t.status === 'done');
+    const corrected = contractRedactionsOf(s.contracts, source, repositoryId).some(
+      (r) =>
+        r.id !== c.id &&
+        supersededBy(s.contracts, r.id) &&
+        done.some((t) => t.contracts.includes(r.id)),
+    );
+    return corrected ? undefined : c;
   };
+  // Действующие договоры компонента: последние редакции документов и
+  // контракты без документа.
+  const latest = s.contracts.filter(
+    (x) =>
+      own(x.repositoryId) &&
+      (!x.source || latestRedaction(s.contracts, x.source, repositoryId)?.id === x.id),
+  );
   for (const path of wanted) {
     if (rules.restricted(path)) continue;
     if (rules.documents.has(path)) {
@@ -486,11 +496,23 @@ export async function registeredContractLifts(
     }
     if (rules.pack(path) || rules.document(path)) continue;
     for (const c of s.contracts) {
-      if (!own(c.repositoryId) || !c.source || current(c.source)?.id !== c.id) continue;
       const pin = (c.artifacts ?? []).find(
         (a) => a.repositoryId === repositoryId && a.path === path,
       );
-      if (!pin || pinnedElsewhere(s, repositoryId, c.id, path, pin.blob)) continue;
+      if (!pin || !own(c.repositoryId) || !c.source || current(c.source)?.id !== c.id) continue;
+      if (pinnedElsewhere(s, repositoryId, c.id, path, pin.blob)) continue;
+      // Два действующих договора закрепляют путь по-разному: какой из них
+      // верен, решает не порядок реестра, а ведущий.
+      if (
+        latest.some(
+          (x) =>
+            x.id !== c.id &&
+            (x.artifacts ?? []).some(
+              (a) => a.repositoryId === repositoryId && a.path === path && a.blob !== pin.blob,
+            ),
+        )
+      )
+        break;
       const now = await regularFile(repo.path, to, path);
       const seen = await regularFile(repo.path, pin.revision, path);
       if (!now || !seen || now.mode !== seen.mode || now.blob !== pin.blob) continue;

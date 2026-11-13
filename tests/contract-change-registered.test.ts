@@ -4,7 +4,7 @@ import cp, { execFileSync } from 'node:child_process';
 import { syncBuiltinESMExports } from 'node:module';
 import { writeFile } from 'node:fs/promises';
 import { join } from 'node:path';
-import { type ContractChange } from '../src/runner/contract-change.ts';
+import { ContractChanges, type ContractChange } from '../src/runner/contract-change.ts';
 import { reviewContract } from '../src/runner/agent-control.ts';
 import { baseUpdateOperation } from '../src/runner/base-update.ts';
 import { pinContext, stalePins } from '../src/runner/context.ts';
@@ -23,7 +23,7 @@ const ORDERS = 'docs/contracts/orders.md';
 const orders = { title: 'Orders API v1', file: ORDERS };
 
 async function fiveDocuments(
-  options: { extra?: string; ordersTask?: boolean; ordersAmended?: boolean } = {},
+  options: { extra?: string; ordersTask?: boolean; ordersAmended?: boolean; rules?: boolean } = {},
 ) {
   const s = await stage();
   const head = () => s.sh('rev-parse', 'HEAD');
@@ -31,6 +31,7 @@ async function fiveDocuments(
     reviewContract(s.h, s.root, proposal, 'codex', reviewers([]), () => {}, at);
   // Действующий контракт заказов: зарегистрирован, его документ — в базе.
   await writeFile(join(s.repo, ORDERS), '# Orders\n\nPrices come from the catalog.\n');
+  if (options.rules) await writeFile(join(s.repo, 'rules.md'), '# Rules\n\nBase rules.\n');
   s.sh('add', '.');
   s.sh('commit', '-qm', 'orders v0');
   await register(orders);
@@ -47,6 +48,8 @@ async function fiveDocuments(
     await writeFile(join(s.repo, ORDERS), '# Orders\n\nPrices come from catalog.md (number).\n');
   for (const p of NEW) await writeFile(join(s.repo, p), `# ${p}\n\nReads catalog.md.\n`);
   if (options.extra) await writeFile(join(s.repo, options.extra), 'not a contract\n');
+  // Правило пакета контекста, изменённое только в рабочей ветке.
+  if (options.rules) await writeFile(join(s.repo, 'rules.md'), '# Rules\n\nBranch-only rules.\n');
   s.sh('add', '.');
   s.sh('commit', '-qm', 'five contract documents together');
   for (const p of NEW) await register({ title: p, file: p });
@@ -62,6 +65,32 @@ async function fiveDocuments(
       })
       .advance(id);
   return { s, head, register, start, op, events, base, stopAfter };
+}
+
+/**
+ * Пакет контекста `id` с файлами `files`, закреплённый на базе; конфигурация
+ * записана в `config.json` и загружена из него, как у работающего сервера.
+ */
+async function withPack(s: Awaited<ReturnType<typeof stage>>, id: string, files: string[]) {
+  s.h.config.contextPacks = await pinContext(
+    {
+      ...s.h.config,
+      contextPacks: [
+        { id, version: '1.0', repositoryId: 'main', roles: ['backend'], files, references: [] },
+      ],
+    },
+    'devcontour/accepted',
+  );
+  for (const role of Object.values(s.h.config.roles)) {
+    role.runtime = 'codex';
+    if (role.reviewer) role.reviewer.runtime = 'claude';
+  }
+  s.h.config.reviewer = { ...s.h.config.reviewer, runtime: 'claude' };
+  const path = join(s.root, 'config.json');
+  await writeFile(path, JSON.stringify(s.h.config, null, 2) + '\n');
+  s.h.config = loadConfig(path);
+  reapprove(s.h);
+  return path;
 }
 
 /** Вызов git перед сдвигом ref базы: последний `rev-list` переноса. */
@@ -239,11 +268,17 @@ test('A registered document that is not the approved redaction is not carried; f
 });
 
 test('Amendments registered without an operation are not carried with open work on the previous redaction or a changed mode', async () => {
-  for (const variant of ['open-task', 'mode'] as const) {
+  for (const variant of ['open-task', 'done-task', 'mode'] as const) {
     const { s, start, register, base } = await fiveDocuments({
-      ordersTask: variant === 'open-task',
+      ordersTask: variant === 'open-task' || variant === 'done-task',
     });
     try {
+      if (variant === 'done-task')
+        // Принятая задача прежней редакции: корректировку создаёт только
+        // contract-change, поэтому поправка без операции не переносится.
+        s.store.change('fixture.done', (st) => {
+          for (const task of st.tasks.filter((x) => x.title === 'Orders')) task.status = 'done';
+        });
       // Поправка заказов зарегистрирована review-contract, без операции.
       await register(orders);
       if (variant === 'mode') {
@@ -331,49 +366,42 @@ test('A pinned artifact of a contract registered without an operation is carried
   }
 });
 
-test('A registered document pinned in a context pack: the operation repins the pack; an operation without the context step refuses', async () => {
-  for (const variant of ['repin', 'legacy'] as const) {
+test('A registered document pinned in a context pack: the operation repins the pack, also after a crash right after the ref move; an operation without the context step refuses', async () => {
+  for (const variant of ['repin', 'crash', 'legacy'] as const) {
     const { s, start, register, base, stopAfter } = await fiveDocuments();
     try {
       // Пакет закреплён на базе: документ заказов прежней редакции.
-      s.h.config.contextPacks = await pinContext(
-        {
-          ...s.h.config,
-          contextPacks: [
-            {
-              id: 'orders-pack',
-              version: '1.0',
-              repositoryId: 'main',
-              roles: ['backend'],
-              files: [ORDERS],
-              references: [],
-            },
-          ],
-        },
-        'devcontour/accepted',
-      );
-      for (const role of Object.values(s.h.config.roles)) {
-        role.runtime = 'codex';
-        if (role.reviewer) role.reviewer.runtime = 'claude';
-      }
-      s.h.config.reviewer = { ...s.h.config.reviewer, runtime: 'claude' };
-      const path = join(s.root, 'config.json');
-      await writeFile(path, JSON.stringify(s.h.config, null, 2) + '\n');
-      s.h.config = loadConfig(path);
-      reapprove(s.h);
+      const path = await withPack(s, 'orders-pack', [ORDERS]);
       const pinned = s.h.config.contextPacks[0].revision;
       await register(orders);
       const amended = s.store.read().contracts.at(-1)!;
       assert.deepEqual(await stalePins(s.h.config, amended), ['orders-pack']);
       const a = await start(s.proposal);
       const before = base();
-      if (variant === 'repin') {
+      if (variant !== 'legacy') {
+        if (variant === 'crash') {
+          // Сбой между сдвигом ref и записью шага: повтор находит базу уже
+          // перенесённой и снятий не пересчитывает.
+          const proto = ContractChanges.prototype as unknown as Record<string, unknown>;
+          const real = proto.liftStaleBasePause;
+          proto.liftStaleBasePause = () => Promise.reject(new Error('crash after ref move'));
+          try {
+            const crashed = await s.changes().advance(a.id);
+            assert.equal(crashed.status, 'failed');
+            assert.equal(crashed.next, 'base');
+            assert.equal(base(), s.sh('rev-parse', 'HEAD'), 'ref сдвинут до сбоя');
+          } finally {
+            proto.liftStaleBasePause = real;
+          }
+          assert.deepEqual(s.changes().get(a.id).registered, [amended.id]);
+        }
         const done = await s.changes().advance(a.id);
         assert.equal(done.status, 'completed', done.error);
         assert.match(done.history.find((e) => e.event === 'repinned')?.detail ?? '', /orders-pack/);
         const repinned = loadConfig(path).contextPacks[0].revision;
         assert.notEqual(repinned, pinned);
         assert.equal(repinned, s.changes().get(a.id).expected.head);
+        if (variant === 'crash') assert.ok(done.history.some((e) => e.event === 'carried'));
         assert.deepEqual(await stalePins(loadConfig(path), amended), []);
       } else {
         assert.equal((await stopAfter(a.id, 'rebind')).next, 'base');
@@ -436,5 +464,92 @@ test('A newer redaction of a registered document, or an operation taking it, whi
     } finally {
       await s.remove();
     }
+  }
+});
+
+test('After a carried base step context packs are pinned at the base, not at the reviewed commit: rewritten history, pack rule changed only on the branch', async () => {
+  const { s, start, base, head, events } = await fiveDocuments({
+    ordersAmended: false,
+    rules: true,
+  });
+  try {
+    const path = await withPack(s, 'catalog-pack', ['docs/contracts/catalog.md', 'rules.md']);
+    const a = await start(s.proposal);
+    const reviewed = head();
+    // Правило пакета в рабочей ветке не переносится без человека.
+    const refused = await s.changes().advance(a.id);
+    assert.equal(refused.status, 'failed');
+    assert.match(refused.error ?? '', /rules\.md/);
+    // Ведущий переписывает commit этапа без правила и переносит базу явно:
+    // проверенный commit в базу не попадает.
+    s.sh('checkout', '-q', 'HEAD~1', '--', 'rules.md');
+    s.sh('commit', '-q', '--amend', '-m', 'five contract documents, rules dropped');
+    const rewritten = head();
+    await baseUpdateOperation(s.h, s.root, { by: 'host' });
+    assert.equal(base(), rewritten);
+    const done = await s.changes().advance(a.id);
+    assert.equal(done.status, 'completed', done.error);
+    assert.ok(events(a.id).includes('head-moved'));
+    assert.equal(s.changes().get(a.id).pinAt, rewritten);
+    const pinned = loadConfig(path).contextPacks[0].revision!;
+    assert.equal(pinned, rewritten, 'пакет закреплён на базе');
+    assert.notEqual(pinned, reviewed);
+    assert.equal(s.sh('show', `${pinned}:rules.md`), '# Rules\n\nBase rules.');
+  } finally {
+    await s.remove();
+  }
+});
+
+test('After the base step the operation is stale once the base no longer holds its redaction, even when HEAD did not move', async () => {
+  const { s, start, base, stopAfter } = await fiveDocuments({ ordersAmended: false });
+  try {
+    const a = await start(s.proposal);
+    const before = base();
+    assert.equal((await stopAfter(a.id, 'base')).next, 'context');
+    assert.notEqual(base(), before);
+    execFileSync('git', ['update-ref', 'refs/heads/devcontour/accepted', before], { cwd: s.repo });
+    const stale = await s.changes().advance(a.id);
+    assert.equal(stale.status, 'stale');
+    assert.match(stale.error ?? '', /больше не содержит проверенную редакцию/);
+  } finally {
+    await s.remove();
+  }
+});
+
+test('An artifact pinned differently by two current contracts without open work is not carried', async () => {
+  const s = await stage();
+  try {
+    const before = s.sh('rev-parse', 'devcontour/accepted');
+    const register = (title: string, file: string) =>
+      reviewContract(
+        s.h,
+        s.root,
+        { title, file, artifacts: [{ path: 'shared.json', purpose: 'Общая схема' }] },
+        'codex',
+        reviewers([]),
+        () => {},
+        s.sh('rev-parse', 'HEAD'),
+      );
+    await writeFile(join(s.repo, 'docs/contracts/left.md'), '# Left\n\nUses shared.json.\n');
+    await writeFile(join(s.repo, 'shared.json'), '{"v":1}\n');
+    s.sh('add', '.');
+    s.sh('commit', '-qm', 'left');
+    await register('Left', 'docs/contracts/left.md');
+    await writeFile(join(s.repo, 'docs/contracts/right.md'), '# Right\n\nUses shared.json.\n');
+    await writeFile(join(s.repo, 'shared.json'), '{"v":2}\n');
+    s.sh('add', '.');
+    s.sh('commit', '-qm', 'right');
+    await register('Right', 'docs/contracts/right.md');
+    const result = await s
+      .changes()
+      .advance(
+        ((await s.changes().start(s.proposal, 'codex')) as { operation: ContractChange }).operation
+          .id,
+      );
+    assert.equal(result.status, 'failed');
+    assert.match(result.error ?? '', /не годные[^:]*: (?:\S+, )*shared\.json\./);
+    assert.equal(s.sh('rev-parse', 'devcontour/accepted'), before);
+  } finally {
+    await s.remove();
   }
 });
