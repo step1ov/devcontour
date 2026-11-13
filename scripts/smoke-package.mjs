@@ -212,7 +212,9 @@ syncBuiltinESMExports();
     exec(bin, args, {
       cwd: outside,
       env: childEnv,
-      timeout: args[0] === 'engineering-evals' ? 120000 : 30000,
+      // Bounds against hangs, not speed checks: beside the Node suite on a
+      // loaded machine engineering-evals has taken over two minutes.
+      timeout: args[0] === 'engineering-evals' ? 360000 : 90000,
     });
   const help = (await cli('help')).stdout;
   assert.match(help, /DevContour/);
