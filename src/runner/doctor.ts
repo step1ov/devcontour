@@ -221,7 +221,11 @@ export async function gateWhenChecks(config: Config): Promise<Check[]> {
     const conditional = repo.gates.filter((g) => g.when);
     const id = `gates:when:${repo.id}`;
     if (policyProblem) {
-      checks.push({ id, status: 'blocked', detail: policyProblem });
+      checks.push({
+        id,
+        status: 'blocked',
+        detail: `Политика harness не собирается, условные gates не проверены: ${policyProblem}`,
+      });
       continue;
     }
     let files: string[] | undefined;

@@ -1,6 +1,6 @@
 import { usageTotals, type UsageRecord } from '../core/usage.ts';
 import { budgetOverview } from '../harness/budget.ts';
-import { uncoveredGates, type DevContour } from '../core/service.ts';
+import { boardSkips, uncoveredGates, type DevContour } from '../core/service.ts';
 import type { AuditEvent, Run, Task } from '../core/model.ts';
 import { CheckCorpus } from '../core/check-store.ts';
 import { repository } from '../core/repositories.ts';
@@ -338,9 +338,28 @@ export function gateScopeMetrics(h: DevContour, runs: Run[], tasks: Task[]) {
         .at(-1)!
         .taskIds.map((id) => tasks.find((t) => t.id === id))
         .filter((t): t is Task => !!t && t.status === 'done');
-      return { boardId: b.id, uncovered: uncoveredGates(h, s, own) };
+      // Условный gate, который задача признала неприменимым, — не пробел:
+      // приёмка доски решит по объединённому diff, исполнять ли его на итоговом
+      // SHA. Сводка называет такие gates отдельно (`conditional`).
+      const skipped = new Set(
+        boardSkips(h, s, own).map((x) => `${x.repositoryId}/${x.evidence.gate}`),
+      );
+      const all = uncoveredGates(h, s, own);
+      const split = (conditional: boolean) =>
+        all.flatMap((u) => {
+          const gates = u.gates.filter(
+            (g) => skipped.has(`${u.repositoryId}/${g}`) === conditional,
+          );
+          return gates.length ? [{ repositoryId: u.repositoryId, gates }] : [];
+        });
+      const conditional = split(true);
+      return {
+        boardId: b.id,
+        uncovered: split(false),
+        ...(conditional.length ? { conditional } : {}),
+      };
     })
-    .filter((b) => b.uncovered.length);
+    .filter((b) => b.uncovered.length || b.conditional);
   // Результаты, проверенные на снимке зависимости, который к завершению
   // устарел: ветка зависимости сдвинулась параллельной работой.
   const stale = runs.flatMap((r) => [

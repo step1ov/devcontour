@@ -29,56 +29,68 @@ export const receiptSchema = z.strictObject({
   requiredGates: z.array(syncId).min(1),
   checks: z
     .array(
-      z.strictObject({
-        // `not-applicable` — условный gate не исполнялся: diff фазы не задел
-        // его путей (`notApplicable`). Получатель засчитывает его только
-        // обычному gate с тем же определением и никогда — доказательству.
-        kind: z.enum(['test', 'review', 'not-applicable']),
-        phase: z.enum(['candidate', 'integration']),
-        sha,
-        gate: syncId,
-        /** Проверка потребителя: компонент, в рабочем дереве которого она выполнена. */
-        consumer: syncId.optional(),
-        passed: z.boolean(),
-        exitCode: z.number().int(),
-        digest: hash,
-        // Манифест выполненных testcases: без него критерий, назвавший свой
-        // тест, в другом клоне подтвердить нечем. Поля необязательны —
-        // прежние receipts читаются на прежнем уровне доказательства.
-        tests: z
-          .array(
-            z.strictObject({
-              id: z.string().min(1).max(1000),
-              status: z.enum(['passed', 'failed', 'skipped']),
-              opaque: z.literal(true).optional(),
-            }),
-          )
-          .max(2000)
-          .optional(),
-        testsTruncated: z.literal(true).optional(),
-        /** Версия проверок, под которой получено evidence. */
-        checks: hash.optional(),
-        /**
-         * Манифест генеративной проверки: уровень доказательства, seed и
-         * ожидавшиеся свойства и корпус. Переносится то, что исполнялось, —
-         * клон не дорисовывает evidence из наличия файла корпуса.
-         */
-        property: z
-          .strictObject({
-            level: z.enum(['manifest', 'legacy']),
-            seed: z.number().int().min(0),
-            manifest: z
-              .strictObject({
-                digest: hash,
-                properties: z.array(z.string().min(1).max(200)).max(30),
-                corpus: z.strictObject({ digest: hash, cases: z.number().int().min(0) }).optional(),
-              })
-              .optional(),
-          })
-          .optional(),
-        /** Почему условный gate не исполнялся: определение, шаблоны и сравненный diff. */
-        notApplicable: gateApplicabilitySchema.optional(),
-      }),
+      z
+        .strictObject({
+          // `not-applicable` — условный gate не исполнялся: diff фазы не задел
+          // его путей (`notApplicable`). Получатель засчитывает его только
+          // обычному gate с тем же определением и никогда — доказательству.
+          kind: z.enum(['test', 'review', 'not-applicable']),
+          phase: z.enum(['candidate', 'integration']),
+          sha,
+          gate: syncId,
+          /** Проверка потребителя: компонент, в рабочем дереве которого она выполнена. */
+          consumer: syncId.optional(),
+          passed: z.boolean(),
+          exitCode: z.number().int(),
+          digest: hash,
+          // Манифест выполненных testcases: без него критерий, назвавший свой
+          // тест, в другом клоне подтвердить нечем. Поля необязательны —
+          // прежние receipts читаются на прежнем уровне доказательства.
+          tests: z
+            .array(
+              z.strictObject({
+                id: z.string().min(1).max(1000),
+                status: z.enum(['passed', 'failed', 'skipped']),
+                opaque: z.literal(true).optional(),
+              }),
+            )
+            .max(2000)
+            .optional(),
+          testsTruncated: z.literal(true).optional(),
+          /** Версия проверок, под которой получено evidence. */
+          checks: hash.optional(),
+          /**
+           * Манифест генеративной проверки: уровень доказательства, seed и
+           * ожидавшиеся свойства и корпус. Переносится то, что исполнялось, —
+           * клон не дорисовывает evidence из наличия файла корпуса.
+           */
+          property: z
+            .strictObject({
+              level: z.enum(['manifest', 'legacy']),
+              seed: z.number().int().min(0),
+              manifest: z
+                .strictObject({
+                  digest: hash,
+                  properties: z.array(z.string().min(1).max(200)).max(30),
+                  corpus: z
+                    .strictObject({ digest: hash, cases: z.number().int().min(0) })
+                    .optional(),
+                })
+                .optional(),
+            })
+            .optional(),
+          /** Почему условный gate не исполнялся: определение, шаблоны и сравненный diff. */
+          notApplicable: gateApplicabilitySchema.optional(),
+        })
+        // Запись неприменимости — только со своим основанием и никогда не PASS;
+        // основание у записи другого вида — несогласованный receipt.
+        .refine(
+          (c) =>
+            c.kind === 'not-applicable'
+              ? !!c.notApplicable && !c.passed && !c.consumer
+              : !c.notApplicable,
+          { error: 'Запись not-applicable — только с notApplicable, не PASS и не потребителя' },
+        ),
     )
     .min(4),
   /** Проверки потребителей попытки: раскрытые списки gates по компонентам. */

@@ -665,20 +665,38 @@ function progressOf(state: DevContourState, inputs: ReadonlyMap<string, string>)
   const repos = [...new Set(tasks.map((t) => t.repositoryId))].sort();
   const gates = new Map<
     string,
-    { gate: string; passed: number; failed: number; tasks: Set<string>; phases: Set<string> }
+    {
+      gate: string;
+      passed: number;
+      failed: number;
+      notApplicable: number;
+      tasks: Set<string>;
+      phases: Set<string>;
+    }
   >();
   const covered = new Set<string>();
+  const rowOf = (gate: string) =>
+    gates.get(gate) ?? {
+      gate,
+      passed: 0,
+      failed: 0,
+      notApplicable: 0,
+      tasks: new Set<string>(),
+      phases: new Set<string>(),
+    };
   for (const run of state.runs)
     for (const e of run.evidence) {
+      // Неисполненный условный gate — отдельный счёт: не PASS, не провал и
+      // не покрытие задачи.
+      if (e.kind === 'not-applicable') {
+        const row = rowOf(e.gate);
+        row.notApplicable += 1;
+        gates.set(e.gate, row);
+        continue;
+      }
       if (e.kind !== 'test') continue;
       covered.add(run.taskId);
-      const row = gates.get(e.gate) ?? {
-        gate: e.gate,
-        passed: 0,
-        failed: 0,
-        tasks: new Set<string>(),
-        phases: new Set<string>(),
-      };
+      const row = rowOf(e.gate);
       row[e.passed ? 'passed' : 'failed'] += 1;
       row.tasks.add(run.taskId);
       row.phases.add(e.phase);
@@ -709,6 +727,7 @@ function progressOf(state: DevContourState, inputs: ReadonlyMap<string, string>)
         gate: g.gate,
         passed: g.passed,
         failed: g.failed,
+        ...(g.notApplicable ? { notApplicable: g.notApplicable } : {}),
         tasks: g.tasks.size,
         phases: [...g.phases],
       })),

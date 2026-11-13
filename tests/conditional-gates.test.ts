@@ -5,8 +5,10 @@ import { after, test } from 'node:test';
 import assert from 'node:assert/strict';
 import { createHash } from 'node:crypto';
 import { mkdir, writeFile } from 'node:fs/promises';
+import { mkdtempSync, readdirSync, rmSync } from 'node:fs';
+import { tmpdir } from 'node:os';
 import { join } from 'node:path';
-import { gateDigest, requirementProof } from 'devcontour-harness';
+import { executionDigest, gateDigest, requirementProof } from 'devcontour-harness';
 import { demoPool, testDemo } from './demo-pool.ts';
 import { CANDIDATE, MERGED, config, fixture, input } from './helpers.ts';
 import { configSchema, type Evidence } from '../src/core/model.ts';
@@ -14,6 +16,8 @@ import {
   BOARD_COVERAGE,
   DevContour,
   boardCoverageKey,
+  boardCoverageWorks,
+  digest,
   uncoveredGates,
   type BoardCoverage,
 } from '../src/core/service.ts';
@@ -21,7 +25,11 @@ import { validateTaskContext, validateWorkflow } from '../src/core/workflow.ts';
 import { approvalPolicyDigest, policyFromConfig } from '../src/harness/policy.ts';
 import { executionOf } from '../src/harness/execution.ts';
 import { receiptResult } from '../src/harness/receipt.ts';
-import { completion } from '../src/core/sync-state.ts';
+import { completion, receiptHolds, validateReceipt } from '../src/core/sync-state.ts';
+import { receiptSchema, type CompletionReceipt } from '../src/core/sync-model.ts';
+import { needsRecheck } from '../src/core/proof.ts';
+import { syncGit } from '../src/runner/git-sync.ts';
+import * as sync from './git-sync-fixture.ts';
 import { taskEvidence } from '../src/core/proof.ts';
 import { evidenceVerdict, notApplicableLine, verdictWord } from '../src/core/evidence-verdict.ts';
 import { panelSummary } from '../src/application/panel.ts';
@@ -119,6 +127,58 @@ test('when: схема отклоняет недопустимые шаблон�
       },
     ],
   } as Parameters<typeof validateTaskContext>[1]);
+});
+
+// Digest конфигурации без when, вычисленные на master 8182c36 (0.4.0-alpha.35,
+// harness 0.1.0-alpha.44): смена порядка полей или умолчаний в схеме gate
+// изменила бы их, и согласования прежних планов перестали бы совпадать.
+test('Без when digest политики, исполнения и договора компонента — прежние (закреплены на master)', () => {
+  const pinned = configSchema.parse({
+    version: 1,
+    name: 'Pinned',
+    repository: '/nonexistent/devcontour-pin/repo',
+    checkoutRoot: '/nonexistent/devcontour-pin/checkouts',
+    mode: 'demo',
+    roles: { qa: { runtime: 'demo' } },
+    reviewer: { runtime: 'demo' },
+    gates: [
+      { id: 'types', kind: 'check', command: ['npm', 'run', 'typecheck'] },
+      {
+        id: 'unit',
+        kind: 'test',
+        dependsOn: ['types'],
+        command: ['node', 'unit.mjs'],
+        report: { type: 'junit', path: '.reports/unit.xml' },
+      },
+      {
+        id: 'ui',
+        kind: 'test',
+        command: ['node', 'ui.mjs'],
+        timeoutMs: 60000,
+        report: { type: 'junit', path: '.reports/ui.xml' },
+        artifacts: ['shots'],
+      },
+    ],
+  });
+  assert.equal(
+    approvalPolicyDigest(pinned),
+    '21d87aab542141a4c8dc212c928be2cef9d42f2134b0cd436c5ee3cc2a0e0817',
+  );
+  assert.equal(
+    executionDigest(policyFromConfig(pinned)),
+    '80445ea685f523063fb9f16aa05c3751699b3fdb908535604c1b57e37f86a08b',
+  );
+  const dir = mkdtempSync(join(tmpdir(), 'devcontour-pin-'));
+  const store = new Store(join(dir, 'state.sqlite'));
+  try {
+    assert.equal(
+      new DevContour(store, pinned).policyDigest('main'),
+      'b12f2d4d48a6108f18c5413b2cd619977e0d88de6e67e92bcb332ba5d2c4ee8c',
+    );
+  } finally {
+    store.close();
+    rmSync(dir, { recursive: true, force: true });
+  }
 });
 
 /** Задача, принятая с PASS `unit` и `not-applicable` условного `ui` на обеих фазах. */
@@ -232,6 +292,89 @@ test('Покрытие доски: пропущенный условный gate 
       ),
       [],
     );
+    // Покрывает только собственный PASS фазы интеграции на итоговом SHA:
+    // другой SHA, проверка потребителя, фаза кандидата, запись не test.
+    const gap = [{ repositoryId: 'main', gates: ['ui'] }];
+    for (const [label, evidence, resultSha] of [
+      ['другой SHA записи', { ...pass, sha: CANDIDATE }, MERGED],
+      ['запись не на SHA работы', pass, CANDIDATE],
+      ['проверка потребителя', { ...pass, consumer: 'web' }, MERGED],
+      ['фаза кандидата', { ...pass, phase: 'candidate' }, MERGED],
+      ['провал', { ...pass, passed: false, exitCode: 1 }, MERGED],
+      ['неприменимость', { ...pass, kind: 'not-applicable', passed: false }, MERGED],
+      ['ревью', { ...pass, kind: 'review' }, MERGED],
+    ] as [string, Evidence, string][])
+      assert.deepEqual(
+        uncoveredGates(
+          f.h,
+          s,
+          [task],
+          [{ repositoryId: 'main', resultSha, evidence: [evidence] }],
+          changes(['web/app.ts']),
+        ),
+        gap,
+        label,
+      );
+    // Неполный diff или diff не от зелёного SHA записи — как отсутствующий.
+    assert.deepEqual(
+      uncoveredGates(f.h, s, [task], [], {
+        changes: {
+          main: { ranges: [{ from: GREEN, to: MERGED }], files: [], complete: false },
+        },
+        finalShas: { main: MERGED },
+      }),
+      gap,
+    );
+    assert.deepEqual(
+      uncoveredGates(f.h, s, [task], [], {
+        changes: {
+          main: { ranges: [{ from: CANDIDATE, to: MERGED }], files: ['README.md'], complete: true },
+        },
+        finalShas: { main: MERGED },
+      }),
+      gap,
+    );
+    // Запись проверки доски под другим договором компонента не покрывает.
+    const revision = s.boards[0].revisions.at(-1)!;
+    const record = (policyDigest: string): BoardCoverage => ({
+      boardId: board.id,
+      revision: revision.number,
+      repositoryId: 'main',
+      sha: MERGED,
+      policyDigest,
+      revisionDigest: digest(revision),
+      runId: 'BC-1',
+      gates: ['ui'],
+      evidence: [pass],
+      at: new Date().toISOString(),
+    });
+    const key = boardCoverageKey(board.id, revision.number);
+    f.store.atomic(() => f.store.saveLocal(BOARD_COVERAGE, 'main', key, record('0'.repeat(64))));
+    assert.deepEqual(boardCoverageWorks(f.h, board.id, revision, { main: MERGED }), []);
+    assert.deepEqual(
+      uncoveredGates(
+        f.h,
+        s,
+        [task],
+        boardCoverageWorks(f.h, board.id, revision, { main: MERGED }),
+        changes(['web/app.ts']),
+      ),
+      gap,
+    );
+    f.store.atomic(() =>
+      f.store.saveLocal(BOARD_COVERAGE, 'main', key, record(f.h.policyDigest('main'))),
+    );
+    assert.deepEqual(
+      uncoveredGates(
+        f.h,
+        s,
+        [task],
+        boardCoverageWorks(f.h, board.id, revision, { main: MERGED }),
+        changes(['web/app.ts']),
+      ),
+      [],
+    );
+    f.store.atomic(() => f.store.deleteLocal(BOARD_COVERAGE, 'main', key));
     // Приёмка доски без diff отказывает и называет gate.
     assert.throws(
       () => f.h.accept(board.id, MERGED, undefined, undefined, { main: MERGED }),
@@ -289,6 +432,35 @@ test('Неприменимость — не доказательство и не
   }
 });
 
+test('Получатель receipt засчитывает неприменимость только под тем же when; PASS-неприменимость — подлог', () => {
+  const { f, task } = skippedTask();
+  try {
+    const s = f.store.read();
+    const receipt = completion(f.h, s, task);
+    // То же определение gate у получателя — receipt подтверждает задачу.
+    validateReceipt(f.h, receipt, task, []);
+    // У получателя ui без when или с другими путями — неприменимость не засчитана.
+    for (const ui of [gate('ui'), conditional('ui', ['app/**'])]) {
+      f.h.config.gates = [gate('unit'), ui];
+      assert.throws(() => validateReceipt(f.h, receipt, task, []), /ui/, JSON.stringify(ui));
+    }
+    f.h.config.gates = [gate('unit'), conditional('ui')];
+    validateReceipt(f.h, receipt, task, []);
+    // Неприменимость, выданная за PASS, отклоняется схемой receipt и получателем harness.
+    const forged = structuredClone(receipt);
+    for (const c of forged.checks) if (c.kind === 'not-applicable') c.passed = true;
+    assert.equal(receiptSchema.safeParse(forged).success, false);
+    assert.throws(() => validateReceipt(f.h, forged, task, []));
+    // Основание неприменимости у записи другого вида — несогласованный receipt.
+    const mixed = structuredClone(receipt);
+    const unit = mixed.checks.find((c) => c.kind === 'test')!;
+    unit.notApplicable = receipt.checks.find((c) => c.kind === 'not-applicable')!.notApplicable;
+    assert.equal(receiptSchema.safeParse(mixed).success, false);
+  } finally {
+    f.cleanup();
+  }
+});
+
 test('doctor называет условные gates и предупреждает о шаблоне без совпадений', async () => {
   const f = fixture();
   try {
@@ -311,6 +483,168 @@ test('doctor называет условные gates и предупреждае
     assert.equal(degraded.status, 'degraded');
     assert.match(degraded.detail, /ui: wbe\/\*\*/);
     assert.deepEqual(await gateWhenChecks(config({ repository: repo })), []);
+  } finally {
+    f.cleanup();
+  }
+});
+
+/** Задача clone принята: PASS `unit`, условный `ui` неприменим на обеих фазах. */
+function completeWithSkip(p: sync.Peer, id: string) {
+  p.h.approve(p.store.read().boards[0].id);
+  p.h.pause(false);
+  const r = p.h.claim('worker')!;
+  assert.equal(r.taskId, id);
+  const sha = sync.git(p.repo, 'rev-parse', 'HEAD');
+  p.h.phase(r.id, r.token, 'integrating', { candidateSha: sha, integrationSha: sha });
+  const ui = executionOf(p.h).engine.policy.repositories[0].gates.find((g) => g.id === 'ui')!;
+  for (const phase of ['candidate', 'integration'] as const) {
+    const base = {
+      phase,
+      sha,
+      exitCode: 0,
+      command: ['fixture'],
+      log: '/private/local/log',
+      digest: digest('verified fixture'),
+      summary: 'fixture',
+    };
+    p.h.evidence(r.id, r.token, { ...base, kind: 'test', gate: 'unit', passed: true });
+    p.h.evidence(r.id, r.token, {
+      ...base,
+      kind: 'not-applicable',
+      gate: 'ui',
+      passed: false,
+      exitCode: -1,
+      command: [],
+      log: '',
+      notApplicable: {
+        gateDigest: gateDigest(ui),
+        patterns: ['web/**'],
+        ranges: [{ from: sha, to: sha }],
+        count: 1,
+        files: ['README.md'],
+        pathsDigest: 'f'.repeat(64),
+      },
+    });
+    p.h.evidence(r.id, r.token, {
+      ...base,
+      kind: 'review',
+      gate: 'independent-review',
+      passed: true,
+    });
+  }
+  p.h.finish(r.id, r.token, sha);
+  p.h.pause(true);
+  return sha;
+}
+const scopedGates = () => [gate('unit'), conditional('ui')];
+
+test('Git sync: принятая задача, область которой — gate, ставший условным, по-прежнему импортируется', () => {
+  const f = sync.fixture();
+  try {
+    const a = f.create('alice');
+    a.h.config.gates = [gate('unit'), gate('ui')];
+    const board = a.h.createBoard('History', '', 'main');
+    const t = a.h.addTask(board.id, { ...input('UI only'), gates: ['ui'] });
+    a.h.approve(board.id);
+    a.h.pause(false);
+    const r = a.h.claim('worker')!;
+    const sha = sync.git(a.repo, 'rev-parse', 'HEAD');
+    a.h.phase(r.id, r.token, 'integrating', { candidateSha: sha, integrationSha: sha });
+    for (const phase of ['candidate', 'integration'] as const)
+      for (const [kind, id] of [
+        ['test', 'ui'],
+        ['review', 'independent-review'],
+      ] as const)
+        a.h.evidence(r.id, r.token, {
+          kind,
+          phase,
+          sha,
+          gate: id,
+          passed: true,
+          exitCode: 0,
+          command: ['fixture'],
+          log: '/private/local/log',
+          digest: digest('verified fixture'),
+          summary: 'fixture',
+        });
+    a.h.finish(r.id, r.token, sha);
+    a.h.pause(true);
+    // Доска не принимается: unit вне области задачи; импорт решает по задаче.
+    syncGit(a.h, { member: 'alice' });
+    a.commit();
+    // Команда делает ui условным: прежняя принятая задача остаётся в истории.
+    a.h.config.gates = scopedGates();
+    syncGit(a.h, { member: 'alice' });
+    const b = f.create('bob', a);
+    b.h.config.gates = scopedGates();
+    syncGit(b.h, { member: 'bob' });
+    assert.equal(b.store.read().tasks.find((x) => x.id === t.id)?.status, 'done');
+    // Новая задача с той же областью не ставится.
+    assert.throws(
+      () => b.h.addTask(board.id, { ...input('UI only again'), gates: ['ui'] }),
+      /test gate без when/,
+    );
+  } finally {
+    f.cleanup();
+  }
+});
+
+test('Git sync: receipt с неприменимостью принимается под тем же when, иначе отклоняется или требует перепроверки; PASS-подлог отклонён', () => {
+  const f = sync.fixture();
+  try {
+    const a = f.create('alice');
+    a.h.config.gates = scopedGates();
+    const board = a.h.createBoard('Skips', '', 'main');
+    const t = a.h.addTask(board.id, input('Docs only'));
+    const sha = completeWithSkip(a, t.id);
+    a.h.accept(
+      board.id,
+      sha,
+      undefined,
+      undefined,
+      { main: sha },
+      {
+        main: { ranges: [{ from: sha, to: sha }], files: ['README.md'], complete: true },
+      },
+    );
+    syncGit(a.h, { member: 'alice' });
+    a.commit();
+    // Получатель с тем же when принимает результат участника.
+    const b = f.create('bob', a);
+    b.h.config.gates = scopedGates();
+    syncGit(b.h, { member: 'bob' });
+    const received = b.store.read().tasks.find((x) => x.id === t.id)!;
+    assert.equal(received.status, 'done');
+    assert.ok(received.sharedCompletion);
+    assert.equal(
+      received.sharedCompletion.receipt.checks.filter((c) => c.kind === 'not-applicable').length,
+      2,
+    );
+    assert.equal(receiptHolds(b.h, b.store.read(), received), true);
+    // Получатель изменил when — результат требует перепроверки.
+    b.h.config.gates = [gate('unit'), conditional('ui', ['app/**'])];
+    assert.equal(receiptHolds(b.h, b.store.read(), received), false);
+    assert.equal(needsRecheck(b.store.read(), received, b.h), true);
+    // Получатель без when: импорт отклонён целиком.
+    const c = f.create('carol', a);
+    c.h.config.gates = [gate('unit'), gate('ui')];
+    assert.throws(() => syncGit(c.h, { member: 'carol' }), /ui/);
+    assert.equal(c.store.read().tasks.length, 0, 'импорт откатан');
+    // Неприменимость, выданная за PASS в Git, отклонена.
+    const receipts = join(a.repo, '.devcontour', 'receipts');
+    for (const name of readdirSync(receipts))
+      sync.rewrite(
+        join(receipts, name),
+        (value: { data: { checks: CompletionReceipt['checks'] } }) => {
+          for (const check of value.data.checks)
+            if (check.kind === 'not-applicable') check.passed = true;
+        },
+      );
+    a.commit();
+    const d = f.create('dave', a);
+    d.h.config.gates = scopedGates();
+    assert.throws(() => syncGit(d.h, { member: 'dave' }));
+    assert.equal(d.store.read().tasks.length, 0, 'импорт откатан');
   } finally {
     f.cleanup();
   }
@@ -451,6 +785,41 @@ for (const webC of [true, false])
       }
       assert.equal(f.store.read().boards[0].revisions.at(-1)!.status, 'accepted');
     } finally {
+      f.cleanup();
+    }
+  });
+
+for (const broken of ['replace', 'anchor'] as const)
+  test(`Реальный Git: ${broken === 'replace' ? 'неполный diff (объект замены)' : 'зелёный SHA пропуска, которого нет в репозитории'} — приёмка исполняет пропущенный gate на итоговом SHA`, async () => {
+    // Объединённый diff мимо web/ — без порчи gate был бы неприменим к доске.
+    const f = await realBoard(false);
+    try {
+      const state = f.store.read();
+      const [a, b, c] = f.tasks.map((t) => state.tasks.find((x) => x.id === t.id)!);
+      assert.ok([a, b, c].every((t) => t.status === 'done'));
+      const repo = f.h.config.repository;
+      if (broken === 'replace')
+        await git(repo, 'update-ref', `refs/replace/${c.resultSha}`, b.resultSha!);
+      else
+        f.store.change('fixture.anchor', (s) => {
+          for (const run of s.runs)
+            for (const e of run.evidence)
+              if (e.kind === 'not-applicable' && e.notApplicable)
+                e.notApplicable.ranges[0].from = 'd'.repeat(40);
+        });
+      const accepted = await acceptBoard(f.h, f.board.id, 'codex', false, undefined, {
+        root: f.root,
+      });
+      assert.equal(accepted.status, 'accepted');
+      assert.deepEqual(
+        (accepted as { coverage?: { gates: string[]; sha: string }[] }).coverage?.map((x) => [
+          x.gates,
+          x.sha,
+        ]),
+        [[['ui'], c.resultSha]],
+      );
+    } finally {
+      // Слот demo восстанавливается из снимка целиком: ссылка замены не переживёт тест.
       f.cleanup();
     }
   });

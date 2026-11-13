@@ -1,3 +1,4 @@
+import { notApplicableLine } from '../core/evidence-verdict.ts';
 import { workspaceDescription } from '../runner/workspace-mode.ts';
 import { DiscussionService } from '../application/discussion.ts';
 import { quickResultDiff, quickSetupApplied, quickResult } from '../runner/quick.ts';
@@ -696,6 +697,12 @@ export async function serve(
             .runs.flatMap((r) => r.evidence)
             .find((e) => e.id === parts[2]);
           if (!e) throw new DomainError('Свидетельство не найдено', 404);
+          // Условный gate не исполнялся: лога нет, есть причина.
+          if (e.kind === 'not-applicable')
+            throw new DomainError(
+              `У gate ${e.gate} нет лога: ${notApplicableLine(e.notApplicable)}`,
+              404,
+            );
           const file = await realpath(e.log);
           const roots = [
             join(scheduler.root, 'artifacts'),

@@ -46,6 +46,7 @@ import {
   NOT_APPLICABLE_LABEL,
   evidenceVerdict,
   notApplicableLine,
+  verdictWord,
 } from '../core/evidence-verdict.ts';
 import { Alert, AlertDescription } from '@/ui/alert.tsx';
 import { Badge } from '@/ui/badge.tsx';
@@ -3074,17 +3075,31 @@ export function App() {
                                 type="button"
                                 className="hover:bg-raised grid w-full cursor-pointer grid-cols-[1rem_minmax(0,1fr)] items-start gap-2 rounded-xs px-1 py-1.5 text-left text-sm transition-colors"
                                 onClick={() =>
-                                  void act(
-                                    async () => {
-                                      const result = await api(`evidence/${e.id}`);
-                                      setLog({
+                                  // У неисполненного условного gate нет лога: показывается
+                                  // сравненный diff, а не запрос лога, которого нет.
+                                  e.kind === 'not-applicable'
+                                    ? setLog({
                                         title: `${e.gate} / ${e.phase}`,
-                                        content: result.content,
-                                      });
-                                    },
-                                    '',
-                                    false,
-                                  )
+                                        content: [
+                                          notApplicableLine(e.notApplicable),
+                                          ...(e.notApplicable?.ranges ?? []).map(
+                                            (r) =>
+                                              `diff ${r.from.slice(0, 12)}..${r.to.slice(0, 12)}`,
+                                          ),
+                                          ...(e.notApplicable?.files ?? []),
+                                        ].join('\n'),
+                                      })
+                                    : void act(
+                                        async () => {
+                                          const result = await api(`evidence/${e.id}`);
+                                          setLog({
+                                            title: `${e.gate} / ${e.phase}`,
+                                            content: result.content,
+                                          });
+                                        },
+                                        '',
+                                        false,
+                                      )
                                 }
                               >
                                 <span
@@ -3188,8 +3203,11 @@ export function App() {
                             {(full?.task.sharedCompletion?.receipt.checks ?? []).map(
                               (check, index) => (
                                 <li key={index}>
-                                  {check.phase} / {check.gate}: {check.passed ? 'PASS' : 'FAIL'} ·{' '}
-                                  <code>{check.sha.slice(0, 12)}</code>
+                                  {check.phase} / {check.gate}:{' '}
+                                  {check.kind === 'not-applicable'
+                                    ? notApplicableLine(check.notApplicable)
+                                    : verdictWord(check)}{' '}
+                                  · <code>{check.sha.slice(0, 12)}</code>
                                 </li>
                               ),
                             )}

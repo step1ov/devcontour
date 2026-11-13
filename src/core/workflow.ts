@@ -190,7 +190,17 @@ export function validateResources(config: Config, ids: string[]) {
     if (!config.resources.some((r) => r.id === id))
       throw new DomainError('Неизвестный ресурс: ' + id);
 }
-export function validateTaskContext(config: Config, task: TaskInput) {
+export function validateTaskContext(
+  config: Config,
+  task: TaskInput,
+  /**
+   * `history` — чтение уже записанной задачи (импорт Git sync): правило
+   * условных gates относится к постановке и выдаче, а не к истории. Задача,
+   * принятая до того, как её gate стал условным, иначе блокировала бы
+   * синхронизацию навсегда — изменить принятую задачу нельзя.
+   */
+  options: { history?: boolean } = {},
+) {
   validateResources(config, task.resources ?? []);
   // Роль объявляет workspace, и задача может ссылаться только на объявленную:
   // у неизвестной роли нет ни области записи, ни runtime, ни ревьюера, и
@@ -243,6 +253,7 @@ export function validateTaskContext(config: Config, task: TaskInput) {
     // всегда test gate без when или gate, названный требованием задачи.
     const linked = new Set((task.requirements ?? []).map((l) => l.gate));
     if (
+      !options.history &&
       !gates.some((id) =>
         own.some((g) => g.id === id && g.kind === 'test' && (!g.when || linked.has(id))),
       )

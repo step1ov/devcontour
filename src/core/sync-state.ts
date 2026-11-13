@@ -632,7 +632,7 @@ export function stateFromRecords(
         progress = record.progress;
       if (owner !== taskOwner(data)) throw new Error('Задача вне своего репозитория: ' + data.id);
       repository(h.config, data.repositoryId);
-      validateTaskContext(h.config, data);
+      validateTaskContext(h.config, data, { history: true });
       const contractDigests = Object.fromEntries(
         data.contracts.map((id) => {
           const c = s.contracts.find((c) => c.id === id);
