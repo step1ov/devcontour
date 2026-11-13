@@ -15,13 +15,13 @@ import {
 import { tmpdir } from 'node:os';
 import { join, resolve } from 'node:path';
 import {
+  GUIDES,
   guideCopies,
   guideDigest,
   guideDrift,
   guideMarker,
   markGuide,
   refreshGuides,
-  renderGuideBodies,
 } from '../src/runner/guides.ts';
 import { PAST_GUIDE_DIGESTS } from '../src/runner/guide-history.ts';
 import { doctor, doctorReady, guideChecks, guideRepositories } from '../src/runner/doctor.ts';
@@ -35,6 +35,7 @@ const INTENT = 'docs/devcontour-intent.md';
 const MEMORY = 'docs/devcontour-project-memory.md';
 const METRICS = 'docs/devcontour-metrics.md';
 const TEAM = 'docs/devcontour-team-sync.md';
+const REQUIREMENTS = 'docs/devcontour-requirements.md';
 const MAP = 'docs/devcontour-product-map.md';
 const OLD = '# Прежняя версия руководства\n';
 
@@ -135,26 +136,37 @@ test('Doctor names stale, edited, unmarked, missing and retired guide copies wit
 });
 
 test('Unmarked copies matching a past release text count as stale', async () => {
-  const releases = (await git(resolve('.'), 'log', '--format=%H', '--grep=^build: release')).split(
-    '\n',
+  // Текст копии 0.4.0-alpha.1 (без метки) — фикстура, а не история Git:
+  // shallow clone и распакованный пакет её не имеют.
+  const text = await readFile(
+    resolve('tests/fixtures/guides/devcontour-requirements.0.4.0-alpha.1.txt'),
+    'utf8',
   );
-  const oldest = releases.at(-1);
-  assert.ok(oldest, 'release commits are needed to rebuild a past copy');
-  const past = await renderGuideBodies(async (source) => {
-    const shown = await command(['git', 'show', `${oldest}:${source}`], resolve('.'));
-    return shown.code === 0 ? shown.stdout : undefined;
-  });
-  const text = past.get('devcontour-start.md')!;
-  assert.notEqual(text, guideMarker((await guideCopies()).get('devcontour-start.md')!)!.body);
-  assert.ok(PAST_GUIDE_DIGESTS['devcontour-start.md']?.includes(guideDigest(text)));
+  const name = 'devcontour-requirements.md';
+  assert.notEqual(text, guideMarker((await guideCopies()).get(name)!)!.body);
+  assert.ok(PAST_GUIDE_DIGESTS[name]?.includes(guideDigest(text)));
   const root = await installed();
-  await writeFile(join(root, START), text);
-  assert.equal(stateOf(await guideDrift(root), START), 'stale');
-  await writeFile(join(root, START), text + 'Правка продукта.\n');
-  assert.equal(stateOf(await guideDrift(root), START), 'unmarked');
+  await writeFile(join(root, REQUIREMENTS), text);
+  assert.equal(stateOf(await guideDrift(root), REQUIREMENTS), 'stale');
+  assert.deepEqual((await refreshGuides(root)).written, [REQUIREMENTS]);
+  await writeFile(join(root, REQUIREMENTS), text + 'Правка продукта.\n');
+  assert.equal(stateOf(await guideDrift(root), REQUIREMENTS), 'unmarked');
   // Совпадение засчитывается только под своим именем.
   await writeFile(join(root, INTENT), text);
   assert.equal(stateOf(await guideDrift(root), INTENT), 'unmarked');
+});
+
+test('The past-release digest table names only shipped guides and well-formed digests', () => {
+  const shipped = new Set(GUIDES.values());
+  const names = Object.keys(PAST_GUIDE_DIGESTS);
+  assert.ok(names.length);
+  for (const name of names) {
+    assert.ok(shipped.has(name), name);
+    const digests = PAST_GUIDE_DIGESTS[name];
+    assert.ok(digests.length, name);
+    assert.equal(new Set(digests).size, digests.length, name);
+    for (const digest of digests) assert.match(digest, /^[0-9a-f]{64}$/, name);
+  }
 });
 
 test('CRLF checkouts classify like LF ones and refresh writes LF', async () => {
@@ -326,6 +338,14 @@ test('A repository without copies is neither checked nor refreshed; components k
     [
       { id: 'main', path: '/w/main' },
       { id: 'api', path: '/w/api' },
+    ],
+  );
+  // Компонент с id main по другому пути: репозиторий setup получает `setup`.
+  assert.deepEqual(
+    guideRepositories(minimal('/w/root', { repositories: [{ id: 'main', path: '/w/lib' }] })),
+    [
+      { id: 'setup', path: '/w/root' },
+      { id: 'main', path: '/w/lib' },
     ],
   );
 });

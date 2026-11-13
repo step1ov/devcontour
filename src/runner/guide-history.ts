@@ -1,14 +1,19 @@
-// Сгенерировано scripts/guide-history.ts по 37 релизам; не правьте вручную.
+// Сгенерировано scripts/guide-history.ts по 41 релизам; не правьте вручную.
 // Digest текстов копий руководств прежних релизов (без метки, LF).
 export const PAST_GUIDE_DIGESTS: Readonly<Record<string, readonly string[]>> = {
-  'devcontour-agent-evals.md': ['a4a672a2f917851a2aad2d7cbe5337304d8d43c7cdaaa9c1f1b92bea27dc7c39'],
+  'devcontour-agent-evals.md': [
+    '2f39a41c34fe3fe7a17061b791196e74374d9fd7b5992c0e4b35da56d67a786f',
+    'a4a672a2f917851a2aad2d7cbe5337304d8d43c7cdaaa9c1f1b92bea27dc7c39',
+  ],
   'devcontour-engineering.md': [
     '4665f9c3cc2dbc3ddca07bc8918a6af63557c31fd2baba2501c4ddaba4a5501d',
     '7a781ad061fa73d9e14dbc3f9d52fe5bc096fdd8ec8a7014dc66051e91f2d66d',
+    'b5fe7ca5b51a9d1960f5f98dd64c6355473cd9426fa59f029864b66bd7de8692',
   ],
   'devcontour-experiments.md': ['51c654ce0f2c240f3013b59858eb798018f60f2c0cbdfb0ffe19275ddaf39b16'],
   'devcontour-integration.md': [
     '95f29fa0114cb1a5e45373e038fc1816ad2d557bb3139c53da10d3324306d057',
+    'b07858f6654ae2dfb2d5487edd9420c1a5f0af6436a7d074f602e1292b4fdb48',
     'c45bcdb74c2275ac3159911785fb59eb9abe86035a92f6b97c49d6e49ebc0a64',
   ],
   'devcontour-intent.md': [
@@ -17,6 +22,7 @@ export const PAST_GUIDE_DIGESTS: Readonly<Record<string, readonly string[]>> = {
     'b5b315900f1813daa5792f074c90fa142060c3efb99c2636603623d5a02e3671',
   ],
   'devcontour-lead-workflow.md': [
+    '13c983569169e9aff4f03ffb26f99b51448ac6348762dbeeb5bb855af2790c9a',
     '37355fca0d447395499dd5aaaca1d47d3e0c22fdb05898d72d1f6f4ba3680109',
     '39800f4ca6013b079edb9480b9ad9a64e59ce4ff34a99d96c6f3cb8af2687342',
     '3bf19899faaf220e4fdfa3a51150e2399a34cf834fc15381780bc63afe871f23',
@@ -35,6 +41,8 @@ export const PAST_GUIDE_DIGESTS: Readonly<Record<string, readonly string[]>> = {
   ],
   'devcontour-mcp-and-profiles.md': [
     '5bf96e9b25a106c911f8d213aa0053f78ca1f1f65a683aa864b988391c76df75',
+    '830d6a84d78251d27a250495f6fccfbf1f31219286ef38d55b759b0c25a2196c',
+    '84bea76a7dfd88960356f2ce642941c1790c7fa9c0ae87eb914aa8903125259b',
     '9d27d6ba29a605c1568469c5dcbc23e7ef306bb0d05e0b4934aac33fbe03575f',
     'f51b01f3505cc62174cdb26abd5aa22824fa18db83b603a6233c3617e52cedca',
   ],
@@ -43,6 +51,7 @@ export const PAST_GUIDE_DIGESTS: Readonly<Record<string, readonly string[]>> = {
     '53a3b15dc439b27bc0d8346c6f3eb1e92de394cfb7a34cd357455a96be24a568',
     '6d5696af26f87173be9ea7dbc6d3b11f04692510bc0731e6ae60f24c4168f9bc',
     '7767b7a7ca65dda6c7f58771c2a750286d588e7ec8498e034acb0fb36986f1b8',
+    '94a0d986916d15303bb9397414956541f1f8dc6057d93974663322c862f2bd51',
     'a242487e0602f8e54e9658b838f60979b0feb120b6d67634b34dc5f89d03a5d0',
     'dea625445e7812e52e3e97b49fd2c7e32e10e63bf4773e1dbc35df4f40f731a0',
     'e20f1de438baa3b32cf4a026597149ac4b6a31aebb7637afa250894d85076cea',
@@ -59,6 +68,7 @@ export const PAST_GUIDE_DIGESTS: Readonly<Record<string, readonly string[]>> = {
   ],
   'devcontour-requirements.md': [
     '10345e85f107a972e2a9d00c1b2be3a918abe879368e707510f491852a94dff2',
+    '4b626f0cabcbc68d8854b1b1b0cf5164848c0473925a9fab372b6856fd869cd1',
     'aa29a2ba8b2e9c84a534ad94841235a292567b8487634229d164f637428091bb',
     'b7fd9a9e1089233bb2f904d25e2383b9755a09d9e780b3a12bd16ec272a57fe1',
   ],
@@ -72,10 +82,13 @@ export const PAST_GUIDE_DIGESTS: Readonly<Record<string, readonly string[]>> = {
     '1428eb8ffcd5e0120d402d8cc1ef167538ac88c5bd96c1d23f50a63695f156e7',
     '1f56ee20873e96446774433161bd9863a41d9f5205595fab74c5b144837cce04',
     '28daa0531fd44a8d85f384c3a8c2a7fee974a420f205a523b8ae9dd02a6fa74d',
+    '351b39d32d0d821530185b16eae8088ef07be5a8cd8ca8cfb39e692188ef2304',
     '459c698487787a2593587891cd5ad9ecbffe0d64a754fab8851c7756ff1dbaf2',
     '5868fc19df43fd8e55e1df1bb3130d25dd8fa70952121d9567c1b4ecb9c524b6',
     '5d4586fde61577c829f0f25f48ead67a837f12f93fa60b89fd985a37b5078fd6',
     '5dad9df370de151fb3500ee54cca9e0aec97b45e73347fb2c48ae94939c43479',
+    '60775696047037f2c8ced9d1d23db1c2ed950f0915417940007627c2d054358a',
+    '656a8f3c44f2ba2c27f315ef032541ad8b283b2041cff5e6d824516ab3c5046d',
     '6722bc264267017b0cb2db4ee2dc5cede68f50d804e3ab7b6e61b0e67af585c1',
     '7a5fe14b667a7078dc4ecd4becacf13bdc87168d739de158b5203bf49bc61617',
     '88b13e68060aa5fcee16394e1d702212c539eed08519330b8df545b57bfdd6b0',
@@ -85,6 +98,7 @@ export const PAST_GUIDE_DIGESTS: Readonly<Record<string, readonly string[]>> = {
   ],
   'devcontour-team-sync.md': [
     '06968d50d82f54ed7e3bb6ca8e5a63f8108853c88435d26d1fa85ff0dae9e729',
+    '531a3ad79a3ebcd5279720dcfdde570ae9528cc9886c9d71360056f8c53ed33a',
     '6778b7ae119dd650aaf8ce45baf16c1222f95a574a15e9345286de44d5220605',
     '8c08b59731c0bb5098258c6ea8fa42456fc76c4130ccd382e59079e36382d9c8',
   ],
@@ -95,5 +109,6 @@ export const PAST_GUIDE_DIGESTS: Readonly<Record<string, readonly string[]>> = {
     '75acc4faebd4c2d85e985dbee22f621be4cfa7584c49594c70fd54b5755c1b35',
     '89bf9a4b582ace326cae4e44bf80f9ee5e0be6f472d60ae2387f0d67db88f50f',
     'c55d48924433e713caf46e67b869e455549d149d1f03d5c0650ea0de4619cc04',
+    'c71ccd45f10c0c57285ef456e98122b6e880380adf65d6ab51ceef084f61892c',
   ],
 };

@@ -46,7 +46,7 @@ import { contextSources, importContextSource } from './runner/context-import.ts'
 import { lockContextFile, taskContext } from './runner/context.ts';
 import { ResourcePool, resourceDatabase, processAlive } from './runner/resources.ts';
 import { mkdir, writeFile, readFile, realpath, rename } from 'node:fs/promises';
-import { join, resolve, dirname, sep, basename } from 'node:path';
+import { join, resolve, dirname, sep, basename, posix } from 'node:path';
 import { Store } from './core/store.ts';
 import { DevContour } from './core/service.ts';
 import { configSchema } from './core/model.ts';
@@ -735,7 +735,9 @@ async function main() {
     // тексту: после коммита закрепление нужно обновить.
     const pinned = config.contextPacks.flatMap((pack) => {
       const written = results.find((r) => r.id === pack.repositoryId)?.written ?? [];
-      const hit = [...pack.files, ...(pack.references ?? [])].filter((f) => written.includes(f));
+      const hit = [...pack.files, ...(pack.references ?? [])]
+        .map((f) => posix.normalize(f))
+        .filter((f) => written.includes(f));
       return hit.length ? [`${pack.id} (${hit.join(', ')})`] : [];
     });
     const replaced = results.flatMap((r) => r.replacedUnmarked);

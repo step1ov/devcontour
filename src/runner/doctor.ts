@@ -1150,9 +1150,10 @@ export async function guideChecks(config: Config, root: string): Promise<Check[]
 /** Репозитории, где могут лежать копии: компоненты и репозиторий setup. */
 export function guideRepositories(config: Config): { id: string; path: string }[] {
   const listed = repositories(config).map((r) => ({ id: r.id, path: r.path }));
-  return listed.some((r) => r.path === config.repository)
-    ? listed
-    : [{ id: 'main', path: config.repository }, ...listed];
+  if (listed.some((r) => r.path === config.repository)) return listed;
+  // Репозиторий setup вне списка компонентов: id `main`, если он не занят.
+  const id = listed.some((r) => r.id === 'main') ? 'setup' : 'main';
+  return [{ id, path: config.repository }, ...listed];
 }
 
 /** Как назвать конфигурацию в подсказке: workspace или каталог данных прежней конфигурации. */
