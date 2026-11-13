@@ -457,7 +457,10 @@ syncBuiltinESMExports();
   );
   let completed = false;
   let lastWorkflowReport;
-  for (let count = 0; count < 450; count++) {
+  // A wall-clock bound, not a count: beside the Node suite one status call can
+  // take seconds, and 450 polls ran out while the task was still integrating.
+  const workflowDeadline = Date.now() + 180000;
+  while (Date.now() < workflowDeadline) {
     const report = await agent('workflow_status', { repositoryId: 'main' });
     lastWorkflowReport = report;
     assert.ok(report.jobs.every((j) => !('token' in j)));
