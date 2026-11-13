@@ -11,6 +11,7 @@
 // договор) проверку не проходит.
 import { digestOf, type WorkOrder } from 'devcontour-harness';
 import type { Contract } from '../core/model.ts';
+import type { ContractChange } from '../runner/contract-change.ts';
 
 /**
  * Digest содержания постановки — формула `contentDigest` движка: поручение
@@ -85,24 +86,51 @@ export const reboundOnly = (
   originContent: string | undefined,
 ) => !!reboundOf(order, contracts, originContent);
 
-/** Поля записи операции изменения контракта, которые читает проверка (`ContractChange`). */
-export interface ContractChangeTrace {
-  status: string;
-  contractId?: string;
-  rebound?: string[];
-  held?: string[];
-  startedAt: string;
-}
+/**
+ * Поля записи операции изменения контракта, которые читает проверка, — выборка
+ * из настоящего типа `ContractChange`: переименование поля там ломает
+ * компиляцию здесь, а не молча отключает путь вопросов с минимумами.
+ */
+export type ContractChangeTrace = Pick<
+  ContractChange,
+  'id' | 'status' | 'contractId' | 'rebound' | 'held' | 'startedAt' | 'finishedAt' | 'history'
+>;
 
 /** Операция ещё идёт: её перепривязка и утверждение не закончены. */
-const OPEN = new Set(['queued', 'running', 'waiting', 'failed']);
+const OPEN = new Set<ContractChangeTrace['status']>(['queued', 'running', 'waiting', 'failed']);
+
+/**
+ * Момент перепривязки операцией — последнее завершение её шага rebind. Без
+ * записи (история усечена) — конец операции: перепривязка была не позже.
+ * Начало операции не годится: вопрос, заданный попыткой, которую операция
+ * дожидалась (drain), позже начала, но раньше перепривязки.
+ */
+export function reboundAt(op: ContractChangeTrace) {
+  const entry = op.history?.findLast((h) => h.step === 'rebind' && h.event === 'done');
+  return entry?.at ?? op.finishedAt ?? op.startedAt;
+}
+
+/**
+ * Идущая операция, которая держит или перепривязывает задачу: её ждёт
+ * исходная остановка вопроса с минимумами. Упавшая (`failed`) тоже идёт — её
+ * продолжают с того же шага или отменяют; последняя по началу.
+ */
+export function waitingOperation(operations: readonly ContractChangeTrace[], taskId: string) {
+  return operations
+    .filter(
+      (op) =>
+        OPEN.has(op.status) && (!!op.rebound?.includes(taskId) || !!op.held?.includes(taskId)),
+    )
+    .sort((a, b) => a.startedAt.localeCompare(b.startedAt))
+    .at(-1);
+}
 
 /**
  * Перепривязку задачи `taskId` провела операция изменения контракта (F39):
- * для каждого заменённого контракта есть завершённая операция, начатая после
- * вопроса (`since`), чья новая редакция — этот контракт и чья перепривязка
- * включает задачу. `pending` — такой ещё нет, но идёт операция, которая
- * держит или перепривязывает задачу.
+ * для каждого заменённого контракта есть завершённая операция, перепривязавшая
+ * задачу после вопроса (`since`, см. `reboundAt`), чья новая редакция — этот
+ * контракт и чья перепривязка включает задачу. `pending` — такой ещё нет, но
+ * идёт операция, которая держит или перепривязывает задачу (`waitingOperation`).
  */
 export function reboundByOperation(
   changes: readonly ReboundChange[],
@@ -116,13 +144,9 @@ export function reboundByOperation(
         op.status === 'completed' &&
         op.contractId === c.id &&
         !!op.rebound?.includes(taskId) &&
-        op.startedAt >= since,
+        reboundAt(op) >= since,
     ),
   );
   if (done) return 'yes';
-  return operations.some(
-    (op) => OPEN.has(op.status) && (!!op.rebound?.includes(taskId) || !!op.held?.includes(taskId)),
-  )
-    ? 'pending'
-    : 'no';
+  return waitingOperation(operations, taskId) ? 'pending' : 'no';
 }

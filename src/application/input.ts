@@ -56,6 +56,7 @@ import {
   orderContentDigest,
   reboundByOperation,
   reboundOf,
+  waitingOperation,
   type ContractChangeTrace,
 } from './input-rebound.ts';
 import { repositories } from '../core/repositories.ts';
@@ -514,14 +515,7 @@ export class InputService {
     // не одна форма изменения (ручная регистрация и правка задачи).
     let byOperation: 'yes' | 'pending' | 'no' = 'yes';
     if (changes && request.floors.length)
-      byOperation = reboundByOperation(
-        changes,
-        repositories(this.h.config).flatMap((r) =>
-          Object.values(this.h.store.localRecords<ContractChangeTrace>('contract-change', r.id)),
-        ),
-        work.id,
-        request.createdAt,
-      );
+      byOperation = reboundByOperation(changes, this.operations(), work.id, request.createdAt);
     if (byOperation === 'no') return 'moved';
     const atOrigin =
       (work.status === 'failed' && work.failureKind === 'needs-input') || work.status === 'ready';
@@ -530,6 +524,26 @@ export class InputService {
       return work.status === 'draft' ? 'pending' : 'moved';
     if (byOperation === 'pending') return 'pending';
     return changes ? 'rebound' : 'holds';
+  }
+
+  /** Записи операций изменения контракта всех компонентов (только нужные проверке поля). */
+  private operations() {
+    return repositories(this.h.config).flatMap((r) =>
+      Object.values(this.h.store.localRecords<ContractChangeTrace>('contract-change', r.id)),
+    );
+  }
+
+  /**
+   * Причина ожидания исходной остановки (`pending`), называющая операцию
+   * изменения контракта, которую она ждёт, и выход: идущая завершится сама,
+   * упавшую продолжают или отменяют (после отмены вопрос заменяют).
+   */
+  private waitingProblem(taskId: string) {
+    const op = waitingOperation(this.operations(), taskId);
+    if (!op) return undefined;
+    return op.status === 'failed'
+      ? `исходная остановка ждёт упавшую операцию изменения контракта ${op.id}: продолжите её (contract-change --id ${op.id}) или отмените (contract-change --id ${op.id} --abandon), после отмены вопрос заменяют той же задачей`
+      : `исходная остановка ждёт операцию изменения контракта ${op.id} (${op.status}): ответ перенесётся, когда она завершится`;
   }
 
   /** Исходная остановка открытого блокирующего вопроса не держится: применение откажет (F39). */
@@ -552,13 +566,16 @@ export class InputService {
     const origin = this.originOf(view, request);
     const answer = latestAnswer(request);
     const rebound = origin === 'rebound' && answer?.kind === 'clarification';
+    const waiting = origin === 'pending' ? this.waitingProblem(request.workId) : undefined;
     return {
       ...proposed,
       origin,
       rebound,
       problems: rebound
         ? proposed.problems.filter((p) => !p.startsWith(ORIGIN_PROBLEM))
-        : proposed.problems,
+        : waiting
+          ? [...proposed.problems, waiting]
+          : proposed.problems,
     };
   }
 
