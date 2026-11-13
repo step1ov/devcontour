@@ -311,7 +311,7 @@ test('A cancelled question leaves a retryable task: the retry button returns aft
   await expect(retry).toHaveCount(0);
 });
 
-test('A question about a registered contract: the answer form preselects a requirement change and names the order', async ({
+test('A question about a registered contract: the answer form keeps a clarification and names the contract-change order', async ({
   page,
   request,
 }) => {
@@ -327,20 +327,18 @@ test('A question about a registered contract: the answer form preselects a requi
     .getByRole('complementary', { name: 'Детали задачи' })
     .getByRole('region', { name: 'Вопрос исполнителя' });
   await expect(card).toContainText('Нужен ответ');
+  // Ответ, которому нужна поправка контракта, — уточнение: после
+  // contract-change тот же ответ применяется к новой редакции (F39).
   const kind = card.getByLabel(/Ответ меняет требования/);
-  await expect(kind).toBeChecked();
+  await expect(kind).not.toBeChecked();
   const note = card.locator('[data-contract-answer-note]');
+  await expect(note).toContainText('оставьте вид «уточнение»');
   await expect(note).toContainText('contract-change');
   await expect(note).toContainText('input_context → input_review → input_target → input_apply');
-  // Оператор может осознанно сменить вид: выбор не возвращается опросом.
-  await kind.uncheck();
-  await page.waitForTimeout(2500);
-  await expect(kind).not.toBeChecked();
-  await kind.check();
   await card.getByLabel('YAML').check();
   await card.getByLabel('Ответ исполнителю').fill('Нужна поправка формулировки контракта.');
   await card.getByRole('button', { name: 'Сохранить ответ' }).click();
-  await expect(card.locator('[data-input-answer]')).toContainText('изменение требований');
+  await expect(card.locator('[data-input-answer]')).toContainText('уточнение');
 });
 
 test.describe('approvalMode operator', () => {

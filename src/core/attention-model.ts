@@ -102,10 +102,10 @@ export type AttentionAction =
       /** Раунд отклонённого ревью, который подтверждает действие (`input.confirmRejectedRound`). */
       round?: number;
       /**
-       * Вид ответа, который форма выбирает по умолчанию (F38): вопрос
-       * затрагивает зарегистрированный контракт. Оператор может сменить вид.
+       * Вопрос затрагивает зарегистрированный контракт (`affects: contract`):
+       * форма ответа поясняет порядок — изменение контракта, затем ответ (F38).
        */
-      answerKind?: 'requirement-change';
+      contract?: true;
     }
   | { id: 'open'; kind: 'navigate'; href: string }
   | { id: 'handoff'; kind: 'handoff'; command: string };

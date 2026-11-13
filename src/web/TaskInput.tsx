@@ -9,7 +9,7 @@ import {
   inputStateLabels,
   repeatedQuestionText,
   resumeText,
-  suggestedAnswerKind,
+  contractAffected,
 } from './input-labels.ts';
 import { discussionChanged } from './discussion-events.ts';
 import { findingSeverityLabel } from './review-labels.ts';
@@ -49,12 +49,7 @@ export function TaskInput({ taskId, revision }: { taskId: string; revision: stri
   const [error, setError] = useState('');
   const [text, setText] = useState('');
   const [option, setOption] = useState<string | null>(null);
-  // Вид, выбранный оператором явно, — для своего запроса; без выбора форма
-  // предлагает вид по затронутым областям вопроса (F38).
-  const [chosenKind, setChosenKind] = useState<{
-    requestId: string;
-    kind: 'clarification' | 'requirement-change';
-  }>();
+  const [kind, setKind] = useState<'clarification' | 'requirement-change'>('clarification');
   const [busy, setBusy] = useState(false);
   // Подтверждение отклонённого ревью — раунда, который оператор видел.
   const [confirmedRound, setConfirmedRound] = useState<number | null>(null);
@@ -109,11 +104,8 @@ export function TaskInput({ taskId, revision }: { taskId: string; revision: stri
     }
   };
   const q = current.question;
-  const contractAffected = q.affects.includes('contract');
-  const kind =
-    chosenKind?.requestId === current.requestId ? chosenKind.kind : suggestedAnswerKind(q.affects);
-  const setKind = (value: 'clarification' | 'requirement-change') =>
-    setChosenKind({ requestId: current.requestId, kind: value });
+  // Вопрос о контракте: форма поясняет порядок (F38, F39).
+  const contractNote = contractAffected(q.affects);
   // Ответ можно дать или исправить, пока он не применён (в том числе после
   // отклонённого ревью).
   const answerable = [
@@ -325,7 +317,7 @@ export function TaskInput({ taskId, revision }: { taskId: string; revision: stri
             />
             Ответ меняет требования (корректировка доски, а не продолжение)
           </label>
-          {contractAffected && (
+          {contractNote && (
             <p className="text-warning m-0 text-xs" data-contract-answer-note>
               {CONTRACT_ANSWER_NOTE}
             </p>

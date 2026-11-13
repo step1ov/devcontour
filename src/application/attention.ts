@@ -41,7 +41,7 @@ import {
   inputNextText,
   inputStateLabels,
   repeatedQuestionText,
-  suggestedAnswerKind,
+  contractAffected,
 } from '../core/input-labels.ts';
 import { budgetBlocks } from './context.ts';
 import { budgetCardReason } from '../core/usage.ts';
@@ -663,11 +663,8 @@ const inputSource: AttentionSourceRule = {
                       label: 'Ответить',
                       input: 'text+option' as const,
                       ...(question ? { prompt: question } : {}),
-                      // Вопрос о контракте: форма предлагает «изменение
-                      // требований» и порядок шагов (F38).
-                      ...(suggestedAnswerKind(affects) === 'requirement-change'
-                        ? { answerKind: 'requirement-change' as const }
-                        : {}),
+                      // Вопрос о контракте: форма поясняет порядок (F38).
+                      ...(contractAffected(affects) ? { contract: true as const } : {}),
                       ...(options.length
                         ? {
                             choices: options.map((o) => ({

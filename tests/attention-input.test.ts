@@ -8,7 +8,7 @@ import { DomainError } from '../src/core/model.ts';
 import { join } from 'node:path';
 import { executionOf } from '../src/harness/execution.ts';
 import { dumpDatabase } from './attention-fixture.ts';
-import { inputStateLabels, suggestedAnswerKind } from '../src/core/input-labels.ts';
+import { contractAffected, inputStateLabels } from '../src/core/input-labels.ts';
 import { byKey } from './attention-fixture.ts';
 
 after(() => inputDemos.close());
@@ -191,13 +191,13 @@ test('Применение ответа с карточки: отклонённ�
   }
 });
 
-test('F38: вопрос о контракте — форма ответа предлагает «изменение требований», прочие вопросы — уточнение', async () => {
-  assert.equal(suggestedAnswerKind(['contract', 'acceptance']), 'requirement-change');
-  assert.equal(suggestedAnswerKind(['api']), 'clarification');
-  assert.equal(suggestedAnswerKind([]), 'clarification');
-  assert.equal(suggestedAnswerKind(undefined), 'clarification');
-  for (const [affects, kind] of [
-    [['contract', 'acceptance'], 'requirement-change'],
+test('F38: вопрос о контракте — форма ответа поясняет порядок, прочие вопросы — без пояснения', async () => {
+  assert.equal(contractAffected(['contract', 'acceptance']), true);
+  assert.equal(contractAffected(['api']), false);
+  assert.equal(contractAffected([]), false);
+  assert.equal(contractAffected(undefined), false);
+  for (const [affects, flag] of [
+    [['contract', 'acceptance'], true],
     [['api'], undefined],
   ] as const) {
     const f = await inputFixture(controlled({ affects: [...affects] }));
@@ -210,8 +210,8 @@ test('F38: вопрос о контракте — форма ответа пре
         `input:${request.requestId}`,
       )!;
       assert.equal(card.actor, 'operator');
-      const answer = card.actions.find((a) => a.id === 'answer') as { answerKind?: string };
-      assert.equal(answer.answerKind, kind);
+      const answer = card.actions.find((a) => a.id === 'answer') as { contract?: true };
+      assert.equal(answer.contract, flag);
     } finally {
       await f.cleanup();
     }

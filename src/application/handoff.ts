@@ -774,6 +774,16 @@ function inputStep(ctx: HostContext, taskId: string): HandoffHostNext | undefine
             },
           }),
     });
+  // Исходная остановка не держится: input_apply откажет, и шаг называет
+  // реальный выход — замену или снятие вопроса; у вопроса, который ведущий не
+  // решает, это решение оператора (F39).
+  if (summary.moved && (summary.state === 'context-review' || summary.state === 'ready-to-apply'))
+    return withDetail(h, {
+      action: summary.actor === 'operator' ? 'operator' : 'apply-input',
+      ...base,
+      code: 'apply-moved',
+      params: { operatorAnswers: summary.actor === 'operator', ...stops },
+    });
   return withDetail(h, {
     action: 'apply-input',
     ...base,

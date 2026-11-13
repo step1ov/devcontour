@@ -282,7 +282,7 @@ function CardForm({
           </span>
         </label>
       )}
-      {item.source === 'input' && action.answerKind === 'requirement-change' && (
+      {item.source === 'input' && action.contract && (
         <p className="text-warning m-0 text-xs" data-contract-answer-note>
           {CONTRACT_ANSWER_NOTE}
         </p>
@@ -515,12 +515,6 @@ export function AttentionCard({
                 open: a.id,
                 option: draft.text.trim() ? option : null,
                 pin: openPin(draft, item),
-                // Пустая форма ответа на вопрос о контракте открывается с
-                // видом «изменение требований» (F38); набранный черновик
-                // сохраняет выбор оператора.
-                ...(a.answerKind && !draft.text.trim()
-                  ? answerEdit(draft, { kind: a.answerKind })
-                  : {}),
               });
             else closeForm(a.id);
           }}
