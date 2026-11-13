@@ -252,8 +252,14 @@ export const CONTRACT_CONTENT_WARN = 54000;
  * поправки в описание текущего поведения без изменения смысла.
  */
 export const CONTRACT_CONTENT_CONSOLIDATE = 45000;
-/** Столько смысловых редакций документа подряд без консолидации — совет консолидировать. */
+/**
+ * Столько поправок документа (смысловых редакций после первой регистрации
+ * или последней консолидации) — совет консолидировать, если документ не
+ * меньше `CONTRACT_CONSOLIDATE_MIN`: короткий документ, поправки которого
+ * переписаны на месте, консолидировать нечем.
+ */
 export const CONTRACT_CONSOLIDATE_AFTER = 6;
+export const CONTRACT_CONSOLIDATE_MIN = 30000;
 export interface Task extends TaskInput {
   sharedCompletion?: { receipt: CompletionReceipt; sourceCommit: string };
   /**

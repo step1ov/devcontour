@@ -5,6 +5,7 @@ import { delimiter, dirname, isAbsolute, join, resolve } from 'node:path';
 import { randomUUID } from 'node:crypto';
 import {
   CONTRACT_CONSOLIDATE_AFTER,
+  CONTRACT_CONSOLIDATE_MIN,
   emptyState,
   type Config,
   type DevContourState,
@@ -1239,21 +1240,23 @@ export function contractSizeChecks(contracts: DevContourState['contracts']): Che
           ? meaningRedactionsSinceConsolidation(contracts, c.source, c.repositoryId)
           : 0;
         return [
+          // Совет от 75 % готовности и статуса не меняет: до предела далеко.
           ...(detail
             ? [
                 {
                   id: `contract-size:${c.id}`,
-                  status: 'degraded' as const,
+                  status:
+                    size.refusal || size.warning ? ('degraded' as const) : ('passed' as const),
                   detail: `${name}: ${detail}`,
                 },
               ]
             : []),
-          ...(redactions >= CONTRACT_CONSOLIDATE_AFTER
+          ...(redactions >= CONTRACT_CONSOLIDATE_AFTER && size.chars >= CONTRACT_CONSOLIDATE_MIN
             ? [
                 {
                   id: `contract-consolidate:${c.id}`,
                   status: 'degraded' as const,
-                  detail: `${name}: ${redactions} смысловых редакций документа с последней консолидации — поправки копятся в тексте. ${CONSOLIDATE_HINT}.`,
+                  detail: `${name}: ${redactions} поправок документа с последней консолидации — поправки копятся в тексте. ${CONSOLIDATE_HINT}.`,
                 },
               ]
             : []),

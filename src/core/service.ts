@@ -328,9 +328,9 @@ export function currentContracts(contracts: readonly Contract[], ids: readonly s
   return out;
 }
 /**
- * Смысловые редакции документа после последней консолидации: каждая новая
- * поправка добавляет к тексту, и после нескольких подряд документ пора
- * переписать начисто.
+ * Поправки документа: смысловые редакции после последней консолидации, а
+ * без неё — после первой регистрации. Каждая добавляет к тексту, и после
+ * нескольких подряд документ пора переписать начисто.
  */
 export function meaningRedactionsSinceConsolidation(
   contracts: readonly Contract[],
@@ -340,7 +340,9 @@ export function meaningRedactionsSinceConsolidation(
   const all = contractRedactionsOf(contracts, source, repositoryId);
   const equivalent = (i: number) => i > 0 && consolidatesDirectly(all[i], all[i - 1]);
   const last = all.findLastIndex((_, i) => equivalent(i));
-  return all.slice(last + 1).filter((_, i) => !equivalent(last + 1 + i)).length;
+  // Первая регистрация документа — не поправка.
+  const from = Math.max(last + 1, 1);
+  return all.slice(from).filter((_, i) => !equivalent(from + i)).length;
 }
 /** Редакции документа контракта `source` компонента в порядке утверждения (`orderRedactions`). */
 export function contractRedactionsOf(

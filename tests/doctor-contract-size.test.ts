@@ -4,6 +4,7 @@ import { mkdtempSync, rmSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import {
+  CONTRACT_CONSOLIDATE_MIN,
   CONTRACT_CONTENT_CONSOLIDATE,
   CONTRACT_CONTENT_MAX,
   CONTRACT_CONTENT_WARN,
@@ -33,7 +34,7 @@ test('doctor предупреждает о действующем контрак
   assert.deepEqual(
     checks.map((c) => [c.id, c.status]),
     [
-      ['contract-size:C-mid', 'degraded'],
+      ['contract-size:C-mid', 'passed'],
       ['contract-size:C-near', 'degraded'],
       ['contract-size:C-full', 'degraded'],
     ],
@@ -87,30 +88,36 @@ test('F20: the size refusal of a proposal names consolidation first, continuatio
   assert.equal(contractSize('x'.repeat(CONTRACT_CONTENT_CONSOLIDATE - 1)).hint, undefined);
 });
 
-test('F20: doctor suggests a consolidation after six meaning redactions of a document since the last one', () => {
+test('F20: doctor suggests a consolidation after six amendments of a large document since the first registration or the last consolidation', () => {
   const source = 'docs/contracts/api.md';
-  const redactions = (n: number, prefix = 'C-') =>
-    Array.from({ length: n }, (_, i) => contract(`${prefix}${i + 1}`, 1000, { source }));
+  const redactions = (n: number, prefix = 'C-', chars = CONTRACT_CONSOLIDATE_MIN) =>
+    Array.from({ length: n }, (_, i) => contract(`${prefix}${i + 1}`, chars, { source }));
   const ids = (cs: Contract[]) => contractSizeChecks(cs).map((c) => c.id);
-  assert.deepEqual(ids(redactions(5)), []);
-  const six = redactions(6);
-  const [check] = contractSizeChecks(six);
-  assert.equal(check?.id, 'contract-consolidate:C-6');
+  // Первая регистрация — не поправка: шесть редакций — пять поправок.
+  assert.deepEqual(ids(redactions(6)), []);
+  const seven = redactions(7);
+  const [check] = contractSizeChecks(seven);
+  assert.equal(check?.id, 'contract-consolidate:C-7');
   assert.equal(check.status, 'degraded');
-  assert.match(check.detail, /6 смысловых редакций документа с последней консолидации/);
+  assert.match(check.detail, /6 поправок документа с последней консолидации/);
   assert.match(check.detail, /contract-change --consolidate/);
+  // Короткий документ с поправками на месте — без совета.
+  assert.deepEqual(ids(redactions(7, 'S-', CONTRACT_CONSOLIDATE_MIN - 1)), []);
   // Консолидация обнуляет счёт; дальше считаются только смысловые редакции.
-  const consolidated = contract('C-7', 900, { source, consolidates: { from: 'C-6', review: 'R' } });
-  assert.deepEqual(ids([...six, consolidated]), []);
-  assert.deepEqual(ids([...six, consolidated, ...redactions(5, 'D-')]), []);
-  assert.deepEqual(ids([...six, consolidated, ...redactions(6, 'D-')]), [
+  const consolidated = contract('C-8', CONTRACT_CONSOLIDATE_MIN, {
+    source,
+    consolidates: { from: 'C-7', review: 'R' },
+  });
+  assert.deepEqual(ids([...seven, consolidated]), []);
+  assert.deepEqual(ids([...seven, consolidated, ...redactions(5, 'D-')]), []);
+  assert.deepEqual(ids([...seven, consolidated, ...redactions(6, 'D-')]), [
     'contract-consolidate:D-6',
   ]);
   // Другой документ того же компонента не входит в счёт.
-  const other = Array.from({ length: 3 }, (_, i) =>
-    contract(`O-${i}`, 1000, { source: 'docs/contracts/other.md' }),
+  const other = Array.from({ length: 4 }, (_, i) =>
+    contract(`O-${i}`, CONTRACT_CONSOLIDATE_MIN, { source: 'docs/contracts/other.md' }),
   );
-  assert.deepEqual(ids([...redactions(3), ...other]), []);
+  assert.deepEqual(ids([...redactions(4), ...other]), []);
 });
 
 test('doctor() показывает contract-size по состоянию и готовность не снимает', async () => {
