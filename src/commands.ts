@@ -68,7 +68,7 @@ import { InputService } from './application/input.ts';
 import { DiscussionService } from './application/discussion.ts';
 import { randomUUID } from 'node:crypto';
 import { acceptBoard, reviewContract, reviewPlan } from './runner/agent-control.ts';
-import { specDigest } from './core/service.ts';
+import { currentContracts, specDigest } from './core/service.ts';
 import { WorkspaceRunner } from './runner/workspace.ts';
 import { setupWorkspace } from './runner/workspace-setup.ts';
 import { Workspace } from './core/workspace.ts';
@@ -1146,7 +1146,7 @@ async function main() {
         result = await taskContext(
           config,
           task,
-          store.read().contracts.filter((c) => task.contracts.includes(c.id)),
+          currentContracts(store.read().contracts, task.contracts),
         );
       } else if (operation === 'resources' || operation === 'resource-release') {
         const pool = new ResourcePool(resourceDatabase(config));

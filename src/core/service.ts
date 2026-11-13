@@ -314,6 +314,20 @@ export function currentText(contracts: readonly Contract[], id: string): Contrac
   return c && equivalenceChain(contracts, c).current;
 }
 /**
+ * Действующие тексты контрактов задачи: каждая привязка — через
+ * `currentText`. Context pack после консолидации закрепляет её текст, а
+ * задача остаётся привязанной к прежней редакции: сверка закрепления с
+ * текстом прежней редакции блокировала бы каждый её запуск.
+ */
+export function currentContracts(contracts: readonly Contract[], ids: readonly string[]) {
+  const out: Contract[] = [];
+  for (const id of ids) {
+    const c = currentText(contracts, id);
+    if (c && !out.includes(c)) out.push(c);
+  }
+  return out;
+}
+/**
  * Смысловые редакции документа после последней консолидации: каждая новая
  * поправка добавляет к тексту, и после нескольких подряд документ пора
  * переписать начисто.

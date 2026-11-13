@@ -30,7 +30,13 @@ import {
   type WorkState,
 } from 'devcontour-harness';
 import type { DevContour } from '../core/service.ts';
-import { digest, receiptBytes, scopeDigest, specDigest } from '../core/service.ts';
+import {
+  currentContracts,
+  digest,
+  receiptBytes,
+  scopeDigest,
+  specDigest,
+} from '../core/service.ts';
 import type { ContextPack, DevContourState, Task } from '../core/model.ts';
 import { assertTaskPreparation } from '../core/preparation.ts';
 import { validateTaskContext } from '../core/workflow.ts';
@@ -431,11 +437,9 @@ export function devcontourContextSource(
     // Прежние условия контекста задачи: пакеты закреплены, digest совпадает,
     // закреплённая редакция файла контракта — утверждённая, предел объёма.
     try {
-      await taskContext(
-        h.config,
-        task,
-        s.contracts.filter((c) => task.contracts.includes(c.id)),
-      );
+      // Действующий текст: консолидация прежней редакции (F20) закреплена в
+      // пакете, а задача сохранила привязку к прежней.
+      await taskContext(h.config, task, currentContracts(s.contracts, task.contracts));
     } catch (error) {
       throw new HarnessError('NOT_READY', error instanceof Error ? error.message : String(error));
     }
