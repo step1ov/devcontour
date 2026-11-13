@@ -19,7 +19,7 @@ import {
   reviewConsolidationRound,
 } from './agent-control.ts';
 import { pinArtifacts } from './contract-artifacts.ts';
-import { headings, idTokens, slug, textChecks } from '../core/contract-text.ts';
+import { anchors, headings, idTokens, slug, textChecks } from '../core/contract-text.ts';
 
 export { anchors, headings, idTokens, referencedAnchors, slug } from '../core/contract-text.ts';
 
@@ -44,19 +44,40 @@ export class StaleConsolidation extends DomainError {}
 /** Начало находки контура о неполном отображении — по нему узнаётся прошлый раунд. */
 const INCOMPLETE = 'Неполное отображение старого текста в новый';
 
+/** Текст заголовка без явного якоря `{#id}`. */
+const headingText = (h: string) => h.replace(/\{#[^}]*\}\s*$/, '').trim();
+const escape = (x: string) => x.replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
+/** `phrase` в `text` целым словом или фразой, без учёта регистра. */
+const whole = (text: string, phrase: string) =>
+  new RegExp(`(?<![\\p{L}\\p{N}_-])${escape(phrase)}(?![\\p{L}\\p{N}_-])`, 'iu').test(text);
+
 /**
- * Пропуски отображения в итоге ревью: ID правил и заголовки прежнего текста
- * (текстом или якорем), которых итог не называет. Отображение ревьюер пишет
- * в итог; пустой или ленивый итог («ok») не доказывает равносильности.
+ * Пропуски отображения в итоге ревью. Отображение — строки «старое → новое»
+ * (`→` или `->`): правая часть называет ID, заголовок или якорь нового
+ * текста. Каждый ID правил и каждый заголовок прежнего текста (целым словом
+ * или якорем) должен стоять в левой части такой строки. Перечисление ID и
+ * разделов без стрелок, ссылка в никуда и совпадение по части слова
+ * отображением не считаются.
  */
-export function mappingGaps(previous: string, summary: string) {
-  const named = new Set(idTokens(summary));
-  const text = summary.toLowerCase();
+export function mappingGaps(previous: string, next: string, summary: string) {
+  const ids = new Set(idTokens(next));
+  const heads = headings(next).map(headingText).filter(Boolean);
+  const targets = anchors(next);
+  const names = (right: string) =>
+    idTokens(right).some((id) => ids.has(id)) ||
+    heads.some((h) => whole(right, h)) ||
+    [...targets].some((a) => whole(right, '#' + a) || whole(right, a));
+  const lefts = summary
+    .split('\n')
+    .map((line) => /^(.*?)(?:→|->)(.*)$/u.exec(line))
+    .filter((m): m is RegExpExecArray => !!m && names(m[2]))
+    .map((m) => m[1]);
+  const mapped = (test: (left: string) => boolean) => lefts.some(test);
   return [
-    ...idTokens(previous).filter((id) => !named.has(id)),
+    ...idTokens(previous).filter((id) => !mapped((left) => idTokens(left).includes(id))),
     ...headings(previous)
-      .map((h) => h.replace(/\{#[^}]*\}\s*$/, '').trim())
-      .filter((h) => h && !text.includes(h.toLowerCase()) && !text.includes(slug(h)))
+      .map(headingText)
+      .filter((h) => h && !mapped((left) => whole(left, h) || whole(left, slug(h))))
       .map((h) => `«${h}»`),
   ];
 }
@@ -268,7 +289,7 @@ export async function reviewConsolidation(
   const attempt = (h.store.read().contractAttempts ?? []).find(
     (a) => a.artifact === approval.artifact,
   );
-  const gaps = mappingGaps(plan.current.content, attempt?.summary ?? '');
+  const gaps = mappingGaps(plan.current.content, plan.content, attempt?.summary ?? '');
   if (gaps.length) {
     const message = `${INCOMPLETE}: итог ревью не называет ${gaps.slice(0, 30).join(', ')}`;
     h.store.change('contract.review', (s) => {

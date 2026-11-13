@@ -6,11 +6,18 @@ import {
   anchors,
   consolidationPlan,
   idTokens,
+  mappingGaps,
   referencedAnchors,
   reviewConsolidation,
 } from '../src/runner/consolidation.ts';
 import { parseProposal } from '../src/runner/agent-control.ts';
-import { CONSOLIDATED, consolidationStage, MAPPING, reviewers } from './consolidation-fixture.ts';
+import {
+  AMENDED,
+  CONSOLIDATED,
+  consolidationStage,
+  MAPPING,
+  reviewers,
+} from './consolidation-fixture.ts';
 
 test('F20: deterministic helpers: id tokens, heading anchors and sibling references', () => {
   assert.deepEqual(
@@ -193,4 +200,36 @@ test('F20 M2: a summary without the full mapping counts as a rejected round; the
   } finally {
     await s.remove();
   }
+});
+
+test('F20 R2-M2: the mapping needs "old → new" lines pointing into the new text; an echo of ids and headings or a substring hit is not a mapping', () => {
+  assert.deepEqual(mappingGaps(AMENDED, CONSOLIDATED, MAPPING), []);
+  assert.deepEqual(mappingGaps(AMENDED, CONSOLIDATED, MAPPING.replaceAll('→', '->')), []);
+  // Перечисление без стрелок.
+  assert.deepEqual(
+    mappingGaps(
+      AMENDED,
+      CONSOLIDATED,
+      'Covered: REQ-1, REQ-2, REQ-3; sections: Catalog, Prices, Listing. All good.',
+    ),
+    ['REQ-1', 'REQ-2', 'REQ-3', '«Catalog»', '«Prices»', '«Listing»'],
+  );
+  // Стрелка в никуда: правая часть не называет ничего из нового текста.
+  assert.deepEqual(
+    mappingGaps(
+      AMENDED,
+      CONSOLIDATED,
+      MAPPING.replace('→ Prices: REQ-1, price is a number', '→ Pricing rules'),
+    ),
+    ['REQ-1', '«Prices»'],
+  );
+  // Часть слова не считается заголовком.
+  assert.deepEqual(
+    mappingGaps(
+      AMENDED,
+      CONSOLIDATED,
+      MAPPING.replace('Prices: REQ-1 (stage 2 amendment)', 'Pricesheet: REQ-1'),
+    ),
+    ['«Prices»'],
+  );
 });
