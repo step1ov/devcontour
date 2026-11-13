@@ -1,11 +1,19 @@
 import type { CheckGuard } from './base-check.ts';
 import { randomUUID } from 'node:crypto';
 import { homedir, tmpdir } from 'node:os';
-import { CLIP_SHORT, HarnessError, clipText, runGatesAt } from 'devcontour-harness';
+import {
+  CLIP_SHORT,
+  HarnessError,
+  clipText,
+  coverageChanges,
+  runGatesAt,
+  type ChangedPaths,
+} from 'devcontour-harness';
 import {
   BOARD_COVERAGE,
   boardCoverageKey,
   boardCoverageWorks,
+  boardSkips,
   digest,
   uncoveredGates,
   type BoardCoverage,
@@ -19,6 +27,33 @@ import { controllerBoundary } from './checks.ts';
 import { checkoutRootOption, workspaceCheckoutRoot } from './checkout-root.ts';
 
 /**
+ * Объединённый diff доски для условных gates: для каждого компонента, где
+ * задача признала gate неприменимым (`not-applicable` на integration), —
+ * изменённые пути от зелёного SHA каждой такой записи до итогового SHA
+ * доски (`coverageChanges` harness). Компонент без таких записей diff не
+ * получает: он не нужен. Неполный diff (ошибка Git, слишком много путей)
+ * harness считает отсутствующим, и gate исполняется на итоговом SHA.
+ */
+export async function boardChanges(
+  h: DevContour,
+  tasks: Task[],
+  heads: Record<string, string>,
+): Promise<Record<string, ChangedPaths>> {
+  const skips = boardSkips(h, h.store.read(), tasks);
+  const changes: Record<string, ChangedPaths> = {};
+  for (const [repositoryId, sha] of Object.entries(heads)) {
+    const own = skips.filter((x) => x.repositoryId === repositoryId).map((x) => x.evidence);
+    if (!own.length) continue;
+    changes[repositoryId] = await coverageChanges(
+      repository(h.config, repositoryId).path,
+      own,
+      sha,
+    );
+  }
+  return changes;
+}
+
+/**
  * Полный профиль доски на её итоговом SHA. Gates, которые не прошли
  * integration ни в одной задаче (области задач их не включали), исполняются
  * один раз на итоговом integration SHA компонента — тем же исполнением, что
@@ -28,7 +63,10 @@ import { checkoutRootOption, workspaceCheckoutRoot } from './checkout-root.ts';
  * к ревизии, SHA и договору компонента; изменённая ревизия — отказ записи.
  * Уже прошедшая проверка того же SHA и договора не повторяется. Провал —
  * отказ приёмки с названным gate; приёмка без прошедших gates невозможна
- * (`DevContour.accept` пересчитывает покрытие сам).
+ * (`DevContour.accept` пересчитывает покрытие сам). Условный gate, который
+ * задачи признали неприменимым, исполняется здесь, только если его задевает
+ * объединённый diff доски (`changes`, `boardChanges`); не задетый остаётся
+ * неприменимым к доске.
  */
 export async function coverBoard(
   h: DevContour,
@@ -39,12 +77,14 @@ export async function coverBoard(
   heads: Record<string, string>,
   guard: CheckGuard = () => {},
   signal?: AbortSignal,
+  changes?: Record<string, ChangedPaths>,
 ) {
   const gaps = uncoveredGates(
     h,
     h.store.read(),
     tasks,
     boardCoverageWorks(h, boardId, revision, heads),
+    { changes: changes ?? (await boardChanges(h, tasks, heads)), finalShas: heads },
   );
   const runs: { repositoryId: string; sha: string; runId: string; gates: string[] }[] = [];
   // Все непрошедшие gates всех компонентов — одним отказом: иначе каждый

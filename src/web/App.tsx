@@ -16,6 +16,7 @@ import {
   Play,
   Pause,
   Check,
+  Minus,
   CircleCheck,
   Clock,
   AlertCircle,
@@ -41,6 +42,11 @@ import {
   SquareKanban,
 } from 'lucide-react';
 import type { Task, Run } from '../core/model.ts';
+import {
+  NOT_APPLICABLE_LABEL,
+  evidenceVerdict,
+  notApplicableLine,
+} from '../core/evidence-verdict.ts';
 import { Alert, AlertDescription } from '@/ui/alert.tsx';
 import { Badge } from '@/ui/badge.tsx';
 import { TaskInput } from './TaskInput.tsx';
@@ -301,19 +307,32 @@ function GateChips({ run }: { run: PanelRun }) {
   if (!gates.length) return null;
   return (
     <span className="mt-1 flex min-w-0 flex-wrap gap-1">
-      {gates.map((e) => (
-        <Badge
-          key={e.id}
-          variant={e.passed ? 'success' : 'destructive'}
-          className="min-w-0 font-mono"
-          title={`${e.gate} · ${e.phase} · ${e.summary}`}
-        >
-          <span className="truncate">
-            {e.passed ? '✓' : '✗'} {e.gate}
-            {e.phase === 'integration' ? ' · интеграция' : ''}
-          </span>
-        </Badge>
-      ))}
+      {gates.map((e) => {
+        // Условный gate, которого не задел diff, — не PASS и не провал.
+        const verdict = evidenceVerdict(e);
+        return (
+          <Badge
+            key={e.id}
+            variant={
+              verdict === 'passed'
+                ? 'success'
+                : verdict === 'not-applicable'
+                  ? 'secondary'
+                  : 'destructive'
+            }
+            className="min-w-0 font-mono"
+            title={`${e.gate} · ${e.phase} · ${
+              verdict === 'not-applicable' ? notApplicableLine(e.notApplicable) : e.summary
+            }`}
+          >
+            <span className="truncate">
+              {verdict === 'passed' ? '✓' : verdict === 'not-applicable' ? '–' : '✗'} {e.gate}
+              {e.phase === 'integration' ? ' · интеграция' : ''}
+              {verdict === 'not-applicable' ? ` · ${NOT_APPLICABLE_LABEL}` : ''}
+            </span>
+          </Badge>
+        );
+      })}
     </span>
   );
 }
@@ -327,17 +346,30 @@ function GateSummary({ run }: { run: PanelRun }) {
   const phase = (name: string) => gates.filter((e) => e.phase === name);
   const part = (label: string, items: PanelEvidence[]) => {
     if (!items.length) return null;
-    const failed = items.filter((e) => !e.passed).length;
+    const failed = items.filter((e) => evidenceVerdict(e) === 'failed').length;
+    // Неприменимые — отдельным счётом: ни в прошедшие, ни в упавшие.
+    const skipped = items.filter((e) => evidenceVerdict(e) === 'not-applicable').length;
+    const passed = items.length - failed - skipped;
     return (
-      <span className={failed ? 'text-destructive' : 'text-success'}>
-        {label} {failed ? `✗${failed}` : `✓${items.length}`}
+      <span
+        className={failed ? 'text-destructive' : passed ? 'text-success' : 'text-muted-foreground'}
+      >
+        {label} {failed ? `✗${failed}` : passed ? `✓${passed}` : ''}
+        {skipped ? <span className="text-muted-foreground"> –{skipped}</span> : null}
       </span>
     );
   };
   return (
     <span
       className="tabular flex flex-wrap gap-x-2 text-xs"
-      title={gates.map((e) => `${e.passed ? '✓' : '✗'} ${e.gate} · ${e.phase}`).join('\n')}
+      title={gates
+        .map((e) => {
+          const verdict = evidenceVerdict(e);
+          return verdict === 'not-applicable'
+            ? `– ${e.gate} · ${e.phase} · ${NOT_APPLICABLE_LABEL}`
+            : `${verdict === 'passed' ? '✓' : '✗'} ${e.gate} · ${e.phase}`;
+        })
+        .join('\n')}
     >
       {part('кандидат', phase('candidate'))}
       {part('интеграция', phase('integration'))}
@@ -3058,11 +3090,27 @@ export function App() {
                                 <span
                                   className={cn(
                                     'pt-0.5 [&_svg]:size-3.5',
-                                    e.passed ? 'text-success' : 'text-destructive',
+                                    evidenceVerdict(e) === 'passed'
+                                      ? 'text-success'
+                                      : evidenceVerdict(e) === 'not-applicable'
+                                        ? 'text-muted-foreground'
+                                        : 'text-destructive',
                                   )}
-                                  aria-label={e.passed ? 'прошла' : 'не прошла'}
+                                  aria-label={
+                                    evidenceVerdict(e) === 'passed'
+                                      ? 'прошла'
+                                      : evidenceVerdict(e) === 'not-applicable'
+                                        ? NOT_APPLICABLE_LABEL
+                                        : 'не прошла'
+                                  }
                                 >
-                                  {e.passed ? <Check /> : <X />}
+                                  {evidenceVerdict(e) === 'passed' ? (
+                                    <Check />
+                                  ) : evidenceVerdict(e) === 'not-applicable' ? (
+                                    <Minus />
+                                  ) : (
+                                    <X />
+                                  )}
                                 </span>
                                 <span className="min-w-0">
                                   {e.kind !== 'review'
@@ -3076,6 +3124,8 @@ export function App() {
                                     {e.kind === 'review' &&
                                       ` · ${e.inspection?.mode ?? 'команды не зафиксированы'}`}
                                     {e.reviewRound && ` · ${reviewRoundLine(e.reviewRound)}`}
+                                    {e.kind === 'not-applicable' &&
+                                      ` · ${notApplicableLine(e.notApplicable)}`}
                                   </small>
                                 </span>
                               </button>

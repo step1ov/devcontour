@@ -1,3 +1,4 @@
+import { notApplicableSummary } from '../core/evidence-verdict.ts';
 import { readFileSync, realpathSync, writeFileSync } from 'node:fs';
 import { join, sep } from 'node:path';
 import { inspectProject, type InputQuestion, type ProjectFacts } from 'devcontour-harness';
@@ -419,6 +420,9 @@ export function quickResult(
           passed: e.passed,
           sha: e.sha,
           summary: e.summary.slice(0, 300),
+          ...(e.kind === 'not-applicable' && e.notApplicable
+            ? { notApplicable: notApplicableSummary(e.notApplicable) }
+            : {}),
         }));
     const ids = new Set(runs.map((r) => r.id));
     const board = state.boards.find((b) => b.revisions.some((r) => r.taskIds.includes(task.id)));

@@ -42,7 +42,7 @@ import {
   type CheckDeclaration,
 } from '../core/checks.ts';
 import { spikeRecord, spikesOf } from './checks.ts';
-import { coverBoard } from './board-coverage.ts';
+import { boardChanges, coverBoard } from './board-coverage.ts';
 import { checkoutRoots, workspaceCheckout } from './checkout-root.ts';
 import { hintLocaleOf, reviewLanguageInstructions } from '../application/hint-messages.ts';
 
@@ -1191,6 +1191,10 @@ export async function acceptBoard(
     return { status: 'awaiting-operator', boardId, head };
   // Gates, которые не исполнила ни одна задача (области задач их не включали),
   // проверяются один раз на итоговом SHA доски; приёмка — только если прошли.
+  // Объединённый diff для условных gates, которые задачи признали
+  // неприменимыми: один для проверки доски и для приёмки, чтобы обе решали
+  // по одним путям.
+  const changes = await boardChanges(h, tasks, heads);
   const coverage = options.root
     ? await coverBoard(
         h,
@@ -1201,6 +1205,7 @@ export async function acceptBoard(
         heads,
         beforeCommit,
         options.signal,
+        changes,
       )
     : [];
   return {
@@ -1214,6 +1219,7 @@ export async function acceptBoard(
         manual ? { actor: 'operator' } : { actor: 'agent', authorRuntime: author },
         digest(revision),
         heads,
+        changes,
       );
     }),
   };

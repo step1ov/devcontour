@@ -110,6 +110,19 @@ export function validateWorkflow(config: Config) {
       );
   }
   for (const repo of repos) {
+    // Условные gates (`when.paths`): то же правило, что у политики harness, —
+    // но при загрузке конфигурации, с именем компонента, а не при сборке движка.
+    if (repo.gates.some((g) => g.when)) {
+      if (!repo.gates.some((g) => g.kind === 'test' && !g.when))
+        throw new DomainError(
+          `Компонент ${repo.id}: нужен хотя бы один test gate без when — иначе задача может не исполнить ни одного теста`,
+        );
+      const generative = repo.gates.find((g) => g.when && g.property);
+      if (generative)
+        throw new DomainError(
+          `Компонент ${repo.id}: генеративный gate ${generative.id} не может быть условным (when)`,
+        );
+    }
     if (config.mode !== 'demo')
       for (const role of declaredRoles(config, repo.id)) {
         const writer = roleBinding(config, role, repo.id),
@@ -225,6 +238,18 @@ export function validateTaskContext(config: Config, task: TaskInput) {
     // проходят и на нереализованном коде.
     if (!gates.some((id) => own.some((g) => g.id === id && g.kind === 'test')))
       throw new DomainError('Область доказательства задачи должна включать test gate');
+    // Условный test gate, не задетый diff, не исполняется: задача с одними
+    // условными тестами могла бы пройти, не запустив ни одного. Исполняется
+    // всегда test gate без when или gate, названный требованием задачи.
+    const linked = new Set((task.requirements ?? []).map((l) => l.gate));
+    if (
+      !gates.some((id) =>
+        own.some((g) => g.id === id && g.kind === 'test' && (!g.when || linked.has(id))),
+      )
+    )
+      throw new DomainError(
+        'Область доказательства задачи должна включать test gate без when (или названный её требованием): условный gate может не исполниться',
+      );
     for (const link of task.requirements ?? [])
       if (!gates.includes(link.gate))
         throw new DomainError('Требование ссылается на проверку вне области задачи: ' + link.gate);

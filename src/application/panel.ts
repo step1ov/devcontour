@@ -1,3 +1,4 @@
+import { notApplicableSummary, type NotApplicableSummary } from '../core/evidence-verdict.ts';
 import { join, resolve } from 'node:path';
 import { InputService, inputHolds, questionVerdicts, stopQuestions } from './input.ts';
 import { z } from 'zod';
@@ -72,6 +73,8 @@ function eventData(data: unknown): Record<string, string | number | boolean | nu
 
 export type PanelEvidence = Pick<Evidence, 'id' | 'gate' | 'phase' | 'kind' | 'passed'> & {
   summary: string;
+  /** Условный gate не исполнялся: шаблоны и сравненный diff (`kind: 'not-applicable'`). */
+  notApplicable?: NotApplicableSummary;
 };
 export type PanelRun = Pick<
   Run,
@@ -141,6 +144,9 @@ function runLine(run: Run, boardId: string | undefined, now: number): PanelRun {
       kind: e.kind,
       passed: e.passed,
       summary: short(e.summary, 200) ?? '',
+      ...(e.kind === 'not-applicable' && e.notApplicable
+        ? { notApplicable: notApplicableSummary(e.notApplicable) }
+        : {}),
     })),
   };
 }

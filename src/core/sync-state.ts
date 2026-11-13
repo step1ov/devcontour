@@ -268,6 +268,7 @@ export function completion(
         testsTruncated,
         checks,
         property,
+        notApplicable,
       }) => ({
         kind,
         phase,
@@ -291,6 +292,7 @@ export function completion(
               },
             }
           : {}),
+        ...(kind === 'not-applicable' && notApplicable ? { notApplicable } : {}),
       }),
     ),
     ...(run.consumers?.length

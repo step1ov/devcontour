@@ -49,6 +49,10 @@ export const receiptFields = {
   'shas.integration': ['receipt', 'resultSha'],
   'shas.result': ['receipt', 'resultSha'],
   evidence: ['receipt', 'checks[]; запись потребителя — вид consumer'],
+  'evidence[].notApplicable': [
+    'receipt',
+    'notApplicable записи вида not-applicable: определение gate и сравненный diff',
+  ],
   'evidence[].tests': [
     'receipt',
     'tests собственной проверки интеграции; у прочих записей не переносится',
@@ -156,6 +160,7 @@ export function receiptResult(
             },
           }
         : {}),
+      ...(c.kind === 'not-applicable' && c.notApplicable ? { notApplicable: c.notApplicable } : {}),
       ...(c.kind === 'review'
         ? { reviewer: { runtime: reviewer, sameVendor: vendorOf(reviewer) === vendorOf(writer) } }
         : {}),

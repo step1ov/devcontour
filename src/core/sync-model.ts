@@ -1,7 +1,10 @@
 import { preparationState } from './preparation-model.ts';
 import { z } from 'zod';
 import { taskInput, relativePath } from './model.ts';
-import { checkDeclarationSchema as checkDeclaration } from 'devcontour-harness';
+import {
+  checkDeclarationSchema as checkDeclaration,
+  gateApplicabilitySchema,
+} from 'devcontour-harness';
 
 export const syncId = z.string().regex(/^[A-Za-z0-9_-]{1,80}$/);
 const hash = z.string().regex(/^[a-f0-9]{64}$/);
@@ -27,7 +30,10 @@ export const receiptSchema = z.strictObject({
   checks: z
     .array(
       z.strictObject({
-        kind: z.enum(['test', 'review']),
+        // `not-applicable` — условный gate не исполнялся: diff фазы не задел
+        // его путей (`notApplicable`). Получатель засчитывает его только
+        // обычному gate с тем же определением и никогда — доказательству.
+        kind: z.enum(['test', 'review', 'not-applicable']),
         phase: z.enum(['candidate', 'integration']),
         sha,
         gate: syncId,
@@ -70,6 +76,8 @@ export const receiptSchema = z.strictObject({
               .optional(),
           })
           .optional(),
+        /** Почему условный gate не исполнялся: определение, шаблоны и сравненный diff. */
+        notApplicable: gateApplicabilitySchema.optional(),
       }),
     )
     .min(4),

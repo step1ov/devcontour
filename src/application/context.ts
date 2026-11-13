@@ -315,6 +315,8 @@ function snapshot(h: DevContour, s: DevContourState, now: number, repositoryId?:
           digest: e.digest,
           passed: e.passed,
           sha: e.sha,
+          // Условный gate не исполнялся: `passed: false` здесь не провал.
+          ...(e.kind === 'not-applicable' ? { notApplicable: true } : {}),
         })),
       },
     });

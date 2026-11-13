@@ -1,3 +1,9 @@
+import {
+  NOT_APPLICABLE_LABEL,
+  evidenceVerdict,
+  notApplicableLine,
+  type NotApplicableSummary,
+} from '../core/evidence-verdict.ts';
 import { useEffect, useRef, useState } from 'react';
 import { Check, CircleDashed, CircleDot, Copy, OctagonAlert, UserRound } from 'lucide-react';
 import { Alert, AlertDescription } from '@/ui/alert.tsx';
@@ -61,8 +67,9 @@ interface Gate {
 }
 interface CheckEntry {
   gate: string;
-  kind: 'test' | 'review';
+  kind: 'test' | 'review' | 'not-applicable';
   passed: boolean;
+  notApplicable?: NotApplicableSummary;
   sha: string;
   summary: string;
 }
@@ -506,12 +513,29 @@ function Checks({ label, entries }: { label: string; entries: CheckEntry[] }) {
       <ul className="grid gap-1 text-sm">
         {entries.map((e, i) => (
           <li key={e.gate + i} className="flex flex-wrap items-baseline gap-2">
-            <Badge variant={e.passed ? 'success' : 'destructive'}>
-              {e.passed ? 'прошла' : 'не прошла'}
+            <Badge
+              variant={
+                evidenceVerdict(e) === 'passed'
+                  ? 'success'
+                  : evidenceVerdict(e) === 'not-applicable'
+                    ? 'secondary'
+                    : 'destructive'
+              }
+            >
+              {evidenceVerdict(e) === 'passed'
+                ? 'прошла'
+                : evidenceVerdict(e) === 'not-applicable'
+                  ? NOT_APPLICABLE_LABEL
+                  : 'не прошла'}
             </Badge>
             <span>{e.kind === 'review' ? 'Ревью' : 'Проверка'}</span>
             <code className="font-mono text-xs">{e.gate}</code>
             <code className="text-muted-foreground font-mono text-xs">{short(e.sha)}</code>
+            {e.kind === 'not-applicable' && (
+              <span className="text-muted-foreground text-xs [overflow-wrap:anywhere]">
+                {notApplicableLine(e.notApplicable)}
+              </span>
+            )}
           </li>
         ))}
       </ul>

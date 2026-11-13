@@ -14,6 +14,8 @@ import {
   dependencyStoreSchema,
   DEFAULT_STALL_SWEEP,
   gateScopeTooBig,
+  gateWhenSchema,
+  type GateApplicability,
 } from 'devcontour-harness/contracts';
 import type { CompletionReceipt } from './sync-model.ts';
 import {
@@ -444,7 +446,13 @@ export interface Evidence {
   inspection?: ReviewInspection;
   id: string;
   runId: string;
-  kind: 'test' | 'review';
+  /**
+   * `not-applicable` — gate с `when.paths` не исполнялся: настоящий diff фазы
+   * не задел ни одного его пути и неявного входа (`notApplicable`). Это не
+   * PASS и не провал: запись `passed: false` без команды и лога, и ни одно
+   * доказательство (сценарий, требование, testcase) её не читает.
+   */
+  kind: 'test' | 'review' | 'not-applicable';
   phase: 'candidate' | 'integration';
   sha: string;
   gate: string;
@@ -539,6 +547,14 @@ export interface Evidence {
    * `artifacts` или запись прежней версии.
    */
   artifactFiles?: NonNullable<import('devcontour-harness').EvidenceRecord['artifactFiles']>;
+  /**
+   * Основание исполненного условного gate (определение, ресурсы, предпосылки,
+   * окружение, версия harness): от его зелёного SHA следующая попытка решает,
+   * применим ли gate. Нет поля — gate без `when` или запись прежней версии.
+   */
+  gateBasis?: string;
+  /** Почему gate не исполнялся (`kind: 'not-applicable'`): шаблоны и сравненный diff. */
+  notApplicable?: GateApplicability;
 }
 export interface Run {
   /**
@@ -872,6 +888,12 @@ export interface Gate {
    * в каталог evidence фазы с пределами размера и расширений.
    */
   artifacts?: string[];
+  /**
+   * Условие применимости gate задачи: gate исполняется, только когда
+   * настоящий diff фазы задевает один из шаблонов путей или неявный вход
+   * gate; иначе пишется evidence `not-applicable`, которое не PASS.
+   */
+  when?: { paths: string[] };
 }
 /** Общие поля gate задачи и gate workspace. */
 const gateFields = z.object({
@@ -888,10 +910,18 @@ const gateFields = z.object({
 /**
  * `artifacts` gate задачи — расширением, а не общим полем: у gate workspace
  * своё поле с другим умолчанием, и общее поле сдвинуло бы его в середину
- * объекта, изменив digest политики прежних проверок.
+ * объекта, изменив digest политики прежних проверок. `when` (шаблоны путей
+ * harness, `gateWhenSchema`) — тоже только у gate задачи: совместная
+ * проверка выбирает gates по затронутым компонентам, а не по путям. Поле без
+ * умолчания: конфигурация без него сохраняет прежние digest.
  */
 export const gateList = z
-  .array(gateFields.extend({ artifacts: z.array(relativePath).min(1).max(16).optional() }))
+  .array(
+    gateFields.extend({
+      artifacts: z.array(relativePath).min(1).max(16).optional(),
+      when: gateWhenSchema.optional(),
+    }),
+  )
   .min(1);
 const bindingFields = z.object({
   runtime: z.enum(['codex', 'claude', 'demo']),
@@ -990,6 +1020,12 @@ export type Repository = z.infer<typeof repositorySchema>;
 export const workspaceGateSchema = gateFields.extend({
   repositoryId: id,
   artifacts: z.array(z.string().min(1)).default([]),
+  // Явный отказ вместо молчаливого удаления ключа: автор не должен считать
+  // совместную проверку условной, когда она исполняется всегда.
+  when: gateWhenSchema.optional().refine((value): boolean => value === undefined, {
+    error:
+      'when поддерживается только у gates компонента: совместная проверка выбирает gates по затронутым компонентам',
+  }),
 });
 export interface WorkspaceEvidence {
   /** Сколько выполнялся gate совместной проверки; нет у прежних записей. */
