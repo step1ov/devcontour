@@ -38,6 +38,7 @@ import {
   devcontourHandoffWithin,
   handoffRedactor,
   handoffResponse,
+  withoutIdleControllerStop,
   type DevContourHandoff,
 } from '../src/application/handoff.ts';
 import { command } from '../src/runner/process.ts';
@@ -1882,6 +1883,30 @@ test('session_handoff: завершённая доска — без остано
       devcontourHandoff(f.h, { boardId: board.id }).pack.repairs.map((r) => [r.status, r.used]),
       [['stale', 1]],
     );
+  } finally {
+    f.cleanup();
+  }
+});
+
+test('withoutIdleControllerStop: остановка, отброшенная пределом пакета, снимается и со счёта truncated.stops', () => {
+  const f = fixture();
+  try {
+    const { at } = oneBoard(f.h);
+    const base = at().pack;
+    const idle = {
+      ...base,
+      summary: { ...base.summary, open: 0 },
+      controller: { owner: 'server', until: base.at, live: true },
+      stops: [],
+      truncated: { ...base.truncated, stops: 2 },
+    };
+    assert.equal(withoutIdleControllerStop(idle).truncated.stops, 1);
+    // Без живого controller остановки нет и в отброшенных.
+    const free = { ...idle, controller: { ...idle.controller, live: false } };
+    assert.equal(withoutIdleControllerStop(free).truncated.stops, 2);
+    // Открытая работа — пакет как есть.
+    const open = { ...idle, summary: { ...idle.summary, open: 1 } };
+    assert.equal(withoutIdleControllerStop(open), open);
   } finally {
     f.cleanup();
   }

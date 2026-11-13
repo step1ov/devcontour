@@ -371,9 +371,12 @@ export function harnessOf(h: DevContour) {
  * controller, — обычное состояние, а не шаг ведущего.
  */
 export function withoutIdleControllerStop(pack: HandoffPack): HandoffPack {
-  if (pack.summary.open) return pack;
+  if (pack.summary.open || !pack.controller?.live) return pack;
   const stops = pack.stops.filter((s) => s.code !== 'CONTROLLER_BUSY');
-  return stops.length === pack.stops.length ? pack : { ...pack, stops };
+  if (stops.length < pack.stops.length) return { ...pack, stops };
+  // Остановку отбросил предел пакета: она — среди `truncated.stops`.
+  if (!pack.truncated.stops) return pack;
+  return { ...pack, truncated: { ...pack.truncated, stops: pack.truncated.stops - 1 } };
 }
 
 /** Наследуемое значение короче — обычное слово или число, а не учётные данные. */
