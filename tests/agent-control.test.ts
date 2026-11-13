@@ -1168,8 +1168,8 @@ test('Contract impact takes the document and artifacts from one commit even if H
     let armed = true;
     // Между чтением HEAD и закреплением артефактов появляется commit B.
     cp.spawn = function (this: unknown, command: string, args: string[], options: unknown) {
-      // Подкоманда — первый аргумент после флагов `-c` git хоста.
-      const sub = args.find((a, i) => a !== '-c' && args[i - 1] !== '-c');
+      // Подкоманда — первый аргумент после глобальных флагов git хоста.
+      const sub = args.find((a, i) => a !== '-c' && args[i - 1] !== '-c' && !a.startsWith('--'));
       if (armed && command === 'git' && sub === 'status') {
         armed = false;
         writeFileSync(join(repo.path, 'schema.json'), '{"price":"number"}\n');

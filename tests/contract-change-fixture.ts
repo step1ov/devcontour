@@ -11,11 +11,11 @@ import { loadedDigest } from '../src/core/service.ts';
 import { loadConfig } from '../src/runner/config.ts';
 
 /** Ревьюер-фикстура: одобряет и считает вызовы по предмету ревью. */
-// Аргументы git после флагов `-c ключ=значение`: git хоста (harness) ставит
-// перед командой флаги, снимающие исполняемые настройки.
+// Аргументы git после глобальных флагов (`-c ключ=значение`, `--no-replace-objects`):
+// git хоста (harness) ставит перед командой флаги, снимающие исполняемые настройки.
 export function gitCommand(args: string[]) {
   let i = 0;
-  while (args[i] === '-c') i += 2;
+  while (args[i] === '-c' || args[i]?.startsWith('--')) i += args[i] === '-c' ? 2 : 1;
   return args.slice(i);
 }
 export function reviewers(calls: string[]) {
