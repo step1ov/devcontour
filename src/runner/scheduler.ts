@@ -13,6 +13,7 @@ import { DevContour, waitBaseCheck } from '../core/service.ts';
 import { repository, repositories } from '../core/repositories.ts';
 import { validateWorkflow } from '../core/workflow.ts';
 import { TaskFailure } from '../core/failure.ts';
+import { STALE_BASE } from './base-update.ts';
 import { executionOf, type Execution } from '../harness/execution.ts';
 import { devcontourContextSource, pinnedSnapshot, taskPacks } from '../harness/host.ts';
 import { runtimeAdapters } from '../harness/adapters.ts';
@@ -280,7 +281,8 @@ export class Scheduler {
     if (!drift.length) return;
     throw new TaskFailure(
       'stale-base',
-      'База прогонов отстала от рабочей ветки: ' +
+      STALE_BASE +
+        ': ' +
         drift.map((d) => `${d.repositoryId} — ${d.branch} без ${d.behind} коммитов`).join('; ') +
         (sensitive.length
           ? `. Перемотка не выполнена автоматически: коммиты меняют приёмку или настройку контура (${sensitive.slice(0, 20).join(', ')})`

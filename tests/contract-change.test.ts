@@ -10,6 +10,7 @@ import {
   type ContractChange,
 } from '../src/runner/contract-change.ts';
 import { contractImpact } from '../src/runner/contract-impact.ts';
+import { STALE_BASE } from '../src/runner/base-update.ts';
 import { type AgentAdapter, type AgentRequest } from '../src/runner/adapters.ts';
 import { readyTasks } from '../src/core/graph.ts';
 import { command } from '../src/runner/process.ts';
@@ -52,6 +53,41 @@ test('A contract change runs as one command: review, rebind, plan review, base a
     assert.equal((await s.changes().start(s.proposal, 'codex')).status, 'unchanged');
   } finally {
     await s.remove();
+  }
+});
+
+test('F40: the base step lifts the runtime pause «base lags behind» once the base caught up; another runtime pause stays', async () => {
+  for (const [error, lifted] of [
+    [
+      `TaskFailure: ${STALE_BASE}: main — main без 1 коммитов. Выполните devcontour base-update (ведущий агент — с --by host), иначе исполнитель получит дерево без подготовленной работы.`,
+      true,
+    ],
+    ['Error: provider is down', false],
+  ] as const) {
+    const s = await stage();
+    try {
+      // Сбой такта очереди — та же запись, что у планировщика: пауза без
+      // причины и ошибка такта после неё.
+      s.h.store.change('scheduler.error', (st) => {
+        st.paused = true;
+        st.pauseReason = undefined;
+        st.pausedAt = new Date().toISOString();
+        return { error };
+      });
+      const started = await s.changes().start(s.proposal, 'codex');
+      const done = await s
+        .changes()
+        .advance((started as { operation: ContractChange }).operation.id);
+      assert.equal(done.status, 'completed', done.error);
+      assert.equal(
+        s.sh('rev-parse', `refs/heads/${s.h.config.targetBranch}`),
+        s.sh('rev-parse', 'HEAD'),
+        'база равна рабочей ветке',
+      );
+      assert.equal(s.store.read().paused, !lifted, error);
+    } finally {
+      await s.remove();
+    }
   }
 });
 
