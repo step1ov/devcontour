@@ -895,7 +895,7 @@ export async function doctor(
       .map((p) => `${p.id} ${p.version} → ${p.library}`)
       .join('; ')}. Решите: остаться на своей версии или перейти — context-adopt --pack <id>`;
   });
-  checks.push(...(await guideChecks(config)));
+  checks.push(...(await guideChecks(config, root)));
   await check('write-scope', async () => {
     const open = bindings
       .filter((b) => !b.review && !roleBinding(config, b.role, b.repo.id)?.writePaths?.length)
@@ -1121,34 +1121,43 @@ export async function doctor(
  * исправления. Проверяется основной репозиторий setup и компоненты, в которых
  * копии есть; репозиторий без копий вовсе не сверяется.
  */
-export async function guideChecks(
-  config: Pick<Config, 'repository' | 'repositories' | 'workspaceRoot'>,
-): Promise<Check[]> {
-  const paths = [...new Set([config.repository, ...config.repositories.map((r) => r.path)])];
+export async function guideChecks(config: Config, root: string): Promise<Check[]> {
   const checks: Check[] = [];
-  const hint = config.workspaceRoot ? `--workspace ${config.workspaceRoot}` : '--workspace <W>';
-  for (const path of paths) {
+  const target = guideTarget(config, root);
+  for (const { id, path } of guideRepositories(config)) {
     let entries;
     try {
       entries = await guideDrift(path);
     } catch (e) {
       checks.push({
-        id: `guides:${path}`,
+        id: `guides:${id}`,
         status: 'degraded',
-        detail: 'Копии руководств не читаются: ' + (e instanceof Error ? e.message : String(e)),
+        detail: `Копии руководств в ${path} не читаются: ${e instanceof Error ? e.message : String(e)}`,
       });
       continue;
     }
     if (!entries.length) continue;
-    const drift = guideDriftText(entries, hint);
+    const drift = guideDriftText(entries, target);
     checks.push({
-      id: `guides:${path}`,
+      id: `guides:${id}`,
       status: drift ? 'degraded' : 'passed',
-      detail: drift ?? 'Копии руководств DevContour совпадают с установленной версией',
+      detail: `${path}: ${drift ?? 'копии руководств DevContour совпадают с установленной версией'}`,
     });
   }
   return checks;
 }
+
+/** Репозитории, где могут лежать копии: компоненты и репозиторий setup. */
+export function guideRepositories(config: Config): { id: string; path: string }[] {
+  const listed = repositories(config).map((r) => ({ id: r.id, path: r.path }));
+  return listed.some((r) => r.path === config.repository)
+    ? listed
+    : [{ id: 'main', path: config.repository }, ...listed];
+}
+
+/** Как назвать конфигурацию в подсказке: workspace или каталог данных прежней конфигурации. */
+export const guideTarget = (config: Pick<Config, 'workspaceRoot'>, root: string) =>
+  config.workspaceRoot ? `--workspace ${config.workspaceRoot}` : `--data ${root}`;
 
 /**
  * Где лежат рабочие деревья попыток и проверок (`checkout-root.ts`). Каталог

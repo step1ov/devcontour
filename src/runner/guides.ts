@@ -1,8 +1,10 @@
 import { createHash } from 'node:crypto';
-import { mkdir, readFile, readdir, writeFile } from 'node:fs/promises';
-import { dirname, join, relative, resolve } from 'node:path';
+import { lstat, mkdir, readFile, readdir, realpath, rename, rm, writeFile } from 'node:fs/promises';
+import { basename, dirname, join, relative, resolve } from 'node:path';
 import { fileURLToPath } from 'node:url';
+import { checkDestination } from 'devcontour-harness';
 import { git } from './process.ts';
+import { PAST_GUIDE_DIGESTS } from './guide-history.ts';
 
 /**
  * Копии руководств DevContour в продукте (`docs/devcontour-*.md`).
@@ -50,7 +52,13 @@ export const GUIDES: ReadonlyMap<string, string> = new Map([
 ]);
 
 const MARKER = /^<!-- devcontour-guide sha256:([0-9a-f]{64}) -->\n/;
-const digest = (text: string) => createHash('sha256').update(text).digest('hex');
+export const guideDigest = (text: string) => createHash('sha256').update(text).digest('hex');
+const digest = guideDigest;
+/**
+ * Концы строк не различаются: checkout с CRLF (autocrlf, eol=crlf) и
+ * исходники DevContour, полученные так же, дают тот же digest, что и LF.
+ */
+const lf = (text: string) => text.replace(/\r\n/g, '\n');
 
 /** Копия с меткой: первая строка — digest текста под ней. */
 export const markGuide = (body: string) =>
@@ -58,54 +66,77 @@ export const markGuide = (body: string) =>
 
 /** Метка и текст под ней; без метки — `undefined`. */
 export function guideMarker(text: string): { digest: string; body: string } | undefined {
-  const match = MARKER.exec(text);
-  return match ? { digest: match[1], body: text.slice(match[0].length) } : undefined;
+  const normalized = lf(text);
+  const match = MARKER.exec(normalized);
+  return match ? { digest: match[1], body: normalized.slice(match[0].length) } : undefined;
 }
 
 /**
- * Текст копии по источнику: ссылки на другие перенесённые руководства ведут на
- * их копии, остальные становятся указанием на справочник DevContour.
+ * Тексты копий по источникам: ссылки на другие перенесённые руководства ведут
+ * на их копии, остальные становятся указанием на справочник DevContour.
+ * `read` — источник по пути относительно корня DevContour; генератор истории
+ * (`scripts/guide-history.ts`) передаёт чтение из прежних релизов.
  */
-async function guideBody(source: string) {
-  const text = await readFile(join(devcontourRoot, source), 'utf8');
-  return text.replace(
-    /\[([^\]]+)\]\(([^)]+\.(?:md|json)(?:#[^)]*)?)\)/g,
-    (match, label, target: string) => {
-      if (/^(https?:|#)/.test(target)) return match;
-      const [file, anchor] = target.split('#');
-      const sourceRelative = relative(
-        devcontourRoot,
-        resolve(devcontourRoot, dirname(source), file),
-      );
-      const installed = GUIDES.get(sourceRelative);
-      return installed
-        ? '[' + label + '](' + installed + (anchor ? '#' + anchor : '') + ')'
-        : label + ' (справочник DevContour: ' + sourceRelative + (anchor ? '#' + anchor : '') + ')';
-    },
-  );
+export async function renderGuideBodies(
+  read: (source: string) => Promise<string | undefined> = (source) =>
+    readFile(join(devcontourRoot, source), 'utf8'),
+): Promise<Map<string, string>> {
+  const bodies = new Map<string, string>();
+  for (const [source, destination] of GUIDES) {
+    const text = await read(source);
+    if (text === undefined) continue;
+    bodies.set(
+      destination,
+      lf(text).replace(
+        /\[([^\]]+)\]\(([^)]+\.(?:md|json)(?:#[^)]*)?)\)/g,
+        (match, label, target: string) => {
+          if (/^(https?:|#)/.test(target)) return match;
+          const [file, anchor] = target.split('#');
+          const sourceRelative = relative(
+            devcontourRoot,
+            resolve(devcontourRoot, dirname(source), file),
+          );
+          const installed = GUIDES.get(sourceRelative);
+          return installed
+            ? '[' + label + '](' + installed + (anchor ? '#' + anchor : '') + ')'
+            : label +
+                ' (справочник DevContour: ' +
+                sourceRelative +
+                (anchor ? '#' + anchor : '') +
+                ')';
+        },
+      ),
+    );
+  }
+  return bodies;
 }
 
 /** Копии этой версии: имя в `docs/` → полный текст с меткой. */
 export async function guideCopies(): Promise<Map<string, string>> {
   const copies = new Map<string, string>();
-  for (const [source, destination] of GUIDES)
-    copies.set(destination, markGuide(await guideBody(source)));
+  for (const [name, body] of await renderGuideBodies()) copies.set(name, markGuide(body));
   return copies;
 }
 
 export type GuideState =
   /** Совпадает с текущей версией. */
   | 'current'
-  /** Записана инструментом прежней версии и не правилась. */
+  /** Записана инструментом (эта метка или текст прошлого релиза) и не правилась. */
   | 'stale'
   /** Метка есть, текст под ней изменён в продукте. */
   | 'edited'
-  /** Копия прежней версии без метки, текст отличается от текущего. */
+  /** Копия без метки, текст не совпадает ни с одним релизом. */
   | 'unmarked'
   /** Копии нет. */
   | 'missing'
   /** Копия с меткой, которую эта версия больше не поставляет. */
-  | 'retired';
+  | 'retired'
+  /**
+   * Не обычный файл: symlink, жёсткая ссылка, каталог или путь через symlink.
+   * Инструмент через ссылки не читает и не пишет — запись ушла бы за
+   * пределы репозитория или в чужой файл.
+   */
+  | 'not-a-file';
 
 export interface GuideEntry {
   /** Путь относительно репозитория: `docs/devcontour-*.md`. */
@@ -113,79 +144,117 @@ export interface GuideEntry {
   state: GuideState;
 }
 
-async function readText(path: string) {
+type Probe = { kind: 'absent' } | { kind: 'file'; text: string } | { kind: 'unsafe' };
+
+/** Путь копии: отсутствует, обычный файл (с текстом) или небезопасен. */
+async function probe(root: string, path: string): Promise<Probe> {
+  const target = join(root, path);
   try {
-    return await readFile(path, 'utf8');
+    await checkDestination(target, { root });
+  } catch {
+    return { kind: 'unsafe' };
+  }
+  let stats;
+  try {
+    stats = await lstat(target);
   } catch (error) {
-    if ((error as NodeJS.ErrnoException).code === 'ENOENT') return undefined;
+    if ((error as NodeJS.ErrnoException).code === 'ENOENT') return { kind: 'absent' };
     throw error;
+  }
+  if (!stats.isFile() || stats.nlink > 1) return { kind: 'unsafe' };
+  return { kind: 'file', text: await readFile(target, 'utf8') };
+}
+
+/** Есть ли что-то по пути (без следования по ссылке в конце). */
+async function present(path: string) {
+  try {
+    await lstat(path);
+    return true;
+  } catch {
+    return false;
   }
 }
 
-function stateOf(text: string | undefined, expected: string): GuideState {
-  if (text === undefined) return 'missing';
+function stateOf(found: Probe, name: string, expected: string): GuideState {
+  if (found.kind === 'absent') return 'missing';
+  if (found.kind === 'unsafe') return 'not-a-file';
+  const text = lf(found.text);
   if (text === expected) return 'current';
   const marker = guideMarker(text);
-  if (!marker)
-    // Копия прежней версии без метки, текст которой совпадает с текущим:
-    // замена добавит только метку.
-    return text === guideMarker(expected)!.body ? 'stale' : 'unmarked';
-  return digest(marker.body) === marker.digest ? 'stale' : 'edited';
+  if (marker) return digest(marker.body) === marker.digest ? 'stale' : 'edited';
+  // Копия без метки — из релиза до меток: совпадение с текстом какого-либо
+  // релиза (или текущим) доказывает, что её не правили.
+  const known = PAST_GUIDE_DIGESTS[name] ?? [];
+  return text === guideMarker(expected)!.body || known.includes(digest(text))
+    ? 'stale'
+    : 'unmarked';
 }
 
 /**
  * Состояние копий в репозитории. Пустой список — копий нет вовсе (setup в
- * этот репозиторий их не клал): отсутствие всех руководств не расхождение.
+ * этот репозиторий их не клал или их убрали): отсутствие всех руководств не
+ * расхождение, и обновление такой репозиторий не трогает.
  */
 export async function guideDrift(repository: string): Promise<GuideEntry[]> {
+  const root = await realpath(repository);
   const copies = await guideCopies();
   const entries: GuideEntry[] = [];
-  for (const [name, expected] of copies)
-    entries.push({
-      path: 'docs/' + name,
-      state: stateOf(await readText(join(repository, 'docs', name)), expected),
-    });
+  let exists = false;
+  for (const [name, expected] of copies) {
+    const path = 'docs/' + name;
+    const found = await probe(root, path);
+    if (found.kind === 'file' || (found.kind === 'unsafe' && (await present(join(root, path)))))
+      exists = true;
+    entries.push({ path, state: stateOf(found, name, expected) });
+  }
   // Лишние — только копии с меткой: прочие `docs/devcontour-*.md` (заметки
   // прогресса и т. п.) инструменту не принадлежат.
   let names: string[] = [];
   try {
-    names = await readdir(join(repository, 'docs'));
+    names = await readdir(join(root, 'docs'));
   } catch {
     /* Нет docs — нет и копий. */
   }
   for (const name of names.sort())
     if (/^devcontour-.*\.md$/.test(name) && !copies.has(name)) {
-      const text = await readText(join(repository, 'docs', name));
-      if (text !== undefined && guideMarker(text))
+      const found = await probe(root, 'docs/' + name);
+      if (found.kind === 'file' && guideMarker(found.text)) {
+        exists = true;
         entries.push({ path: 'docs/' + name, state: 'retired' });
+      }
     }
-  return entries.every((e) => e.state === 'missing') ? [] : entries;
+  return exists ? entries : [];
 }
 
 /** Расхождение копий одной строкой с командой исправления; без расхождения — `undefined`. */
-export function guideDriftText(entries: GuideEntry[], workspaceHint = '--workspace <W>') {
+export function guideDriftText(entries: GuideEntry[], target = '--workspace <W>') {
   const by = (state: GuideState) => entries.filter((e) => e.state === state).map((e) => e.path);
   const parts: string[] = [];
   const named = (label: string, paths: string[]) =>
     paths.length && parts.push(`${label}: ${paths.join(', ')}`);
   named('устарели', by('stale'));
   named('отсутствуют', by('missing'));
-  named('копии прежней версии без метки', by('unmarked'));
+  named('копии без метки, не совпадающие ни с одним релизом', by('unmarked'));
   named('изменены в продукте', by('edited'));
   named('больше не поставляются', by('retired'));
+  named('не обычные файлы (symlink или жёсткая ссылка)', by('not-a-file'));
   if (!parts.length) return undefined;
   const fixes: string[] = [];
   if (by('stale').length || by('missing').length)
-    fixes.push(`обновите: devcontour guides-refresh ${workspaceHint}`);
+    fixes.push(`обновите: devcontour guides-refresh ${target}`);
   if (by('unmarked').length)
     fixes.push(
-      `копии без метки заменяются только явно: devcontour guides-refresh --replace-unmarked ${workspaceHint} (файл должен быть закоммичен без локальных правок — прежний текст останется в Git)`,
+      `копии без метки заменяются только явно: devcontour guides-refresh --replace-unmarked ${target} (файл должен быть закоммичен без локальных правок; правки продукта в нём будут заменены — прежний текст останется в Git)`,
     );
   if (by('edited').length)
     fixes.push(
       'изменённые копии обновление не трогает: перенесите правку в собственный документ, удалите копию и повторите guides-refresh',
     );
   if (by('retired').length) fixes.push('снятые копии удалите вручную, проверив ссылки AGENTS.md');
+  if (by('not-a-file').length)
+    fixes.push(
+      'ссылки инструмент не читает и не пишет: замените их обычными файлами или удалите и повторите guides-refresh',
+    );
   return `Копии руководств DevContour расходятся с установленной версией — ${parts.join('; ')}. Исправление: ${fixes.join('; ')}.`;
 }
 
@@ -199,45 +268,82 @@ async function committedUnchanged(repository: string, path: string) {
 }
 
 /**
- * Обновить копии в рабочем дереве репозитория. Пишутся только файлы набора
- * этой версии в состояниях `stale` и `missing` (и `unmarked` по явному флагу,
- * если файл закоммичен без локальных изменений). Изменённые в продукте и
- * снятые копии остаются как есть и называются в ответе. Ничего не коммитится.
+ * Записать копию: путь и предки проверяются заново (не symlink, внутри
+ * репозитория), текст ложится во временный файл рядом и переносится rename —
+ * оборванная запись не оставляет половину копии.
+ */
+async function writeCopy(root: string, path: string, content: string) {
+  const target = join(root, path);
+  const found = await probe(root, path);
+  if (found.kind === 'unsafe') throw new Error('Путь копии стал небезопасным: ' + path);
+  await mkdir(dirname(target), { recursive: true });
+  await checkDestination(target, { root });
+  const temp = join(
+    dirname(target),
+    `.${basename(target)}.${process.pid}.${Math.random().toString(36).slice(2)}.tmp`,
+  );
+  await writeFile(temp, content, { flag: 'wx' });
+  try {
+    await rename(temp, target);
+  } catch (error) {
+    await rm(temp, { force: true });
+    throw error;
+  }
+}
+
+export interface GuideRefresh {
+  repository: string;
+  /** Копий в репозитории нет: обновление его не трогает. */
+  skipped?: 'no-copies';
+  written: string[];
+  /** Заменённые по `--replace-unmarked`: правки продукта в них видны в git diff. */
+  replacedUnmarked: string[];
+  kept: { path: string; state: GuideState; reason: string }[];
+}
+
+const keptReason: Partial<Record<GuideState, string>> = {
+  edited:
+    'копию правили в продукте; перенесите правку в собственный документ, удалите копию и повторите',
+  retired: 'эта версия руководство не поставляет; удалите вручную, проверив ссылки AGENTS.md',
+  'not-a-file':
+    'не обычный файл (symlink, жёсткая ссылка или путь через symlink); замените обычным файлом или удалите и повторите',
+};
+
+/**
+ * Обновить копии в рабочем дереве репозитория, где они уже есть. Пишутся
+ * только файлы набора этой версии в состояниях `stale` и `missing` (и
+ * `unmarked` по явному флагу, если файл закоммичен без локальных изменений).
+ * Изменённые, снятые и не обычные файлы остаются как есть и называются в
+ * ответе. Ничего не коммитится.
  */
 export async function refreshGuides(
   repository: string,
   options: { replaceUnmarked?: boolean } = {},
-) {
+): Promise<GuideRefresh> {
+  const root = await realpath(repository);
   const copies = await guideCopies();
-  const entries = await guideDrift(repository);
-  const written: string[] = [];
-  const kept: { path: string; state: GuideState; reason: string }[] = [];
-  for (const entry of entries.length
-    ? entries
-    : [...copies.keys()].map((name) => ({ path: 'docs/' + name, state: 'missing' as const }))) {
-    const replace =
-      entry.state === 'stale' ||
-      entry.state === 'missing' ||
-      (entry.state === 'unmarked' &&
-        options.replaceUnmarked &&
-        (await committedUnchanged(repository, entry.path)));
-    if (replace) {
-      const target = join(repository, entry.path);
-      await mkdir(dirname(target), { recursive: true });
-      await writeFile(target, copies.get(entry.path.slice('docs/'.length))!);
-      written.push(entry.path);
-    } else if (entry.state !== 'current')
-      kept.push({
+  const entries = await guideDrift(root);
+  const result: GuideRefresh = { repository, written: [], replacedUnmarked: [], kept: [] };
+  if (!entries.length) return { ...result, skipped: 'no-copies' };
+  for (const entry of entries) {
+    if (entry.state === 'current') continue;
+    const unmarked =
+      entry.state === 'unmarked' &&
+      !!options.replaceUnmarked &&
+      (await committedUnchanged(root, entry.path));
+    if (entry.state === 'stale' || entry.state === 'missing' || unmarked) {
+      await writeCopy(root, entry.path, copies.get(entry.path.slice('docs/'.length))!);
+      result.written.push(entry.path);
+      if (unmarked) result.replacedUnmarked.push(entry.path);
+    } else
+      result.kept.push({
         ...entry,
         reason:
-          entry.state === 'edited'
-            ? 'копию правили в продукте; перенесите правку в собственный документ, удалите копию и повторите'
-            : entry.state === 'retired'
-              ? 'эта версия руководство не поставляет; удалите вручную, проверив ссылки AGENTS.md'
-              : options.replaceUnmarked
-                ? 'копия без метки не закоммичена или имеет локальные изменения; закоммитьте или отмените их и повторите'
-                : 'копия прежней версии без метки; замените явно: --replace-unmarked',
+          keptReason[entry.state] ??
+          (options.replaceUnmarked
+            ? 'копия без метки не закоммичена или имеет локальные изменения; закоммитьте или отмените их и повторите'
+            : 'копия без метки не совпадает ни с одним релизом; замените явно: --replace-unmarked'),
       });
   }
-  return { repository, written, kept };
+  return result;
 }

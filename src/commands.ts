@@ -31,8 +31,8 @@ import { markLeadActivity } from './runner/lead-activity.ts';
 import { serveMcp } from './server/mcp.ts';
 import { readAgentJson } from './runner/json-file.ts';
 import { repositories } from './core/repositories.ts';
-import { dataDoctor, doctor, doctorState } from './runner/doctor.ts';
-import { guideDrift, refreshGuides } from './runner/guides.ts';
+import { dataDoctor, doctor, doctorState, guideRepositories } from './runner/doctor.ts';
+import { refreshGuides, type GuideRefresh } from './runner/guides.ts';
 import { cleanupEnvironment } from './runner/environment.ts';
 import { environmentRoots } from './runner/checkout-root.ts';
 import { importKnowledge } from './runner/knowledge.ts';
@@ -726,10 +726,19 @@ async function main() {
   // не меняется, коммита нет — копии ложатся в рабочее дерево.
   if (operation === 'guides-refresh') {
     const replaceUnmarked = args.includes('--replace-unmarked');
-    const results = [];
-    for (const path of new Set([config.repository, ...config.repositories.map((r) => r.path)]))
-      if (path === config.repository || (await guideDrift(path)).length)
-        results.push(await refreshGuides(path, { replaceUnmarked }));
+    const results: (GuideRefresh & { id: string })[] = [];
+    // Только репозитории, где копии уже есть: doctor называет расхождение
+    // ровно там же, а репозиторий без копий команда не трогает.
+    for (const { id, path } of guideRepositories(config))
+      results.push({ id, ...(await refreshGuides(path, { replaceUnmarked })) });
+    // Пакет контекста, который сам назвал копию, закреплён по её прежнему
+    // тексту: после коммита закрепление нужно обновить.
+    const pinned = config.contextPacks.flatMap((pack) => {
+      const written = results.find((r) => r.id === pack.repositoryId)?.written ?? [];
+      const hit = [...pack.files, ...(pack.references ?? [])].filter((f) => written.includes(f));
+      return hit.length ? [`${pack.id} (${hit.join(', ')})`] : [];
+    });
+    const replaced = results.flatMap((r) => r.replacedUnmarked);
     console.log(
       JSON.stringify(
         {
@@ -737,6 +746,16 @@ async function main() {
           next: [
             'Копии записаны в рабочее дерево и не закоммичены: проверьте git diff и закоммитьте их на рабочей ветке.',
             'Прогоны видят новые копии, только когда рабочая ветка перенесена в их базу: base-update.',
+            ...(replaced.length
+              ? [
+                  `Заменены копии без метки: ${replaced.join(', ')}. Проверьте в git diff, не было ли в них правок продукта; прежний текст — в истории Git.`,
+                ]
+              : []),
+            ...(pinned.length
+              ? [
+                  `Копии входят в пакеты контекста: ${pinned.join('; ')}. Их закрепление относится к прежнему тексту: после коммита и base-update приостановите очередь (queue --pause) и выполните context-lock.`,
+                ]
+              : []),
             ...(results.some((r) => r.kept.length)
               ? [
                   'Оставленные копии названы в kept с причиной; doctor продолжит называть расхождение.',
