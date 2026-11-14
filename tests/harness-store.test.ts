@@ -382,6 +382,100 @@ for (const [name, open] of [
     s.close();
   });
 
+  test(`${name}: Store.change внутри открытой транзакции отклоняется; журнал не получает события о несохранённом изменении`, () => {
+    const s = open(temp());
+    seed(s.store);
+    const events = s.store.eventCount();
+    const nested = /внутри открытой транзакции изменения/;
+    // Внешняя транзакция записала бы при фиксации свою копию документа поверх
+    // вложенного изменения, а событие вложенного изменения осталось бы в журнале.
+    let caught: unknown;
+    s.transact('run.claimed', (tx) => {
+      tx.putWork({ ...tx.work('T-1')!, status: 'running' });
+      try {
+        s.store.change('task.edited', (st) => {
+          st.tasks[0].title = 'Вложенное изменение';
+          return { taskId: 'T-1' };
+        });
+      } catch (error) {
+        caught = error;
+      }
+    });
+    assert.match(String(caught), nested);
+    assert.equal(s.store.read().tasks[0].status, 'running', 'внешняя транзакция сохранена');
+    assert.equal(s.store.read().tasks[0].title, 'Добавить приветствие');
+    assert.deepEqual(
+      s.store.allEvents().slice(events).map((e) => e.type),
+      ['run.claimed'],
+      'события вложенного изменения в журнале нет',
+    );
+    // Транзакция хоста: то же правило; продуктовые поля меняются в её документе.
+    assert.throws(
+      () => s.host('task.edited', () => s.store.change('task.edited', () => undefined)),
+      nested,
+    );
+    // Обратный порядок: транзакция исполнения внутри Store.change тоже потеряла бы запись.
+    assert.throws(
+      () =>
+        s.store.change('task.edited', (st) => {
+          st.tasks[0].title = 'Снаружи';
+          s.transact('run.phase', (tx) => tx.putWork({ ...tx.work('T-1')!, status: 'verifying' }));
+        }),
+      nested,
+    );
+    assert.throws(
+      () => s.store.change('a', () => s.store.update('b', (d) => d.current)),
+      nested,
+    );
+    assert.equal(s.store.read().tasks[0].title, 'Добавить приветствие');
+    assert.equal(s.store.read().tasks[0].status, 'running');
+    assert.equal(s.store.eventCount(), events + 1);
+    // Отказ не оставляет хранилище в «открытом» изменении: следующие записи проходят.
+    s.store.change('task.edited', (st) => {
+      st.tasks[0].title = 'После отказа';
+    });
+    s.host('task.edited', (h) => {
+      h.state.tasks[0].description = 'Через документ транзакции';
+    });
+    assert.equal(s.store.read().tasks[0].title, 'После отказа');
+    assert.equal(s.store.read().tasks[0].description, 'Через документ транзакции');
+    assert.equal(s.store.eventCount(), events + 3);
+    s.close();
+  });
+
+  test(`${name}: собственный отказ изменения не оставляет его открытым; Store.change внутри Store.atomic вне изменения разрешён`, () => {
+    const s = open(temp());
+    seed(s.store);
+    const events = s.store.eventCount();
+    assert.throws(
+      () =>
+        s.store.update('task.edited', (d) => {
+          d.edit().tasks[0].title = 'Откатится';
+          throw new Error('свой отказ');
+        }),
+      /свой отказ/,
+    );
+    assert.equal(s.store.read().tasks[0].title, 'Добавить приветствие');
+    s.store.update('task.edited', (d) => {
+      d.edit().tasks[0].title = 'Следующее изменение';
+    });
+    assert.equal(s.store.read().tasks[0].title, 'Следующее изменение');
+    // Store.atomic без открытого изменения документа не держит: изменения в
+    // нём идут одно за другим, каждое видит предыдущее.
+    s.store.atomic(() => {
+      s.store.change('task.edited', (st) => {
+        st.tasks[0].title = 'Первое';
+      });
+      s.store.change('task.edited', (st) => {
+        st.tasks[0].description = st.tasks[0].title + ' и второе';
+      });
+    });
+    assert.equal(s.store.read().tasks[0].title, 'Первое');
+    assert.equal(s.store.read().tasks[0].description, 'Первое и второе');
+    assert.equal(s.store.eventCount(), events + 3);
+    s.close();
+  });
+
   test(`${name}: событие без изменения документа пишется Store.appendEvent; heartbeat события не пишет`, () => {
     const s = open(temp());
     seed(s.store);

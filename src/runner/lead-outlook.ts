@@ -5,7 +5,7 @@
 import type { WorkflowJob } from '../core/lead-workflow.ts';
 import { DomainError, unverifiedFinding, type DevContourState, type Task } from '../core/model.ts';
 import type { DevContour } from '../core/service.ts';
-import { carriedTaskIds } from '../core/work-status.ts';
+import { carriedTaskIds, heldBaseOf } from '../core/work-status.ts';
 import { repairDecision, type RepairDecision } from '../core/repair.ts';
 
 /** Решение по эпизоду восстановления свойства (`recoverProperties`). */
@@ -108,7 +108,9 @@ export function repairStep(h: DevContour, job: WorkflowJob, taskIds: readonly st
  * или оставить. Стадия 1 снимает исходную паузу («очередь не запускали»),
  * паузу штатной остановки и паузу человека, поставленную до старта задания;
  * паузу отказа runtime и ожидание проверки базы не снимает. Стадия 2 снимает
- * только паузу остановки. С выполненными задачами пауза не трогается.
+ * только паузу остановки. С выполненными задачами пауза не трогается. При
+ * удержанном переносе базы (`heldBaseOf`) пауза не снимается ни на одной
+ * стадии: её снимает подтверждение человека.
  */
 export function pauseStep(
   s: DevContourState,
@@ -117,6 +119,11 @@ export function pauseStep(
 ): { checkBase: boolean; lift: boolean } {
   if (tasks.every((t) => t.status === 'done')) return { checkBase: false, lift: false };
   const checkBase = s.paused && s.pauseReason === 'base-check';
+  // Удержанный перенос базы (D42) подтверждает только человек. Снятие любой
+  // паузы снимает и ожидание проверки базы (`resume`), поэтому при удержании
+  // цикл не снимает ни паузу человека до старта задания, ни паузу остановки:
+  // иначе очередь пошла бы на неподтверждённой базе.
+  const held = !!heldBaseOf(s);
   if (job.stage === 1) {
     const decided =
       s.paused &&
@@ -124,9 +131,9 @@ export function pauseStep(
         // Перенесённую базу проверяет цикл (или человек): само ожидание цикл не снимает.
         s.pauseReason === 'base-check' ||
         operatorDecided(s, job));
-    return { checkBase, lift: !decided };
+    return { checkBase, lift: !decided && !held };
   }
-  return { checkBase, lift: s.paused && s.pauseReason === 'shutdown' };
+  return { checkBase, lift: s.paused && s.pauseReason === 'shutdown' && !held };
 }
 
 /** Задачи текущей ревизии доски без перенесённых из принятой. */
@@ -312,7 +319,10 @@ export function loopOutlook(h: DevContour, s: DevContourState, job: WorkflowJob)
 export function liftsPause(h: DevContour, s: DevContourState, job: WorkflowJob): boolean {
   if (!s.paused) return false;
   const { stage, outlook } = loopAhead(h, s, job);
-  if (outlook.step === 'lift-pause' || outlook.step === 'check-base') return true;
+  if (outlook.step === 'lift-pause') return true;
+  // Удержанное ожидание проверка базы не снимет, пока перенос не подтвердит
+  // человек (или ревью не одобрит документ контракта).
+  if (outlook.step === 'check-base') return !heldBaseOf(s);
   const first =
     outlook.step === 'repair' ||
     (outlook.step === 'recovery' && (outlook.action === 'retry-task' || outlook.action === 'wait'));

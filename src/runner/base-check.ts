@@ -1,10 +1,20 @@
 import { execFileSync } from 'node:child_process';
 import { randomUUID } from 'node:crypto';
-import { runGatesAt, type EvidenceRecord } from 'devcontour-harness';
+import {
+  changedPaths,
+  gateBasis,
+  gateDecisions,
+  runGatesAt,
+  type ChangedPaths,
+  type EvidenceRecord,
+  type GateApplicability,
+} from 'devcontour-harness';
 import { baseMovesOf, type DevContour } from '../core/service.ts';
-import { repositories, repository } from '../core/repositories.ts';
+import type { DevContourState } from '../core/model.ts';
+import { dependsOnRepository, repositories, repository } from '../core/repositories.ts';
 import { executionOf } from '../harness/execution.ts';
-import { git } from './process.ts';
+import { CONSUMER_VERSION } from '../harness/host.ts';
+import { git, isAncestor } from './process.ts';
 import { controllerBoundary } from './checks.ts';
 import { checkoutRootOption, workspaceCheckoutRoot } from './checkout-root.ts';
 import { journalError } from './board-coverage.ts';
@@ -27,10 +37,45 @@ export interface BaseCheck {
   passed: boolean;
   gates: string[];
   failures: { gate: string; message: string }[];
+  /**
+   * Evidence исполненных gates и — для перенесённых (`carried`) — исходное
+   * evidence проверки-источника: те же `id` и `runId` встречаются в
+   * нескольких записях.
+   */
   evidence: EvidenceRecord[];
   at: string;
   /** Прогонов этой базы под этим договором (нет поля — один). */
   tries?: number;
+  /**
+   * Основание каждого gate профиля (`gateBasis` harness: определение,
+   * ресурсы, предпосылки, окружение, lifecycle, изоляция, версия harness).
+   * Нет поля — запись прежней версии: её результат не переносится (D51).
+   */
+  basis?: Record<string, string>;
+  /**
+   * SHA баз компонентов, от которых этот зависит (`dependsOn`, транзитивно):
+   * снимки зависимостей — вход gates. Перенос результата требует тех же SHA.
+   */
+  providers?: Record<string, string>;
+  /** Версия DevContour, исполнившая проверку: другая версия не переносит её результат. */
+  devcontour?: string;
+  /**
+   * Gates, результат которых перенесён с прошедшей проверки предка, а не
+   * исполнен на этом SHA (D51): gate с `when.paths`, чьих путей и неявных
+   * входов diff от SHA его исполнения до этой базы не задел. Их evidence —
+   * исходное, на SHA исполнения (`from`).
+   */
+  carried?: BaseCarry[];
+}
+/** Перенесённый результат gate проверки базы и diff, по которому он перенесён. */
+export interface BaseCarry {
+  gate: string;
+  /** SHA, на котором gate исполнялся и прошёл (его evidence). */
+  from: string;
+  /** Прошедшая проверка базы, из записи которой взят результат. */
+  anchor: string;
+  /** Сведения о diff `from..sha`: шаблоны, число, первые пути, digest списка. */
+  applicability: GateApplicability;
 }
 /**
  * Повторов провалившейся проверки базы. Провал gate базы бывает и сбоем среды
@@ -47,12 +92,280 @@ const targetSha = (path: string, branch: string) =>
     timeout: 10000,
   }).trim();
 
+/** Что проверка базы исполняет и что переносит с прошедшей проверки предка. */
+interface BasePlan {
+  /** Gates к исполнению на этом SHA (с предпосылками — их добавит harness). */
+  run: string[];
+  carried: BaseCarry[];
+  /** Исходное evidence перенесённых gates (на SHA их исполнения). */
+  evidence: EvidenceRecord[];
+  basis: Record<string, string>;
+  providers: Record<string, string>;
+  /** Чувствительные пути контура на диапазоне переноса: ничего не перенесено. */
+  blocked?: string[];
+}
+/** Возраст evidence, дальше которого результат gate не переносится (D51). */
+export const BASE_CARRY_MAX_AGE_MS = 7 * 24 * 60 * 60 * 1000;
+/** Сколько последних прошедших проверок базы просматривается в поисках предка. */
+export const BASE_CARRY_ANCHORS = 50;
+/** Базы поставщиков записи и текущие — одни и те же (нет поля — нет поставщиков). */
+const sameProviders = (r: Pick<BaseCheck, 'providers'>, providers: Record<string, string>) =>
+  JSON.stringify(Object.entries(r.providers ?? {}).sort()) ===
+  JSON.stringify(Object.entries(providers).sort());
+/**
+ * План проверки базы `sha` компонента (D51). Результат gate переносится с
+ * последней прошедшей проверки базы-предка, только когда harness сам не
+ * исполнил бы его в фазе задачи (`gateDecisions` — то же правило, что у
+ * попыток, F22): у gate есть `when.paths`; его основание (`gateBasis`),
+ * договор компонента и версия DevContour те же; его evidence — PASS на
+ * SHA-предке, не старше `BASE_CARRY_MAX_AGE_MS`, и после той проверки gate не
+ * проваливался на проверке базы; полный diff от этого SHA до базы не задевает
+ * ни его путей, ни неявных входов harness (защищённые пути, каталог harness,
+ * манифесты и lockfiles, пути из команды); он не предпосылка исполняемого
+ * gate. Базы компонентов-поставщиков (`providers`) — те же, что при той
+ * проверке: diff поставщика правило путей не видит. Diff, задевший
+ * чувствительный путь контура (документы и артефакты контрактов, файлы
+ * context packs, генерируемые пути, файл конфигурации, данные контура —
+ * `sensitiveBaseEntries`), не переносит ничего: такой перенос мог снять
+ * человек без gates, и условные gates исполняются все. Без прошедшего
+ * предка — весь профиль, как прежде.
+ */
+async function basePlan(
+  h: DevContour,
+  context: {
+    policy: ReturnType<typeof executionOf>['engine']['policy'];
+    /** Версия движка — та же, что в основании gates попыток. */
+    harness: string;
+    dataRoot: string;
+  },
+  repositoryId: string,
+  sha: string,
+  policyDigest: string,
+  providers: Record<string, string>,
+): Promise<BasePlan> {
+  const { policy } = context;
+  const repo = repository(h.config, repositoryId);
+  const all = repo.gates.map((g) => g.id);
+  const policyRepo = policy.repositories.find((r) => r.id === repositoryId);
+  if (!policyRepo) return { run: all, carried: [], evidence: [], basis: {}, providers };
+  const basis = Object.fromEntries(
+    policyRepo.gates.map((g) => [g.id, gateBasis(policy, policyRepo, g, context.harness)]),
+  );
+  const full: BasePlan = { run: all, carried: [], evidence: [], basis, providers };
+  if (!policyRepo.gates.some((g) => g.when)) return full;
+  const history = Object.values(h.store.localRecords<BaseCheck>(BASE_CHECK, repositoryId)).sort(
+    (a, b) => b.at.localeCompare(a.at),
+  );
+  // Последняя прошедшая проверка базы-предка под тем же договором, версией
+  // DevContour и базами поставщиков; просмотр ограничен, как у harness.
+  const records = history
+    .filter(
+      (r) =>
+        r.passed &&
+        r.sha !== sha &&
+        r.policyDigest === policyDigest &&
+        r.basis &&
+        r.devcontour === CONSUMER_VERSION &&
+        sameProviders(r, providers),
+    )
+    .slice(0, BASE_CARRY_ANCHORS);
+  let anchor: BaseCheck | undefined;
+  for (const r of records)
+    if (await isAncestor(repo.path, r.sha, sha)) {
+      anchor = r;
+      break;
+    }
+  if (!anchor) return full;
+  const source = anchor;
+  // Провал gate на проверке базы после источника (под тем же договором) —
+  // свежее наблюдение, которое перенос не перекрывает: например, сбой среды.
+  const failedSince = new Set(
+    history
+      .filter((r) => r.at > source.at && r.policyDigest === policyDigest)
+      .flatMap((r) => r.failures.map((f) => f.gate)),
+  );
+  const now = Date.now();
+  const diffs = new Map<string, Promise<ChangedPaths>>();
+  const changed = new Map<string, ChangedPaths>();
+  for (const g of policyRepo.gates) {
+    if (!g.when || source.basis?.[g.id] !== basis[g.id] || failedSince.has(g.id)) continue;
+    const own = source.evidence.filter((e) => e.gate === g.id);
+    // Только исполненный PASS gate (не потребителя) на одном SHA, не старше
+    // предела: неприменимость не переносится.
+    if (
+      !own.length ||
+      own.some(
+        (e) =>
+          e.kind !== 'test' ||
+          e.consumer !== undefined ||
+          !e.passed ||
+          e.sha !== own[0].sha ||
+          !(now - Date.parse(e.createdAt) <= BASE_CARRY_MAX_AGE_MS),
+      )
+    )
+      continue;
+    const at = own[0].sha;
+    if (!(await isAncestor(repo.path, at, sha))) continue;
+    if (!diffs.has(at)) diffs.set(at, changedPaths(repo.path, [{ from: at, to: sha }]));
+    changed.set(g.id, await diffs.get(at)!);
+  }
+  if (!changed.size) return full;
+  // Чувствительные пути контура на диапазоне от SHA исполнения: harness их
+  // неявными входами не считает, а перенос через них мог пройти без gates.
+  const state = h.store.read();
+  const blocked: string[] = [];
+  for (const at of diffs.keys())
+    for (const e of await sensitiveBaseEntries(h, context.dataRoot, state, repositoryId, at, sha))
+      blocked.push(e.path);
+  if (blocked.length) return { ...full, blocked: [...new Set(blocked)].slice(0, 20) };
+  const decisions = gateDecisions({
+    repo: policyRepo,
+    scope: policyRepo.gates,
+    proof: new Set(),
+    changedFor: (g) => changed.get(g.id),
+  });
+  const carried: BaseCarry[] = [];
+  for (const d of decisions)
+    if (!d.run && d.record)
+      carried.push({
+        gate: d.gate.id,
+        from: changed.get(d.gate.id)!.ranges[0].from,
+        anchor: source.sha,
+        applicability: d.record,
+      });
+  if (!carried.length) return full;
+  const ids = new Set(carried.map((c) => c.gate));
+  return {
+    run: all.filter((id) => !ids.has(id)),
+    carried,
+    evidence: source.evidence.filter((e) => ids.has(e.gate)),
+    basis,
+    providers,
+  };
+}
 /**
  * Граница записи проверки: fencing задания и отмена. Закрывающее событие
  * (`*.passed`/`*.failed`) пишется и после отмены (`closing`), иначе начатая
  * проверка оставалась бы в журнале без окончания; fencing соблюдается и тогда.
  */
 export type CheckGuard = (options?: { closing?: boolean }) => void;
+/** Предел путей в причине удержания: остальные — в журнале переноса. */
+const HELD_PATHS = 20;
+
+/**
+ * Причина удержанного переноса (`base.check.held`) — единственный источник,
+ * из которого её читают остановка очереди (`stopReason`), центр внимания,
+ * `session_handoff`, `workflow_start` и ответ `base-update`
+ * (`heldBaseWait`/`heldBasePaths`): пути и действие оператора.
+ */
+export const heldBaseDetail = (paths: readonly string[]) =>
+  `${BASE_HELD_DETAIL} (${paths.slice(0, HELD_PATHS).join(', ')}): gates этой базы его не подтверждают. Перенос проверяет и подтверждает оператор: «Подтвердить и запустить» в «Внимании» панели; ведущий агент это ожидание сам не снимает. Сам цикл снимает только документы контрактов в редакции, одобренной независимым ревью (review-contract); изменение приёмки — через contract-change`;
+
+/**
+ * Заменить причину ожидания `base-check` событием `type` — в одной
+ * транзакции со сверкой: ожидание есть и, если передано `at`, это то же
+ * ожидание (иначе его поставил более поздний перенос или оно снято).
+ * `same` — причина уже та же, события нет; `gone` — ожидания нет.
+ */
+function setBaseWaitDetail(
+  h: DevContour,
+  type: string,
+  detail: string,
+  data: Record<string, unknown>,
+  options: {
+    guard?: CheckGuard;
+    at?: string;
+    /**
+     * Удержание: пауза отказа runtime становится паузой `base-check`. Иначе
+     * снятие причины отказа (`clearFailure` при повторе задачи) вернуло бы
+     * выдачу, оставив удержанное ожидание неподтверждённым.
+     */
+    held?: boolean;
+  } = {},
+): 'set' | 'same' | 'gone' {
+  return h.store.atomic(() => {
+    options.guard?.();
+    const state = h.store.read();
+    const wait = state.waits?.find((w) => w.kind === 'base-check');
+    if (!wait || (options.at !== undefined && wait.at !== options.at)) return 'gone';
+    const repause = !!options.held && state.paused && state.pauseReason === 'runtime';
+    if (wait.detail === detail && !repause) return 'same';
+    h.store.change(type, (st) => {
+      st.waits = (st.waits ?? []).map((w) => (w.kind === 'base-check' ? { ...w, detail } : w));
+      if (repause) {
+        st.pauseReason = 'base-check';
+        st.pauseFailures = undefined;
+      }
+      return repause ? { ...data, pauseFrom: 'runtime' } : data;
+    });
+    return wait.detail === detail ? 'same' : 'set';
+  });
+}
+
+/**
+ * Разбор непроверенного переноса (`baseMoves` до текущих SHA целевых
+ * веток): какие чувствительные пути (D42) держат его до подтверждения
+ * человека (`held`, `компонент:путь`, не больше 20) и какие документы
+ * контрактов перенесены в редакции, одобренной независимым ревью
+ * (`reviewed`, их снимает цикл). Одно правило для проверки базы циклом и для
+ * ответа `base-update`: ведущий узнаёт об удержании в момент переноса, а не
+ * после первого такта задания.
+ */
+export async function baseMoveReview(
+  h: DevContour,
+  dataRoot: string,
+  state: Readonly<DevContourState> = h.store.read(),
+) {
+  const bases = await Promise.all(
+    repositories(h.config).map(async (repo) => ({
+      repositoryId: repo.id,
+      sha: await git(repo.path, 'rev-parse', 'refs/heads/' + repo.targetBranch),
+    })),
+  );
+  const held: string[] = [];
+  // Документы контрактов, которые перенос приносит в редакции, одобренной
+  // независимым ревью: их снимает цикл, с доказательством в `base.checked`.
+  const reviewed: ReviewedContractDocument[] = [];
+  for (const m of baseMovesOf(state) ?? []) {
+    const to = bases.find((b) => b.repositoryId === m.repositoryId)?.sha;
+    if (!to) continue;
+    const entries = await sensitiveBaseEntries(h, dataRoot, state, m.repositoryId, m.from, to);
+    for (const e of entries) {
+      const evidence = e.contractDocument
+        ? await reviewedContractDocument(h, state, m.repositoryId, e.path, to)
+        : undefined;
+      if (evidence) reviewed.push(evidence);
+      else held.push(`${m.repositoryId}:${e.path}`);
+    }
+  }
+  return { bases, held: held.slice(0, HELD_PATHS), reviewed };
+}
+
+/**
+ * Записать удержание переноса сразу после `base-update` в режиме агента —
+ * тем же событием и той же причиной, что проверка базы циклом задания
+ * (`checkBase` потом причину не переписывает). Возвращает пути удержания;
+ * пусто — перенос снимут gates, или ожидания этого переноса уже нет.
+ */
+export async function holdSensitiveBaseMove(h: DevContour, dataRoot: string) {
+  const state = h.store.read();
+  if (h.config.approvalMode !== 'agent' || !baseMovesOf(state)) return [];
+  const wait = state.waits?.find((w) => w.kind === 'base-check');
+  if (!state.paused || !wait) return [];
+  const { held } = await baseMoveReview(h, dataRoot, state);
+  if (!held.length) return [];
+  // Ожидание этого переноса (`at`): за время разбора его могли снять
+  // (оператор запустил очередь) или заменить более поздним переносом.
+  const set = setBaseWaitDetail(
+    h,
+    'base.check.held',
+    heldBaseDetail(held),
+    { paths: held, by: 'base-update' },
+    { at: wait.at, held: true },
+  );
+  return set === 'gone' ? [] : held;
+}
+
 /**
  * Проверка перенесённой базы gates компонентов в режиме `approvalMode: agent`.
  *
@@ -60,8 +373,9 @@ export type CheckGuard = (options?: { closing?: boolean }) => void;
  * новую базу проверяют gates до выдачи (D42). В режиме оператора это решение
  * человека, и ожидание снимает он. В режиме агента согласования ведёт контур,
  * и ручной `queue --start` был лишним шагом: цикл ведущего проверяет базу сам
- * тем же исполнением, что integration задач (`runGatesAt`), — весь профиль
- * каждого компонента на SHA его базы прогонов. Все прошли — ожидание снято и
+ * тем же исполнением, что integration задач (`runGatesAt`), — профиль
+ * каждого компонента на SHA его базы прогонов, кроме условных gates, чей
+ * результат переносится с проверки предка (D51). Все прошли — ожидание снято и
  * очередь продолжена; провал — ожидание остаётся и называет gates.
  *
  * Автоматически снимается только перенос, который могла бы сделать и
@@ -76,6 +390,10 @@ export type CheckGuard = (options?: { closing?: boolean }) => void;
  * Его, как и обычный перенос, снимают gates; доказательство (ревью и blob)
  * пишется в `base.checked`. Любой другой чувствительный путь рядом держит
  * весь перенос.
+ *
+ * Gate с `when.paths`, прошедший на базе-предке под тем же основанием, чьих
+ * путей и неявных входов diff до новой базы не задел, не исполняется: его
+ * результат переносится с указанием diff (`basePlan`, D51).
  *
  * Исход хранится по SHA и договору; провал повторяется один раз
  * (`BASE_CHECK_RETRIES`), дальше база не проверяется повторно, пока её не
@@ -109,54 +427,44 @@ export async function checkBase(
   if (!moves) return false;
   /** Ожидание остаётся и называет причину; событие — только при новой причине. */
   const hold = (type: string, detail: string, data: Record<string, unknown>) => {
-    if (h.store.read().waits?.some((w) => w.kind === 'base-check' && w.detail !== detail))
-      h.store.change(type, (s) => {
-        guard();
-        s.waits = (s.waits ?? []).map((w) => (w.kind === 'base-check' ? { ...w, detail } : w));
-        return data;
-      });
+    setBaseWaitDetail(h, type, detail, data, { guard });
     return false;
   };
-  const bases = await Promise.all(
-    repositories(h.config).map(async (repo) => ({
-      repositoryId: repo.id,
-      sha: await git(repo.path, 'rev-parse', 'refs/heads/' + repo.targetBranch),
-    })),
-  );
-  const touched: string[] = [];
-  // Документы контрактов, которые перенос приносит в редакции, одобренной
-  // независимым ревью: их снимает цикл, с доказательством в `base.checked`.
-  const reviewed: ReviewedContractDocument[] = [];
-  for (const m of moves) {
-    const to = bases.find((b) => b.repositoryId === m.repositoryId)?.sha;
-    if (!to) continue;
-    const entries = await sensitiveBaseEntries(h, roots.data, state, m.repositoryId, m.from, to);
-    for (const e of entries) {
-      const evidence = e.contractDocument
-        ? await reviewedContractDocument(h, state, m.repositoryId, e.path, to)
-        : undefined;
-      if (evidence) reviewed.push(evidence);
-      else touched.push(`${m.repositoryId}:${e.path}`);
-    }
-  }
-  if (touched.length)
-    return hold(
-      'base.check.held',
-      `${BASE_HELD_DETAIL} (${touched.slice(0, 20).join(', ')}): gates этой базы его не подтверждают. Перенос проверяет и подтверждает оператор: «Подтвердить и запустить» в «Внимании» панели; ведущий агент это ожидание сам не снимает. Сам цикл снимает только документы контрактов в редакции, одобренной независимым ревью (review-contract); изменение приёмки — через contract-change`,
-      { paths: touched.slice(0, 20) },
-    );
+  const { bases, held: touched, reviewed } = await baseMoveReview(h, roots.data, state);
+  if (touched.length) return hold('base.check.held', heldBaseDetail(touched), { paths: touched });
   const { engine } = executionOf(h);
   const failed: string[] = [];
+  // Перенесённые результаты, на которые опирается снятие (`base.checked`).
+  const carriedBy: { repositoryId: string; sha: string; gates: string[] }[] = [];
   for (const base of bases) {
     const repo = repository(h.config, base.repositoryId);
     const gates = repo.gates.map((g) => g.id);
     if (!gates.length) continue;
     const policyDigest = h.policyDigest(base.repositoryId);
+    // Базы поставщиков (`dependsOn`, транзитивно) из того же снимка, что и
+    // базы решения: снимки зависимостей — вход gates компонента.
+    const dependencies = bases.filter((b) =>
+      dependsOnRepository(h.config, base.repositoryId, b.repositoryId),
+    );
+    const providers = Object.fromEntries(dependencies.map((b) => [b.repositoryId, b.sha]));
     const previous = h.store.localRecord<BaseCheck>(BASE_CHECK, base.repositoryId, base.sha);
-    let record = previous?.policyDigest === policyDigest ? previous : undefined;
+    // Исход той же базы засчитывается при тех же базах поставщиков: сдвиг
+    // поставщика — тоже перенос (запись без поля — без поставщиков).
+    let record =
+      previous?.policyDigest === policyDigest && sameProviders(previous, providers)
+        ? previous
+        : undefined;
     while (!record || (!record.passed && (record.tries ?? 1) <= BASE_CHECK_RETRIES)) {
       const tries = (record?.tries ?? 0) + 1;
       const runId = 'BK-' + randomUUID();
+      const plan = await basePlan(
+        h,
+        { policy: engine.policy, harness: engine.version, dataRoot: roots.data },
+        base.repositoryId,
+        base.sha,
+        policyDigest,
+        providers,
+      );
       const event = (type: string, data: Record<string, unknown>, closing = false) =>
         h.store.atomic(() => {
           guard(closing ? { closing } : undefined);
@@ -170,37 +478,51 @@ export async function checkBase(
             ...(type.endsWith('.liveness') ? { owner: h.store.read().leader?.owner } : {}),
           });
         });
-      event('base.check.started', { gates, ...(tries > 1 ? { retry: tries - 1 } : {}) });
-      let result;
+      event('base.check.started', {
+        gates: plan.run,
+        ...(plan.carried.length
+          ? { carried: plan.carried.map((c) => c.gate), anchor: plan.carried[0].anchor }
+          : {}),
+        // Перенос не применён: диапазон задел чувствительные пути контура.
+        ...(plan.blocked ? { carryBlocked: plan.blocked } : {}),
+        ...(tries > 1 ? { retry: tries - 1 } : {}),
+      });
+      let result: Pick<Awaited<ReturnType<typeof runGatesAt>>, 'gates' | 'failures' | 'evidence'>;
       try {
-        result = await runGatesAt(
-          {
-            policy: engine.policy,
-            stateDir: roots.state,
-            repoPath: (r) => repository(h.config, r.id).path,
-            boundary: () => controllerBoundary(h, roots.state),
-            // Тот же корень рабочих деревьев, что у попыток планировщика.
-            ...checkoutRootOption(workspaceCheckoutRoot(h)),
-            ...(h.config.resourceDatabase ? { resourceDatabase: h.config.resourceDatabase } : {}),
-          },
-          {
-            id: runId,
-            repositoryId: base.repositoryId,
-            sha: base.sha,
-            gates,
-            record: () => guard(),
-            // Переход живости проверки — событие журнала: при `report` это
-            // единственный след зависания до конца проверки.
-            onLiveness: (report) => {
-              try {
-                event('base.check.liveness', { ...report });
-              } catch {
-                // Без права записи переход не пишется; проверка идёт дальше.
-              }
-            },
-            ...(signal ? { signal } : {}),
-          },
-        );
+        // Всё перенесено — исполнять нечего. Сейчас недостижимо: harness
+        // требует test gate без `when`; ветка — защита от смены этого правила.
+        result = !plan.run.length
+          ? { gates: [], failures: [], evidence: [] }
+          : await runGatesAt(
+              {
+                policy: engine.policy,
+                stateDir: roots.state,
+                repoPath: (r) => repository(h.config, r.id).path,
+                boundary: () => controllerBoundary(h, roots.state),
+                // Тот же корень рабочих деревьев, что у попыток планировщика.
+                ...checkoutRootOption(workspaceCheckoutRoot(h)),
+                ...(h.config.resourceDatabase
+                  ? { resourceDatabase: h.config.resourceDatabase }
+                  : {}),
+              },
+              {
+                id: runId,
+                repositoryId: base.repositoryId,
+                sha: base.sha,
+                gates: plan.run,
+                record: () => guard(),
+                // Переход живости проверки — событие журнала: при `report` это
+                // единственный след зависания до конца проверки.
+                onLiveness: (report) => {
+                  try {
+                    event('base.check.liveness', { ...report });
+                  } catch {
+                    // Без права записи переход не пишется; проверка идёт дальше.
+                  }
+                },
+                ...(signal ? { signal } : {}),
+              },
+            );
       } catch (error) {
         try {
           event(
@@ -218,6 +540,18 @@ export async function checkBase(
         }
         throw error;
       }
+      // Поставщик сдвинулся за время gates: снимки могли быть уже с новой
+      // базы, и запись не называет, с какой. Она остаётся исходом этого SHA
+      // (решение увидит сдвиг), но источником переноса не служит, а метка
+      // `@moved` не даёт засчитать её и при возврате поставщика на прежний SHA.
+      const providersHeld = dependencies.every((b) => {
+        const r = repository(h.config, b.repositoryId);
+        try {
+          return targetSha(r.path, r.targetBranch) === b.sha;
+        } catch {
+          return false;
+        }
+      });
       const saved: BaseCheck = {
         repositoryId: base.repositoryId,
         sha: base.sha,
@@ -226,9 +560,17 @@ export async function checkBase(
         passed: !result.failures.length,
         gates: result.gates,
         failures: result.failures,
-        evidence: result.evidence,
+        evidence: [...result.evidence, ...plan.evidence],
         at: new Date().toISOString(),
         tries,
+        ...(providersHeld
+          ? {
+              basis: plan.basis,
+              devcontour: CONSUMER_VERSION,
+              ...(Object.keys(plan.providers).length ? { providers: plan.providers } : {}),
+            }
+          : { providers: { ...plan.providers, '@moved': 'during-check' } }),
+        ...(plan.carried.length ? { carried: plan.carried } : {}),
       };
       try {
         h.store.atomic(() => {
@@ -261,6 +603,18 @@ export async function checkBase(
         saved.passed ? 'base.check.passed' : 'base.check.failed',
         {
           gates: saved.gates,
+          // Перенесённые gates и diff, по которому они не исполнялись (D51).
+          ...(plan.carried.length
+            ? {
+                carried: plan.carried.map((c) => ({
+                  gate: c.gate,
+                  from: c.from,
+                  count: c.applicability.count,
+                  files: c.applicability.files.slice(0, 20),
+                  pathsDigest: c.applicability.pathsDigest,
+                })),
+              }
+            : {}),
           ...(saved.passed ? {} : { failures: saved.failures.map((f) => f.gate) }),
         },
         true,
@@ -268,6 +622,12 @@ export async function checkBase(
       record = saved;
     }
     for (const f of record.failures) failed.push(`${base.repositoryId}/${f.gate}`);
+    if (record.carried?.length)
+      carriedBy.push({
+        repositoryId: base.repositoryId,
+        sha: base.sha,
+        gates: record.carried.map((c) => c.gate),
+      });
   }
   // Решение — в одной транзакции со сверкой: ожидание и его диапазон те же,
   // базы не сдвинулись с проверенных SHA.
@@ -292,6 +652,8 @@ export async function checkBase(
     if (failed.length) return 'failed';
     h.store.appendEvent('base.checked', {
       bases,
+      // Gates, чей результат перенесён с проверки предка, а не исполнен (D51).
+      ...(carriedBy.length ? { carried: carriedBy } : {}),
       // Кто снял чувствительный перенос и на каком доказательстве: ревью
       // документа и blob одобренного текста, равный blob на базе.
       ...(reviewed.length ? { liftedBy: 'agent', reviewedContracts: reviewed } : {}),

@@ -19,12 +19,13 @@ import { devcontourContextSource, pinnedSnapshot, taskPacks } from '../harness/h
 import { runtimeAdapters } from '../harness/adapters.ts';
 import { devcontourHooks } from '../harness/hooks.ts';
 import { adapters } from './adapters.ts';
-import { sensitiveBasePaths } from './sensitive-paths.ts';
+import { reviewedContractDocument, sensitiveBaseEntries } from './sensitive-paths.ts';
 import { git } from './process.ts';
 import { assertTeamCheckout } from './git-sync.ts';
 import { reserveRepositories } from './ownership.ts';
 import { serveReconfigure } from './reconfigure.ts';
 import { checkoutRootOption, checkoutRoots, workspaceCheckoutRoot } from './checkout-root.ts';
+import { LoopMonitor, type LoopGap } from './loop-monitor.ts';
 
 export { classifyFailure } from 'devcontour-harness';
 
@@ -45,6 +46,11 @@ export class Scheduler {
   /** Идущий такт (интервала, HTTP-запуска или drain): `stop` дожидается его. */
   private current?: Promise<void>;
   private stopped = false;
+  /**
+   * Монитор задержек основного потока (`loop-monitor.ts`): у планировщика,
+   * ведущего очередь интервалом (`start`, сервер).
+   */
+  private monitor?: LoopMonitor;
   /** Планировщик останавливается: новые такты и запуск очереди не принимаются. */
   get stopping() {
     return this.stopped;
@@ -193,21 +199,25 @@ export class Scheduler {
    * транзакции, проверяющей, что очередь не встала, попыток не появилось и
    * роль controller у этого процесса. Как и после ручного переноса, очередь
    * встаёт на ожидание `base-check`: новую базу проверяют гейтами до выдачи
-   * (D42). Отказ возвращает чувствительные пути — остановка их называет.
+   * (D42). Отказ возвращает чувствительные пути — остановка их называет, — и
+   * те из них, что после переноса подтвердит только человек (`held`: всё,
+   * кроме документов контрактов в редакции, одобренной независимым ревью, —
+   * то же правило, что у проверки базы, `baseMoveReview`).
    */
   private async fastForwardBase(
     drift: Awaited<ReturnType<Scheduler['baseDrift']>>,
-  ): Promise<string[]> {
-    if (!drift.length || drift.some((d) => d.ahead > 0)) return [];
+  ): Promise<{ sensitive: string[]; held: string[] }> {
+    const none = { sensitive: [], held: [] };
+    if (!drift.length || drift.some((d) => d.ahead > 0)) return none;
     const s = this.h.store.read();
     // Пауза и идущие попытки проверяет транзакция сдвига (ниже) — атомарно со сдвигом.
-    if (s.reconfigure && !s.reconfigure.appliedAt) return [];
+    if (s.reconfigure && !s.reconfigure.appliedAt) return none;
     const openChange = repositories(this.h.config).some((r) =>
       Object.values(this.h.store.localRecords<{ status: string }>('contract-change', r.id)).some(
         (op) => ['queued', 'running', 'waiting', 'failed'].includes(op.status),
       ),
     );
-    if (openChange) return [];
+    if (openChange) return none;
     const moves: {
       repositoryId: string;
       path: string;
@@ -218,7 +228,7 @@ export class Scheduler {
     for (const d of drift) {
       const repo = repository(this.h.config, d.repositoryId);
       const branch = await git(repo.path, 'symbolic-ref', '-q', '--short', 'HEAD').catch(() => '');
-      if (!branch) return [];
+      if (!branch) return none;
       const to = await git(repo.path, 'rev-parse', 'HEAD');
       const from = await git(repo.path, 'rev-parse', this.targetFor(repo.id));
       // Цель — предок рабочей линии: перемотка ничего не теряет и не переписывает.
@@ -228,9 +238,18 @@ export class Scheduler {
           () => false,
         ))
       )
-        return [];
-      const touched = await sensitiveBasePaths(this.h, this.root, s, repo.id, from, to);
-      if (touched.length) return touched.map((p) => `${repo.id}:${p}`);
+        return none;
+      const touched = await sensitiveBaseEntries(this.h, this.root, s, repo.id, from, to);
+      if (touched.length) {
+        const held: string[] = [];
+        for (const e of touched)
+          if (
+            !e.contractDocument ||
+            !(await reviewedContractDocument(this.h, s, repo.id, e.path, to))
+          )
+            held.push(`${repo.id}:${e.path}`);
+        return { sensitive: touched.map((e) => `${repo.id}:${e.path}`), held };
+      }
       moves.push({ repositoryId: repo.id, path: repo.path, branch, from, to });
     }
     const move = fencedRefMove(
@@ -252,7 +271,7 @@ export class Scheduler {
     } catch {
       // Несостоявшийся сдвиг — прежняя остановка с подсказкой base-update.
     }
-    if (!moved.length) return [];
+    if (!moved.length) return none;
     // Журнал называет перемотку отдельно от ручного base-update (метрики
     // считают её автоматической); ожидание base-check — то же, что после
     // ручного переноса: до проверки гейтами новая база не выдаётся.
@@ -274,11 +293,20 @@ export class Scheduler {
         })),
       };
     });
-    return [];
+    return none;
   }
-  private async assertBaseCurrent(sensitive: string[] = []) {
+  private async assertBaseCurrent(
+    { sensitive, held }: { sensitive: string[]; held: string[] } = { sensitive: [], held: [] },
+  ) {
     const drift = await this.baseDrift();
     if (!drift.length) return;
+    // Перенос, который gates не подтвердят, после base-update ждёт человека
+    // (D42): подсказка называет этот шаг заранее, а не только «выполните
+    // base-update». В режиме оператора очередь и так запускает человек.
+    const operator =
+      held.length && this.h.config.approvalMode === 'agent'
+        ? ` После переноса очередь продолжит только подтверждение оператора (${held.slice(0, 20).join(', ')}): «Подтвердить и запустить» в «Внимании» панели; ведущий агент это ожидание сам не снимает — попросите пользователя подтвердить перенос. Без человека — только изменение приёмки через contract-change; документ контракта снимает цикл, если его редакцию одобрило независимое ревью (review-contract).`
+        : '';
     throw new TaskFailure(
       'stale-base',
       STALE_BASE +
@@ -287,7 +315,8 @@ export class Scheduler {
         (sensitive.length
           ? `. Перемотка не выполнена автоматически: коммиты меняют приёмку или настройку контура (${sensitive.slice(0, 20).join(', ')})`
           : '') +
-        '. Выполните devcontour base-update (ведущий агент — с --by host), иначе исполнитель получит дерево без подготовленной работы.',
+        '. Выполните devcontour base-update (ведущий агент — с --by host), иначе исполнитель получит дерево без подготовленной работы.' +
+        operator,
     );
   }
   /**
@@ -299,6 +328,12 @@ export class Scheduler {
   start() {
     if (this.timer) return;
     this.stopped = false;
+    this.monitor ??= new LoopMonitor({
+      leaseMs: this.h.config.leaseMs,
+      onStall: (gap) => this.noteGap('server.loop-stalled', gap),
+      onClockJump: (gap) => this.noteGap('server.clock-jump', gap),
+    });
+    this.monitor.start();
     this.timer = setInterval(() => {
       if (this.stopped || this.current) return;
       void this.tick()
@@ -320,6 +355,28 @@ export class Scheduler {
         });
     }, 750);
     this.timer.unref();
+  }
+  /**
+   * Задержка основного потока, при которой аренда могла истечь
+   * (`server.loop-stalled`), или сон машины и перевод часов
+   * (`server.clock-jump`): владелец, окно по стенным часам и оба разрыва.
+   * Пишется сразу: такт очереди проверяет монитор до recovery и истечения.
+   */
+  private noteGap(type: 'server.loop-stalled' | 'server.clock-jump', gap: LoopGap) {
+    if (this.stopped) return;
+    // Без проекций и без долгого ожидания занятой базы: незаписанный разрыв
+    // оставляет сигнал опоздавшего продления.
+    try {
+      this.h.store.tryLeaseEvent(type, {
+        owner: this.owner,
+        from: new Date(gap.from).toISOString(),
+        to: new Date(gap.to).toISOString(),
+        monoMs: gap.monoMs,
+        wallMs: gap.wallMs,
+      });
+    } catch {
+      /* Хранилище закрыто: разрыв останется незаписанным. */
+    }
   }
   /**
    * Начало штатной остановки: отметка в базе, по которой запуск очереди из
@@ -349,6 +406,7 @@ export class Scheduler {
     await this.runner.stop();
     await Promise.all(this.retired.map((r) => r.settled().catch(() => {})));
     this.retired = [];
+    this.monitor?.stop();
     // Роль освобождена — отметка уже не действует; снимается для порядка
     // (не снятую снимет следующий запуск).
     try {
@@ -365,6 +423,9 @@ export class Scheduler {
    */
   tick(): Promise<void> {
     if (this.stopped) return Promise.resolve();
+    // Задержка, после которой такт истечёт попытку, записывается до recovery
+    // и истечения: восстановление видит её причину.
+    this.monitor?.check();
     if (this.current) return this.current.catch(() => {});
     const run = this.tickOnce().finally(() => {
       if (this.current === run) this.current = undefined;
@@ -391,6 +452,11 @@ export class Scheduler {
     // Запрошенное операцией применение конфигурации — до выдачи.
     serveReconfigure(this.h, join(this.root, 'config.json'), this.owner);
     this.h.noteAppliedKeys();
+    // Удержанный перенос базы (D42) держит выдачу при любой паузе: очередь,
+    // которая пошла с таким ожиданием (не снявшим его путём), до выдачи
+    // снова встаёт на base-check — выдача на неподтверждённой базе исключена
+    // здесь, а не только у каждого, кто снимает паузу.
+    this.h.restoreBaseHold();
     const runner = this.runner;
     if (!this.h.store.view().paused && runner.active < this.h.config.concurrency) {
       // Сверка базы — git на каждом такте; без расхождения повторно не читается.

@@ -1323,7 +1323,7 @@ async function main() {
         else {
           // Снятие паузы подтверждает работающий сервер: очередь, которую он
           // сразу снова остановил, — отказ с его причиной, а не успех.
-          result = await startQueue(h);
+          result = await startQueue(h, { by: actorOf() === 'host' ? 'lead' : 'operator' });
           if ((result as { paused: boolean }).paused) process.exitCode = 1;
         }
       } else if (operation === 'decisions' || operation.startsWith('decision-')) {

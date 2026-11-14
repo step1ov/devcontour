@@ -223,6 +223,11 @@ export class Store {
   private components?: ComponentStorage;
   private transaction = false;
   private savepoint = 0;
+  /**
+   * Открытое изменение (`update`/`change`, в том числе внешняя транзакция
+   * хранилища исполнения): его документ — копия, снятая в начале.
+   */
+  private editing = false;
   private projectionPending = false;
   onCommit?: () => void;
   // Which projections onCommit writes: 'product' before a stack exists,
@@ -616,6 +621,11 @@ export class Store {
     };
   }
   // Synchronous composition: local idempotency records and domain mutations commit together.
+  // Nesting: atomic inside atomic is a savepoint; update/change inside atomic
+  // is allowed when no update is open (each change reads the previous one's
+  // document). An update/change inside another update's action — including an
+  // execution-store host/transact frame — is refused: the outer update would
+  // write its own document copy over it. Inside a frame, use host/transact.
   atomic<T>(action: () => T): T {
     const outer = this.transaction;
     const point = 'nested_' + ++this.savepoint;
@@ -665,6 +675,16 @@ export class Store {
    * не переписывает.
    */
   update<T>(type: string, action: (draft: Draft) => T): T {
+    // Вложенное изменение записало бы документ и событие журнала, а внешнее
+    // при фиксации переписало бы документ своей копией: изменение пропало
+    // бы, событие о нём осталось. Отказ — до любой записи.
+    if (this.editing)
+      throw new Error(
+        `Store.change('${type}') внутри открытой транзакции изменения: внешняя транзакция ` +
+          'запишет свою копию документа поверх этого изменения. Меняйте документ открытой ' +
+          'транзакции (HostTransaction.state, ExecutionStore.host/transact) или выполните ' +
+          'изменение после её фиксации',
+      );
     return this.atomic(() => {
       const row = controllerRow(this.db);
       let before: string;
@@ -694,7 +714,13 @@ export class Store {
         );
       }
       const leaderBefore = JSON.stringify(draft.leader ?? null);
-      const result = action(draft);
+      let result: T;
+      this.editing = true;
+      try {
+        result = action(draft);
+      } finally {
+        this.editing = false;
+      }
       const leader = draft.leader;
       const leaderChanged = JSON.stringify(leader ?? null) !== leaderBefore;
       // В документ идёт метка роли (`rowMarker`), сама роль — в строку. Роль
@@ -767,7 +793,13 @@ export class Store {
    * есть только событие или локальная запись с событием. Путь записи — тот же,
    * что у `change`: central — `main.events`, component — событие компонента.
    */
-  appendEvent(type: string, data: unknown, revision: 'data' | 'lease' = 'data') {
+  appendEvent(
+    type: string,
+    data: unknown,
+    revision: 'data' | 'lease' = 'data',
+    /** Проекции пересчитываются после фиксации; событие о сроках — без них. */
+    project = true,
+  ) {
     if (!this.transaction) throw new Error('Store.appendEvent требует открытой транзакции');
     if (type === 'heartbeat') throw new Error('heartbeat не пишет событие журнала');
     const at = new Date().toISOString();
@@ -785,8 +817,26 @@ export class Store {
     // Событие о сроках владения (роль controller) — как heartbeat: видимые
     // данные не меняются, растёт только счётчик сроков.
     this.bump(revision);
-    this.projectionPending = true;
+    if (project) this.projectionPending = true;
     return Number(inserted.lastInsertRowid);
+  }
+  /**
+   * Событие о сроках владения (задержка сервера, скачок часов) отдельной
+   * транзакцией: без пересчёта проекций, как heartbeat, и без долгого
+   * ожидания занятой базы — дольше `busyMs` событие не ждёт и отбрасывается
+   * (`false`). Пишется в момент, когда сервер и так опаздывает.
+   */
+  tryLeaseEvent(type: string, data: unknown, busyMs = 250): boolean {
+    if (this.transaction) throw new Error('Store.tryLeaseEvent вне транзакции');
+    this.db.exec(`PRAGMA busy_timeout=${Math.max(0, Math.floor(busyMs))};`);
+    try {
+      this.atomic(() => this.appendEvent(type, data, 'lease', false));
+      return true;
+    } catch {
+      return false;
+    } finally {
+      this.db.exec('PRAGMA busy_timeout=20000;');
+    }
   }
   /** Номер последнего события журнала (0 — журнал пуст). */
   lastEventId(): number {

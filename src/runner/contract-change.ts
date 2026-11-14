@@ -27,7 +27,7 @@ import { applyConfig, busyWork } from './reconfigure.ts';
 import { loadConfig } from './config.ts';
 import { loadedDigest } from '../core/service.ts';
 import { git, isAncestor } from './process.ts';
-import { queueStopView } from '../core/work-status.ts';
+import { heldBaseOf, queueStopView } from '../core/work-status.ts';
 import {
   registeredContractLifts,
   siblingContractLifts,
@@ -799,7 +799,8 @@ export class ContractChanges {
     try {
       return this.h.store.atomic(() => {
         const state = this.h.store.read();
-        if (!state.paused || state.pauseReason) return false;
+        // Удержанный перенос базы снимает только человек (D42).
+        if (!state.paused || state.pauseReason || heldBaseOf(state)) return false;
         const stop = queueStopView(state, this.h.store.latestEvents(['scheduler.error'], 50));
         if (stop.reason !== 'runtime' || !stop.stopReason?.startsWith(STALE_BASE)) return false;
         this.h.pause(false);
