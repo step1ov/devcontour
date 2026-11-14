@@ -95,6 +95,25 @@ export function findOrphans(rows, self = process.pid) {
 const snapshot = async () => parseRows(await ps(false), await ps(true));
 
 /**
+ * Chosen processes a fresh list still shows without an owner, same pid and
+ * start time: orphaned by a rule, or hanging off init or off another chosen
+ * process. A child of a stopped orphan matches no rule by itself once its
+ * parent exits, and must not be left running.
+ */
+function stillOrphaned(rows, chosen) {
+  const current = findOrphans(rows);
+  const same = new Map(rows.map((r) => [r.pid, r]));
+  const taken = (pid) => same.get(pid)?.start === chosen.get(pid)?.start;
+  return [...chosen.keys()].filter(
+    (pid) =>
+      current.get(pid)?.start === chosen.get(pid).start ||
+      (taken(pid) &&
+        (same.get(pid).ppid === 1 ||
+          (chosen.has(same.get(pid).ppid) && taken(same.get(pid).ppid)))),
+  );
+}
+
+/**
  * Stop orphans: SIGTERM, then SIGKILL after a grace. Every batch re-reads the
  * process list and signals only a process that is still an orphan there with
  * the same pid and start time. A failing process list stops the sweep without
@@ -103,16 +122,14 @@ const snapshot = async () => parseRows(await ps(false), await ps(true));
 export async function sweepOrphans({ log = console.error, graceMs = 3000, list = snapshot } = {}) {
   if (list === snapshot && process.platform !== 'darwin') return 0;
   const signal = async (name, chosen) => {
-    const current = findOrphans(await list());
     let sent = 0;
-    for (const [pid, { start }] of chosen)
-      if (current.get(pid)?.start === start)
-        try {
-          process.kill(pid, name);
-          sent++;
-        } catch {
-          /* Already exited. */
-        }
+    for (const pid of stillOrphaned(await list(), chosen))
+      try {
+        process.kill(pid, name);
+        sent++;
+      } catch {
+        /* Already exited. */
+      }
     return sent;
   };
   try {
@@ -127,11 +144,10 @@ export async function sweepOrphans({ log = console.error, graceMs = 3000, list =
     const deadline = Date.now() + graceMs;
     while (Date.now() < deadline) {
       await delay(200);
-      const left = findOrphans(await list());
-      if (![...orphans].some(([pid, { start }]) => left.get(pid)?.start === start))
-        return orphans.size;
+      if (!stillOrphaned(await list(), orphans).length) return orphans.size;
     }
-    await signal('SIGKILL', orphans);
+    const killed = await signal('SIGKILL', orphans);
+    if (killed) log(`orphans: ${killed} ignored SIGTERM and were killed`);
     return orphans.size;
   } catch (error) {
     log(`orphans: process list unavailable, sweep stopped (${error.message})`);

@@ -192,6 +192,27 @@ test('The sweep signals a process only while a fresh list still shows it orphane
   }
 });
 
+test('The sweep still stops the child of an orphan whose parent exited first', async () => {
+  const child = spawn(process.execPath, ['-e', 'setInterval(()=>{},1000)'], { stdio: 'ignore' });
+  try {
+    // The server's parent was already gone (no such pid); its child, a plain
+    // node process, now hangs off init and matches no rule by itself.
+    const parent = row(2 ** 22 + 7, 1, demo('1794590582967'));
+    const lists = [[parent, row(child.pid!, parent.pid, 'node child.js')]];
+    const left = () => (alive(child.pid!) ? [row(child.pid!, 1, 'node child.js')] : []);
+    const swept = await sweepOrphans({
+      log: () => undefined,
+      graceMs: 2000,
+      list: () => Promise.resolve(lists.shift() ?? left()),
+    });
+    assert.equal(swept, 2);
+    for (let i = 0; i < 50 && alive(child.pid!); i++) await delay(50);
+    assert.equal(alive(child.pid!), false, 'the child was stopped with its parent');
+  } finally {
+    child.kill('SIGKILL');
+  }
+});
+
 test(
   'An e2e server stops when its Playwright runner is killed outright, even one that ignores SIGTERM',
   { timeout: 40_000 },

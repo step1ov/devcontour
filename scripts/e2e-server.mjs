@@ -14,18 +14,31 @@ if (!/^\d+$/.test(runner ?? '') || separator !== '--' || !command)
 
 const group = (pid) => {
   try {
-    return execFileSync('/bin/ps', ['-o', 'pgid=', '-p', String(pid)], {
-      encoding: 'utf8',
-      timeout: 5000,
-    }).trim();
+    return (
+      execFileSync('/bin/ps', ['-o', 'pgid=', '-p', String(pid)], {
+        encoding: 'utf8',
+        timeout: 5000,
+      }).trim() || undefined
+    );
   } catch {
     return undefined;
   }
 };
-// The group is the server's own only when the runner is outside it (as under
-// Playwright). Started by hand in the runner's group, only the child is
-// signalled.
-const ownGroup = process.platform !== 'win32' && group(process.pid) !== group(Number(runner));
+// The group is the server's own only when it is led by this process or the
+// shell that started it (as under Playwright) and the runner is outside it.
+// When either group is unknown, or started by hand in the runner's group,
+// only the child is signalled: never the group of whoever started this.
+const ownGroup = (() => {
+  if (process.platform === 'win32') return false;
+  const own = group(process.pid);
+  const theirs = group(Number(runner));
+  return (
+    own !== undefined &&
+    theirs !== undefined &&
+    own !== theirs &&
+    (Number(own) === process.pid || Number(own) === process.ppid)
+  );
+})();
 
 const child = spawn(command, args, { stdio: 'inherit', shell: process.platform === 'win32' });
 let stopping = false;
