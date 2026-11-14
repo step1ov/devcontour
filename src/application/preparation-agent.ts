@@ -10,6 +10,7 @@ import { loadConfig } from '../runner/config.ts';
 import { DevContour } from '../core/service.ts';
 import { AgentService } from './agent.ts';
 import { checkJsonBytes } from 'devcontour-harness';
+import { oversized } from './response-limit.ts';
 import { AttentionService } from './attention.ts';
 import { markLeadActivity } from '../runner/lead-activity.ts';
 
@@ -23,7 +24,7 @@ export class PreparationAgent {
     // Центр внимания работает до setup: вопросы и согласования подготовки.
     if (operation === 'attention_list') {
       const list = new AttentionService(this.store, undefined).agentList(input ?? {});
-      if (!checkJsonBytes(list, 65536).within) throw new DomainError('Ответ превышает 64 KiB', 413);
+      if (!checkJsonBytes(list, 65536).within) throw new DomainError(oversized(operation), 413);
       return list;
     }
     if (!(operation in preparationInputs))
@@ -35,7 +36,7 @@ export class PreparationAgent {
       operation as PreparationOperation,
       input ?? {},
     );
-    if (!checkJsonBytes(result, 65536).within) throw new DomainError('Ответ превышает 64 KiB', 413);
+    if (!checkJsonBytes(result, 65536).within) throw new DomainError(oversized(operation), 413);
     return result;
   }
 }
