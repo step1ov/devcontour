@@ -77,18 +77,33 @@ function setBaseWaitDetail(
   type: string,
   detail: string,
   data: Record<string, unknown>,
-  options: { guard?: CheckGuard; at?: string } = {},
+  options: {
+    guard?: CheckGuard;
+    at?: string;
+    /**
+     * Удержание: пауза отказа runtime становится паузой `base-check`. Иначе
+     * снятие причины отказа (`clearFailure` при повторе задачи) вернуло бы
+     * выдачу, оставив удержанное ожидание неподтверждённым.
+     */
+    held?: boolean;
+  } = {},
 ): 'set' | 'same' | 'gone' {
   return h.store.atomic(() => {
     options.guard?.();
-    const wait = h.store.read().waits?.find((w) => w.kind === 'base-check');
+    const state = h.store.read();
+    const wait = state.waits?.find((w) => w.kind === 'base-check');
     if (!wait || (options.at !== undefined && wait.at !== options.at)) return 'gone';
-    if (wait.detail === detail) return 'same';
+    const repause = !!options.held && state.paused && state.pauseReason === 'runtime';
+    if (wait.detail === detail && !repause) return 'same';
     h.store.change(type, (st) => {
       st.waits = (st.waits ?? []).map((w) => (w.kind === 'base-check' ? { ...w, detail } : w));
-      return data;
+      if (repause) {
+        st.pauseReason = 'base-check';
+        st.pauseFailures = undefined;
+      }
+      return repause ? { ...data, pauseFrom: 'runtime' } : data;
     });
-    return 'set';
+    return wait.detail === detail ? 'same' : 'set';
   });
 }
 
@@ -151,7 +166,7 @@ export async function holdSensitiveBaseMove(h: DevContour, dataRoot: string) {
     'base.check.held',
     heldBaseDetail(held),
     { paths: held, by: 'base-update' },
-    { at: wait.at },
+    { at: wait.at, held: true },
   );
   return set === 'gone' ? [] : held;
 }

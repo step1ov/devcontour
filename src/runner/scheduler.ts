@@ -414,6 +414,11 @@ export class Scheduler {
     // Запрошенное операцией применение конфигурации — до выдачи.
     serveReconfigure(this.h, join(this.root, 'config.json'), this.owner);
     this.h.noteAppliedKeys();
+    // Удержанный перенос базы (D42) держит выдачу при любой паузе: очередь,
+    // которая пошла с таким ожиданием (не снявшим его путём), до выдачи
+    // снова встаёт на base-check — выдача на неподтверждённой базе исключена
+    // здесь, а не только у каждого, кто снимает паузу.
+    this.h.restoreBaseHold();
     const runner = this.runner;
     if (!this.h.store.view().paused && runner.active < this.h.config.concurrency) {
       // Сверка базы — git на каждом такте; без расхождения повторно не читается.

@@ -42,7 +42,7 @@ import { approvalPolicyDigest } from '../harness/policy.ts';
 import { rebindInputContext } from '../harness/input-host.ts';
 import { planIngest } from './plan.ts';
 import { boardOwner, completion, receiptHolds, receiptRecordBytes } from './sync-state.ts';
-import { carriedTaskIds, heldBaseOf, pausedByLead } from './work-status.ts';
+import { carriedTaskIds, heldBaseOf, heldBaseWait, pausedByLead } from './work-status.ts';
 import { assertDag, descendants, latestTaskId, impactGraph } from './graph.ts';
 import {
   DomainError,
@@ -938,6 +938,9 @@ export function baseMovesOf(s: Readonly<DevContourState>) {
   const wait = s.waits?.find((w) => w.kind === 'base-check');
   return wait && s.baseMoves?.at === wait.at ? s.baseMoves.bases : undefined;
 }
+/** Начало отказа снять паузу ведущим при удержанном переносе базы (`pause`). */
+export const BASE_HELD_REFUSAL = 'Очередь не продолжена';
+
 export function waitBaseCheck(s: DevContourState, updated: BaseMove[], detail: string) {
   // Диапазон копится только поверх ещё стоящего ожидания: снятое ожидание
   // (проверка прошла, queue --start) оставляет прежний диапазон в прошлом.
@@ -2052,7 +2055,7 @@ export class DevContour {
           const held = heldBaseOf(before);
           if (held)
             throw new DomainError(
-              `Очередь не продолжена: перенос базы меняет приёмку или настройку контура (${held.paths.join(', ') || 'пути — в ожидании base-check'}). ${held.action}`,
+              `${BASE_HELD_REFUSAL}: перенос базы меняет приёмку или настройку контура (${held.paths.join(', ') || 'пути — в ожидании base-check'}). ${held.action}`,
               409,
             );
         }
@@ -2197,6 +2200,26 @@ export class DevContour {
       s.pausedAt = now();
       return { held: true };
     });
+  }
+  /**
+   * Инвариант выдачи: удержанное ожидание проверки базы (D42) держит очередь
+   * при любой причине паузы. Если очередь всё же идёт с таким ожиданием
+   * (его не сняло снятие паузы — например, `clearFailure` вернул выдачу
+   * после отказа runtime), она снова встаёт на `base-check` до выдачи.
+   * `true` — пауза восстановлена.
+   */
+  restoreBaseHold() {
+    const held = (s: Pick<DevContourState, 'paused' | 'waits'>) =>
+      !s.paused && heldBaseWait(s.waits?.find((w) => w.kind === 'base-check')?.detail);
+    if (!held(this.store.read())) return false;
+    return this.store.change('base.check.hold.restored', (s) => {
+      if (!held(s)) return { restored: false };
+      s.paused = true;
+      s.pauseReason = 'base-check';
+      s.pauseFailures = undefined;
+      s.pausedAt = now();
+      return { restored: true };
+    }).restored;
   }
   /**
    * Ожидание `base-check`, поставленное `holdForBaseUpdate` (перенос базы в

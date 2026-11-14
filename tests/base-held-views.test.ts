@@ -8,7 +8,9 @@ import { mkdir, writeFile } from 'node:fs/promises';
 import { demoPool, testDemo } from './demo-pool.ts';
 import { fixture, input } from './helpers.ts';
 import { Store } from '../src/core/store.ts';
-import { DevContour } from '../src/core/service.ts';
+import { BASE_HELD_REFUSAL, DevContour } from '../src/core/service.ts';
+import { DomainError } from '../src/core/model.ts';
+import { command } from '../src/runner/process.ts';
 import { loadConfig } from '../src/runner/config.ts';
 import { git } from '../src/runner/process.ts';
 import { LeadWorkflow } from '../src/core/lead-workflow.ts';
@@ -479,11 +481,273 @@ test('withHeldBaseStop: поручения называют человека, о
       stops: pack.stops.filter((x) => !x.queue),
       truncated: { ...pack.truncated, stops: 1 },
     };
-    const back = withHeldBaseStop(dropped, f.store.read());
+    const back = withHeldBaseStop(dropped, f.store.read(), undefined, stop);
     assert.equal(back.stops.filter((x) => x.queue).length, 1);
-    assert.equal(back.stops.find((x) => x.queue)!.actor, 'user');
+    // Возвращается ровно та остановка, что отбросил предел.
+    assert.deepEqual(
+      back.stops.find((x) => x.queue),
+      stop,
+    );
     assert.equal(back.truncated.stops, 0);
+    // Без остановки из пакета без предела ничего не выдумывается.
+    assert.equal(withHeldBaseStop(dropped, f.store.read()).stops.filter((x) => x.queue).length, 0);
   } finally {
     f.cleanup();
+  }
+});
+
+/** Довести задачу до отказа окружения: выдача стоит на паузе runtime. */
+function breakOnEnvironment(h: DevContour, taskId: string) {
+  h.pause(false);
+  const run = h.claim('test')!;
+  assert.equal(run.taskId, taskId);
+  h.fail(run.id, run.token, 'runtime: транспорт оборван', false, 'environment');
+  h.store.change('test.runtime-pause', (s) => {
+    s.paused = true;
+    s.pauseReason = 'runtime';
+    s.pauseFailures = ['environment'];
+    return {};
+  });
+}
+
+/** Задание доски на стадии 1 (задачи исполняются). */
+function stageOne(h: DevContour, boardId: string) {
+  const flow = new LeadWorkflow(h);
+  const job = flow.start({ kind: 'board', id: boardId, authorRuntime: 'codex', maxAttempts: 3 });
+  const claimed = flow.claim(job.key, job.owner)!;
+  h.store.atomic(() => h.store.saveLocal('lead', job.owner, job.key, { ...claimed, stage: 1 }));
+  return { flow, job };
+}
+
+test('Отказ окружения, затем удержанный base-update: пауза становится base-check, повтор задачи выдачу не возвращает, такт планировщика не выдаёт работу на неподтверждённой базе', async () => {
+  const f = await gitFixture();
+  const { root, store, h, commit } = f;
+  try {
+    store.change('fixture.reset', (s) => {
+      s.tasks = [];
+      s.boards = [];
+      s.runs = [];
+    });
+    const b = h.createBoard('Runtime board', '', 'main');
+    const t = h.addTask(b.id, input());
+    h.approve(b.id);
+    breakOnEnvironment(h, t.id);
+    const held = 'main:.devcontour/test-config.json';
+    await commit({ '.devcontour/test-config.json': '{}\n' });
+    const result = (await baseUpdateOperation(h, root, { by: 'host' })) as {
+      baseHeld?: { paths: string[] };
+    };
+    assert.deepEqual(result.baseHeld, { paths: [held] });
+    // Guard 3: пауза отказа runtime стала паузой base-check — её не вернёт
+    // снятие причины отказа.
+    assert.equal(store.read().pauseReason, 'base-check');
+    assert.equal(store.read().pauseFailures, undefined);
+    // Цикл задания: повтор задачи назначен, очередь стоит.
+    const { flow, job } = stageOne(h, b.id);
+    await new LeadRunner(h, root).execute(
+      flow.get(job.key, job.owner),
+      new AbortController().signal,
+    );
+    assert.equal(store.read().tasks.find((x) => x.id === t.id)!.status, 'ready');
+    assert.equal(store.read().paused, true);
+    // Guard 1: очередь всё же пошла с удержанным ожиданием (любой путь
+    // снятия, не снимающий ожидания) — такт до выдачи снова её останавливает.
+    store.change('test.unpaused', (s) => {
+      s.paused = false;
+      return {};
+    });
+    const runs = store.read().runs.length;
+    const scheduler = new Scheduler(h, root);
+    try {
+      await scheduler.init();
+      await scheduler.tick();
+    } finally {
+      await scheduler.stop();
+    }
+    assert.equal(store.read().runs.length, runs, 'выдачи нет');
+    assert.ok(
+      store.allEvents().some((e) => e.type === 'base.check.hold.restored'),
+      'такт восстановил паузу удержания',
+    );
+    assert.ok(
+      store
+        .read()
+        .waits?.some((w) => w.kind === 'base-check' && w.detail.startsWith(BASE_HELD_DETAIL)),
+    );
+  } finally {
+    f.cleanup();
+  }
+});
+
+test('Повтор после отказа окружения под ожиданием проверки базы: причина отказа снята, очередь ждёт base-check (не идёт)', async () => {
+  for (const detail of [
+    heldBaseDetail(['main:tests/config.json']),
+    'База прогонов перенесена (main): проверьте её гейтами и продолжите очередь',
+  ]) {
+    const f = fixture();
+    try {
+      const b = f.h.createBoard('Board');
+      const t = f.h.addTask(b.id, input());
+      f.h.approve(b.id);
+      breakOnEnvironment(f.h, t.id);
+      // Ожидание под паузой runtime (записано прежней версией или до guard 3).
+      f.store.change('fixture.wait', (s) => {
+        s.waits = [{ kind: 'base-check', detail, at: new Date().toISOString() }] as never;
+        return {};
+      });
+      const { flow, job } = stageOne(f.h, b.id);
+      await new LeadRunner(f.h, f.root).execute(
+        flow.get(job.key, job.owner),
+        new AbortController().signal,
+      );
+      const s = f.store.read();
+      assert.equal(s.tasks.find((x) => x.id === t.id)!.status, 'ready', 'повтор назначен');
+      assert.equal(s.paused, true, detail);
+      assert.equal(s.pauseReason, 'base-check');
+      assert.ok(!(s.pauseFailures ?? []).includes('environment'), 'своя причина снята');
+      assert.ok(s.waits?.some((w) => w.kind === 'base-check'));
+    } finally {
+      f.cleanup();
+    }
+  }
+});
+
+test('Удержание, записанное после чтения такта: цикл не снимает паузу; отказ снять паузу при удержании — ожидание, а не провал задания', async () => {
+  // (a) Такт прочитал состояние без удержания, удержание записано до снятия
+  // паузы: свежая проверка в транзакции снятия паузу не трогает.
+  {
+    const f = fixture();
+    try {
+      const b = f.h.createBoard('Board');
+      const t = f.h.addTask(b.id, input());
+      f.h.approve(b.id);
+      f.h.pause(true);
+      await new Promise((r) => setTimeout(r, 5));
+      const { flow, job } = stageOne(f.h, b.id);
+      f.store.change('fixture.wait', (s) => {
+        s.waits = [
+          {
+            kind: 'base-check',
+            detail: heldBaseDetail(['main:tests/config.json']),
+            at: new Date().toISOString(),
+          },
+        ] as never;
+        return {};
+      });
+      const read = f.h.store.read.bind(f.h.store);
+      let first = true;
+      f.h.store.read = () => {
+        const st = read();
+        if (first) {
+          first = false;
+          st.waits = undefined;
+        }
+        return st;
+      };
+      const lifts: unknown[] = [];
+      const pause = f.h.pause.bind(f.h);
+      f.h.pause = (...args: Parameters<DevContour['pause']>) => {
+        if (!args[0]) lifts.push(args);
+        return pause(...args);
+      };
+      try {
+        await new LeadRunner(f.h, f.root).execute(
+          flow.get(job.key, job.owner),
+          new AbortController().signal,
+        );
+      } finally {
+        f.h.store.read = read;
+        f.h.pause = pause;
+      }
+      assert.deepEqual(lifts, [], 'снятие паузы не вызывалось');
+      assert.equal(f.store.read().paused, true);
+      assert.equal(f.store.read().tasks.find((x) => x.id === t.id)!.status, 'ready');
+    } finally {
+      f.cleanup();
+    }
+  }
+  // (b) Отказ снять паузу при удержании (как от DevContour.pause) задание не
+  // проваливает: оно ждёт подтверждения в очереди.
+  {
+    const f = fixture();
+    const lead = new LeadRunner(f.h, f.root);
+    try {
+      const b = f.h.createBoard('Board');
+      f.h.addTask(b.id, input());
+      f.h.approve(b.id);
+      f.h.pause(true);
+      await new Promise((r) => setTimeout(r, 5));
+      const flow = new LeadWorkflow(f.h);
+      const job = flow.start({ kind: 'board', id: b.id, authorRuntime: 'codex' });
+      const pause = f.h.pause.bind(f.h);
+      f.h.pause = (...args: Parameters<DevContour['pause']>) => {
+        if (!args[0])
+          throw new DomainError(`${BASE_HELD_REFUSAL}: перенос базы меняет приёмку`, 409);
+        return pause(...args);
+      };
+      try {
+        for (let i = 0; i < 3; i++) await lead.tick();
+      } finally {
+        f.h.pause = pause;
+      }
+      const state = flow.get(job.key, job.owner);
+      assert.notEqual(state.status, 'failed', state.error);
+      assert.equal(f.store.read().paused, true);
+    } finally {
+      await lead.stop();
+      f.cleanup();
+    }
+  }
+});
+
+test('queue --start --by host не снимает удержанный перенос; queue --start человека снимает', async () => {
+  const seed = await demos.acquire();
+  const root = seed.root;
+  const file = join(root, 'state.sqlite');
+  const config = loadConfig(join(root, 'config.json'));
+  const setup = new DevContour(new Store(file), config);
+  try {
+    const b = setup.createBoard('CLI board', '', 'main');
+    setup.addTask(b.id, input());
+    setup.approve(b.id);
+    setup.store.change('fixture.held', (s) => {
+      s.paused = true;
+      s.pauseReason = 'base-check';
+      s.pausedAt = new Date().toISOString();
+      s.waits = [
+        {
+          kind: 'base-check',
+          detail: heldBaseDetail(['main:tests/config.json']),
+          at: new Date().toISOString(),
+        },
+      ] as never;
+      return {};
+    });
+  } finally {
+    setup.store.close();
+  }
+  try {
+    const cli = ['node', '--import', 'tsx', 'src/cli.ts', 'queue', '--start'];
+    const asLead = await command([...cli, '--by', 'host', '--data', root], process.cwd());
+    assert.notEqual(asLead.code, 0, asLead.stdout);
+    assert.match(asLead.stdout + asLead.stderr, /Подтвердить и запустить/);
+    const after = new DevContour(new Store(file), config);
+    try {
+      assert.equal(after.store.read().paused, true);
+      assert.ok(after.store.read().waits?.some((w) => w.kind === 'base-check'));
+    } finally {
+      after.store.close();
+    }
+    // Человек: та же команда без --by host снимает паузу и удержание.
+    const asOperator = await command([...cli, '--data', root], process.cwd());
+    const done = new DevContour(new Store(file), config);
+    try {
+      assert.equal(done.store.read().paused, false, asOperator.stdout + asOperator.stderr);
+      assert.ok(!done.store.read().waits?.some((w) => w.kind === 'base-check'));
+    } finally {
+      done.store.close();
+    }
+  } finally {
+    seed.release();
   }
 });

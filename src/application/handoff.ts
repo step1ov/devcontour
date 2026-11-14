@@ -390,8 +390,9 @@ const PACK_TEXT_CHARS = 300;
  * человека (`user`, `resume-queue`), пути и действие оператора — ту же
  * причину, что у остановки очереди и центра внимания. Команда harness
  * (`harness run`) в таких шагах не называется: она ожидание не снимет.
- * Остановку очереди, отброшенную пределом размера, пакет получает обратно:
- * она — единственное место пакета, где назван человек. Текст — под маской
+ * Остановку очереди, отброшенную пределом размера, пакет получает обратно
+ * (ту же, из пакета без предела, — `queueStop`): она — единственное место
+ * пакета, где назван человек. Текст — под маской
  * и в пределе строки пакета (полный — `host.next.detail`).
  */
 export function withHeldBaseStop(
@@ -399,6 +400,11 @@ export function withHeldBaseStop(
   state: Partial<Pick<DevContourState, 'paused' | 'waits'>>,
   /** Маска пакета: пути и причина — тексты из хранилища. */
   redact: (text: string) => string = (text) => text,
+  /**
+   * Остановка очереди того же снимка без предела размера: если предел её
+   * отбросил, возвращается именно она (с текстом удержания).
+   */
+  queueStop?: HandoffPack['stops'][number],
 ): HandoffPack {
   const held = heldBaseOf(state);
   if (!held) return pack;
@@ -421,29 +427,14 @@ export function withHeldBaseStop(
     delete out.command;
     return out;
   };
-  const queueStop = (stop: HandoffPack['stops'][number]) =>
-    !!stop.queue && stop.code === 'PAUSED' && waits(stop);
-  let stops = pack.stops.map((stop) =>
-    queueStop(stop)
+  const rewrite = (stop: HandoffPack['stops'][number]) =>
+    stop.queue && stop.code === 'PAUSED' && waits(stop)
       ? { ...stop, actor: 'user' as const, action: 'resume-queue' as const, message: text }
-      : stop,
-  );
+      : stop;
+  let stops = pack.stops.map(rewrite);
   let truncated = pack.truncated;
-  if (!stops.some((x) => x.queue) && pack.truncated.stops) {
-    stops = [
-      {
-        code: 'PAUSED',
-        cause: 'not-ready',
-        phase: 'claim',
-        actor: 'user',
-        action: 'resume-queue',
-        retryPlanned: false,
-        message: text,
-        evidence: [],
-        queue: true,
-      },
-      ...stops,
-    ];
+  if (queueStop && !stops.some((x) => x.queue) && pack.truncated.stops) {
+    stops = [rewrite(queueStop), ...stops];
     truncated = { ...truncated, stops: truncated.stops - 1 };
   }
   const works = pack.works.map((w) =>
@@ -1280,11 +1271,15 @@ export function devcontourHandoffWithin(
   try {
     return store.read((v) => {
       const state = store.stateOf(v);
+      // Остановка очереди пакета без предела: пакет в пределе её возвращает,
+      // если предел её отбросил (`withHeldBaseStop`).
+      const full: { queueStop?: HandoffPack['stops'][number] } = {};
       const packOf = (options: Parameters<typeof handoffPack>[1]) =>
         withHeldBaseStop(
           withoutIdleControllerStop(handoffPack(packSource, options)),
           state,
           options?.redact,
+          full.queueStop,
         );
       // Короткая форма из журнала и панели (`B-xxxxxxxx`) — однозначный
       // префикс полного id; неоднозначный называет кандидатов.
@@ -1325,6 +1320,7 @@ export function devcontourHandoffWithin(
         redact: handoffRedactor(h.config, engine.policy),
       };
       const pack = packOf(options);
+      full.queueStop = pack.stops.find((x) => x.queue);
       const locale = hintLocaleOf(h.config);
       const ctx = hostContext(h, harness, v, state, () => pack);
       const liveBoards = [...new Set(ctx.jobs.filter(ctx.live).map((j) => j.id))];
