@@ -29,6 +29,7 @@ import { loadedDigest } from '../core/service.ts';
 import { git, isAncestor } from './process.ts';
 import { queueStopView } from '../core/work-status.ts';
 import {
+  registeredContractLifts,
   siblingContractLifts,
   siblingLiftHolds,
   type SiblingContractLift,
@@ -143,6 +144,19 @@ export type ContractChange = {
    * соседнюю: её id и новая вершина базы.
    */
   carriedBy?: { operation: string; base: string };
+  /**
+   * Контракты, зарегистрированные без операции, чьи документы из context
+   * packs перенос базы этой операции принёс как одобренные: эти пакеты
+   * перезакрепляет её шаг `context`.
+   */
+  registered?: string[];
+  /**
+   * Вершина базы, на которой шаг `base` нашёл проверенную редакцию уже
+   * перенесённой (`carried`): на ней шаг `context` закрепляет пакеты. Без
+   * поля — проверенный commit (`expected.head`), который перенесла сама
+   * операция.
+   */
+  pinAt?: string;
   /** Связанная редакция: операция, которую эта продолжила после побочных эффектов. */
   previous?: string;
   next?: string;
@@ -740,17 +754,32 @@ export class ContractChanges {
    * остаётся до перезакрепления.
    */
   private async contextWait(op: ContractChange) {
-    const contract = this.h.store.read().contracts.find((c) => c.id === op.contractId);
-    const stale = contract ? await stalePins(this.h.config, contract) : [];
+    // Свой контракт и контракты без операции, чьи документы принёс перенос
+    // базы этой операции: их пакеты тоже должны закреплять новую редакцию.
+    const { stale, sources } = await this.stalePacks(op);
     if (!stale.length) {
       this.h.clearWait('context-lock', op.id);
       return undefined;
     }
     // Не отказ, а возобновляемое ожидание с точным следующим шагом: уже
     // действительное ревью не повторяется, удержания остаются.
-    const detail = `Context pack ${stale.join(', ')} закрепляет прежнюю редакцию ${contract!.source}: задачи заблокировались бы на первом запуске. Выполните context-lock, перезапустите сервер и продолжите: contract-change --id ${op.id}`;
+    const detail = `Context pack ${stale.join(', ')} закрепляет прежнюю редакцию ${sources.join(', ')}: задачи заблокировались бы на первом запуске. Выполните context-lock, перезапустите сервер и продолжите: contract-change --id ${op.id}`;
     this.h.waitFor('context-lock', op.id, detail);
     return { wait: detail, waitingFor: ['context-lock'] };
+  }
+
+  /** Пакеты, закрепляющие прежнюю редакцию своего контракта или контрактов `registered`. */
+  private async stalePacks(op: ContractChange) {
+    const contracts = this.h.store.read().contracts;
+    const stale = new Set<string>();
+    const sources: string[] = [];
+    for (const id of [op.contractId, ...(op.registered ?? [])]) {
+      const c = contracts.find((x) => x.id === id);
+      const packs = c ? await stalePins(this.h.config, c) : [];
+      for (const p of packs) stale.add(p);
+      if (packs.length && c?.source) sources.push(c.source);
+    }
+    return { stale: [...stale], sources };
   }
 
   /**
@@ -980,6 +1009,30 @@ export class ContractChanges {
         // Переносится ровно проверенный commit и только в компоненте
         // контракта: подготовка других компонентов остаётся за ведущим.
         const reviewed = op.expected.head;
+        // База уже несёт проверенную редакцию: документ и артефакты на ней —
+        // те же blob и режим, что на проверенном commit (их принёс сосед или
+        // явный base-update). Переносить нечего, шаг выполнен; ничего не
+        // сдвигается, поэтому и непроверенное в базу не попадает.
+        const base = await git(repo.path, 'rev-parse', target);
+        if (await ownInBase(repo.path, op, base)) {
+          await this.liftStaleBasePause(op);
+          this.advanceStep(op, (current) => {
+            // Пакеты закрепляются на базе, а не на проверенном commit: он
+            // мог не попасть в базу (переписанная история), а прочие файлы
+            // пакета на нём — не прошедшие базу правки рабочей ветки.
+            if (base !== reviewed) current.pinAt = base;
+            this.log(
+              current,
+              'base',
+              'carried',
+              `база ${repo.id}:${base} уже содержит проверенную редакцию ${reviewed.slice(0, 12)}` +
+                (current.carriedBy
+                  ? `: перенесла операция ${current.carriedBy.operation} (${current.carriedBy.base})`
+                  : ': перенос вне операции (base-update или другой перенос)'),
+            );
+          });
+          return {};
+        }
         // Итоговое изменение от общей базы, а не каждый промежуточный commit:
         // правка, отменённая позже в той же ветке, в базу не попадает. Без
         // переименований: перенос постороннего файла на путь артефакта
@@ -1008,8 +1061,46 @@ export class ContractChanges {
             o.contractId ? [{ contractId: o.contractId, head: o.expected.head }] : [],
           ),
         );
-        const rest = extra.filter((p) => !lifted.has(p));
+        // Документы и артефакты контрактов, зарегистрированных без операции
+        // (`review-contract`: новый документ этапа или поправка без открытых
+        // задач прежней редакции), переносятся по тому же доказательству:
+        // последняя одобренная редакция, точный blob и режим.
+        const registered = await registeredContractLifts(
+          this.h,
+          this.root,
+          this.h.store.read(),
+          repo.id,
+          extra.filter((p) => !lifted.has(p)),
+          reviewed,
+          target,
+          {
+            held: new Set(siblings.flatMap((o) => [...pathsOf(o)])),
+            excluded: this.unfinishedRegistrations(),
+            corrected: new Set(
+              this.list()
+                .filter((o) => o.status === 'completed' && o.contractId)
+                .map((o) => o.contractId!),
+            ),
+            // Context pack такого документа перезакрепляет шаг `context`
+            // этой операции; у операций прежних порядков его нет.
+            packs: stepsOf(op).includes('context'),
+          },
+        );
+        const rest = extra.filter((p) => !lifted.has(p) && !registered.lifted.has(p));
         if (rest.length) return this.refuseOrWait(op, repo.id, reviewed, paths, rest, siblings);
+        // Контракты, чьи пакеты перезакрепит шаг `context`, записываются до
+        // сдвига ref: после сбоя между сдвигом и записью шага повтор находит
+        // базу уже перенесённой (`carried`) и снятий не пересчитывает. Запись
+        // для сдвига, которого не случилось, безвредна: перезакрепление даёт
+        // одобренный текст.
+        if (registered.packed.some((id) => !op.registered?.includes(id)))
+          this.h.store.atomic(() => {
+            const current = this.guard(op);
+            current.registered = [
+              ...new Set([...(current.registered ?? []), ...registered.packed]),
+            ];
+            this.save(current);
+          });
         // Перенос базы — внешний эффект: сдвиг ref выполняется синхронно в той
         // же транзакции, что проверка владения. Отмена или перехват операции
         // либо видны проверке, либо происходят уже после сдвига — окна между
@@ -1032,7 +1123,7 @@ export class ContractChanges {
                 executionOf(this.h).store,
                 () => {
                   this.guard(op);
-                  this.assertLifts(op, repo.id, lifted);
+                  this.assertLifts(op, repo.id, lifted, registered.lifted);
                 },
                 ContractChanges.refMoveTimeoutMs,
                 'host',
@@ -1056,6 +1147,13 @@ export class ContractChanges {
               'base',
               'siblings',
               [...lifted.values()].map((l) => `${l.path} (${l.contractId})`).join(', '),
+            );
+          if (registered.lifted.size)
+            this.log(
+              current,
+              'base',
+              'registered',
+              [...registered.lifted.values()].map((l) => `${l.path} (${l.contractId})`).join(', '),
             );
           if (updated.length)
             this.log(
@@ -1093,8 +1191,10 @@ export class ContractChanges {
       }
       case 'context': {
         const path = join(this.root, 'config.json');
-        const contract = this.h.store.read().contracts.find((c) => c.id === op.contractId);
-        const stale = contract ? await stalePins(this.h.config, contract) : [];
+        // И пакеты документов, которые перенос базы принёс как одобренные
+        // редакции контрактов без операции: их больше никто не перезакрепит.
+        const { stale } = await this.stalePacks(op);
+        const pinAt = op.pinAt ?? op.expected.head;
         if (!stale.length && !op.config) {
           // Перезакреплять нечего: конфигурация не меняется.
           this.advanceStep(op);
@@ -1114,7 +1214,7 @@ export class ContractChanges {
             throw new DomainError(
               'config.json отличается от действующей конфигурации процесса: примените правку перезапуском сервера и продолжите операцию',
             );
-          const nextText = await planRepin(this.h.config, text, stale, op.expected.head);
+          const nextText = await planRepin(this.h.config, text, stale, pinAt);
           planned = { before: current, after: loadedDigest(loadConfig(path, nextText)) };
           const fixed = planned;
           this.h.store.atomic(() => {
@@ -1132,7 +1232,7 @@ export class ContractChanges {
           throw new DomainError(
             `config.json изменён вне операции: ожидался digest ${before.slice(0, 16)}, загружен ${current.slice(0, 16)}`,
           );
-        const nextText = await planRepin(this.h.config, text, stale, op.expected.head);
+        const nextText = await planRepin(this.h.config, text, stale, pinAt);
         if (loadedDigest(loadConfig(path, nextText)) !== after)
           throw new DomainError('Перезакрепление дало не ту конфигурацию, что была рассчитана');
         const temp = `${path}.${op.id}.${process.pid}`;
@@ -1155,7 +1255,7 @@ export class ContractChanges {
               c,
               'context',
               'repinned',
-              `${stale.join(', ')} @ ${op.expected.head.slice(0, 12)}; config ${before.slice(0, 12)} → ${after.slice(0, 12)}`,
+              `${stale.join(', ')} @ ${pinAt.slice(0, 12)}; config ${before.slice(0, 12)} → ${after.slice(0, 12)}`,
             );
             this.save(c);
           });
@@ -1239,7 +1339,39 @@ export class ContractChanges {
     const repo = repository(this.h.config, op.proposal.repositoryId ?? defaultOwner(this.h));
     const head = await git(repo.path, 'rev-parse', 'HEAD');
     let moved: string[] | undefined;
-    if (head !== op.expected.head) {
+    const target = `refs/heads/${repo.targetBranch}`;
+    const baseStep = stepsOf(op).indexOf('base');
+    // После шага базы операция держится за перенесённую редакцию: база, в
+    // которой её больше нет (сброшена или переписана), — устаревание, а не
+    // завершение по отсутствующему в ней тексту.
+    if (op.step > baseStep && pathsOf(op).size && !(await ownInBase(repo.path, op, target)))
+      throw new StaleChange(
+        `База ${repo.id} больше не содержит проверенную редакцию операции (${[...pathsOf(op)].slice(0, 20).join(', ')}): начните операцию заново по текущей редакции`,
+      );
+    // Начиная с шага базы сдвиг рабочей ветки не делает операцию устаревшей,
+    // если база уже несёт её проверенную редакцию (документ и артефакты —
+    // те же blob и режим), а сама рабочая ветка эти пути не меняла: ревью,
+    // перепривязка и перенос уже сделаны. HEAD не принимается. Правка своего
+    // документа или артефакта после ревью — устаревание: она не часть
+    // одобренной редакции, и ведущий должен это увидеть.
+    if (head !== op.expected.head && op.step >= baseStep && pathsOf(op).size) {
+      if (!(await ownInBase(repo.path, op, head)))
+        throw new StaleChange(
+          `Рабочая ветка сдвинулась (${op.expected.head.slice(0, 12)} → ${head.slice(0, 12)}) и меняет документ или артефакты этой операции после её ревью: правка не входит в одобренную редакцию. Проведите её новой операцией contract-change, когда эта завершится или будет отменена`,
+        );
+    }
+    const carried =
+      head !== op.expected.head && op.step >= baseStep && (await ownInBase(repo.path, op, target));
+    if (carried) {
+      const detail = `${op.expected.head.slice(0, 12)} → ${head.slice(0, 12)}: база уже содержит проверенную редакцию, операция продолжается по проверенному commit`;
+      if (!op.history.some((e) => e.event === 'head-moved' && e.detail === detail))
+        this.h.store.atomic(() => {
+          const current = this.guard(op);
+          this.log(current, stepsOf(current)[current.step], 'head-moved', detail);
+          this.save(current);
+          op.history = current.history;
+        });
+    } else if (head !== op.expected.head) {
       moved = await this.siblingMove(op, repo.path, head);
       if (!moved)
         throw new StaleChange(
@@ -1323,14 +1455,34 @@ export class ContractChanges {
     }
     const all = this.list();
     const sibling = unheld.filter((p) => siblings.some((o) => pathsOf(o).has(p)));
-    const foreign = unheld.filter((p) => !sibling.includes(p));
+    const contracts = this.h.store
+      .read()
+      .contracts.filter((c) => (c.repositoryId ?? 'main') === op.owner);
+    const registered = unheld.filter(
+      (p) =>
+        !sibling.includes(p) &&
+        contracts.some(
+          (c) =>
+            c.source === p ||
+            (c.artifacts ?? []).some((a) => a.repositoryId === op.owner && a.path === p),
+        ),
+    );
+    const foreign = unheld.filter((p) => !sibling.includes(p) && !registered.includes(p));
     const gone = (this.waited.get(op.id) ?? [])
       .map((id) => all.find((o) => o.id === id))
       .filter((o): o is ContractChange => Boolean(o) && !(active(o!) && o!.step < base(o!)));
     throw new DomainError(
       [
+        // Первым: длинные списки ниже ограничены пределом текста ошибки.
+        // Запись делает assertInputs в этом же продолжении: читается сохранённая.
+        this.get(op.id).history.some((e) => e.event === 'rebased')
+          ? `Операция приняла сдвинутую рабочую ветку (запись истории rebased, HEAD ${reviewed.slice(0, 12)}): пути ниже могли измениться после её ревью.`
+          : '',
         foreign.length
           ? `Рабочая ветка несёт изменения вне контракта: ${foreign.slice(0, 20).join(', ')}.`
+          : '',
+        registered.length
+          ? `Документы или артефакты контрактов без операции, не годные для переноса по одобрению (редакция не последняя, не одобрена агентом с независимым ревьюером или её зарегистрировала незавершённая операция; blob или режим отличаются; открыты задачи прежней редакции; у заменённой редакции есть принятые задачи — их корректировки создаёт contract-change; артефакт иначе закрепляет другой действующий договор; документ в context pack у операции без шага context): ${registered.slice(0, 20).join(', ')}.`
           : '',
         sibling.length
           ? `Пути соседних контрактов не в одобренной редакции (blob или режим отличаются от одобренных, редакция не последняя или не годится для снятия): ${sibling.slice(0, 20).join(', ')}.`
@@ -1353,15 +1505,28 @@ export class ContractChanges {
     op: ContractChange,
     repositoryId: string,
     lifted: Map<string, SiblingContractLift>,
+    registered: Map<string, SiblingContractLift>,
   ) {
-    if (!lifted.size) return;
+    if (!lifted.size && !registered.size) return;
     const s = this.h.store.read();
     const siblings = this.siblingsOf(op);
-    const changed = [...lifted.values()].filter(
-      (l) =>
-        !siblings.some((o) => o.contractId === l.contractId) ||
-        !siblingLiftHolds(this.h.config, s, repositoryId, l),
-    );
+    const held = new Set(siblings.flatMap((o) => [...pathsOf(o)]));
+    const unfinished = this.unfinishedRegistrations();
+    const changed = [
+      ...[...lifted.values()].filter(
+        (l) =>
+          !siblings.some((o) => o.contractId === l.contractId) ||
+          !siblingLiftHolds(this.h.config, s, repositoryId, l),
+      ),
+      // Контракт без операции: путь не взяла живая операция, редакцию не
+      // остановила незавершённая, она всё ещё последняя годная.
+      ...[...registered.values()].filter(
+        (l) =>
+          held.has(l.path) ||
+          unfinished.has(l.contractId) ||
+          !siblingLiftHolds(this.h.config, s, repositoryId, l),
+      ),
+    ];
     if (changed.length)
       throw new DomainError(
         `Соседний контракт изменился во время переноса базы (${changed.map((l) => l.path).join(', ')}): операция отменена, заменена или зарегистрирована новая редакция. База не сдвинута; продолжите операцию, снятия будут пересчитаны: contract-change --id ${op.id}`,
@@ -1391,6 +1556,19 @@ export class ContractChanges {
     });
   }
 
+  /**
+   * Редакции, которые зарегистрировала операция, не дошедшая до завершения
+   * (живая, отменённая, заменённая, устаревшая): их переносит сама операция
+   * или не переносит никто, но не снятие как контракта без операции.
+   */
+  private unfinishedRegistrations() {
+    return new Set(
+      this.list()
+        .filter((o) => o.contractId && o.status !== 'completed')
+        .map((o) => o.contractId!),
+    );
+  }
+
   /** Живые операции других контрактов того же компонента. */
   private siblingsOf(op: ContractChange) {
     return this.list().filter((o) => o.id !== op.id && o.owner === op.owner && active(o));
@@ -1418,7 +1596,30 @@ export class ContractChanges {
     // Свой путь в итоговом изменении — другой blob или режим: ревью его не
     // видело, даже если digest (по blob) прежний.
     const own = pathsOf(op);
-    const sibling = new Set(this.siblingsOf(op).flatMap((o) => [...pathsOf(o)]));
+    // Пути соседних операций и документы и артефакты контрактов того же
+    // компонента, зарегистрированных без операции (исправленный после отказа
+    // review-contract новый документ этапа): их перенос база проверяет сама.
+    // Только действующие редакции (последние для документа), которые не
+    // регистрировала незавершённая операция: путь заменённой или остановленной
+    // ведущим редакции оставляет операцию устаревшей, а не переносит отказ в базу.
+    const contracts = this.h.store.read().contracts;
+    const unfinished = this.unfinishedRegistrations();
+    const registered = contracts
+      .filter(
+        (c) =>
+          (c.repositoryId ?? 'main') === op.owner &&
+          c.source &&
+          latestRedaction(contracts, c.source, op.owner)?.id === c.id &&
+          !unfinished.has(c.id),
+      )
+      .flatMap((c) => [
+        ...(c.source ? [c.source] : []),
+        ...(c.artifacts ?? []).filter((a) => a.repositoryId === op.owner).map((a) => a.path),
+      ]);
+    const sibling = new Set([
+      ...this.siblingsOf(op).flatMap((o) => [...pathsOf(o)]),
+      ...registered,
+    ]);
     if (!changed.length || changed.some((p) => own.has(p) || !sibling.has(p))) return undefined;
     return changed;
   }
@@ -1442,6 +1643,28 @@ async function changedPaths(repoPath: string, ...range: string[]) {
   )
     .split('\0')
     .filter(Boolean);
+}
+
+/**
+ * База `target` уже несёт проверенную редакцию операции: каждый её путь
+ * (документ и артефакты) на базе — обычный файл с теми же blob и режимом, что
+ * на проверенном commit. Операция без путей в репозитории так не считается.
+ */
+async function ownInBase(repoPath: string, op: ContractChange, target: string) {
+  const own = [...pathsOf(op)];
+  if (!own.length) return false;
+  const entries = async (at: string) =>
+    (await git(repoPath, 'ls-tree', '-z', at, '--', ...own)).split('\0').filter(Boolean).sort();
+  try {
+    const [inBase, reviewed] = await Promise.all([entries(target), entries(op.expected.head)]);
+    return (
+      reviewed.length === own.length &&
+      reviewed.every((e) => /^100(644|755) blob /.test(e)) &&
+      inBase.join('\0') === reviewed.join('\0')
+    );
+  } catch {
+    return false;
+  }
 }
 
 /** Документ и артефакты предложения операции — пути, которые она переносит. */
