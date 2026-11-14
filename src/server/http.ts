@@ -855,9 +855,12 @@ export async function serve(
               );
             else if (parts[3] === 'retry') result = h.retry(parts[2], undefined, 'operator');
             else if (parts[3] === 'cancel') result = h.cancel(parts[2], undefined, 'operator');
-            else if (req.method === 'PATCH')
-              result = h.editTask(parts[2], input, z.string().parse(input.expectedDigest));
-            else throw new DomainError('Команда не найдена', 404);
+            else if (req.method === 'PATCH') {
+              const pins = z
+                .object({ expectedDigest: z.string(), expectedScopeDigest: z.string().optional() })
+                .parse(input);
+              result = h.editTask(parts[2], input, pins.expectedDigest, pins.expectedScopeDigest);
+            } else throw new DomainError('Команда не найдена', 404);
           } else throw new DomainError('Маршрут не найден', 404);
         } else throw new DomainError('Маршрут не найден', 404);
         json(res, 200, result ?? {});

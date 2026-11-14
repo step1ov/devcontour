@@ -335,7 +335,48 @@ export function harnessOf(h: DevContour) {
     });
   const workflows = { list, continues };
   const source: HandoffSource = { engine, policy: engine.policy, workflows };
-  return { source, workflows, engine, current, inputOf };
+  /**
+   * Источник пакета: задания без вытесненных — тех, у доски которых есть
+   * задание, начатое позже, и которые не продолжаются. Пакет harness
+   * перечисляет в `repairs` незавершённые задания без ключа задания:
+   * счётчик восстановлений прежнего задания доски выдавал бы себя за
+   * счётчик текущего (новое задание начинает бюджет с нуля), а завершённое
+   * текущее задание в `repairs` не входит вовсе. Диагнозы остановок от
+   * этого не меняются: действующее задание и наличие задания у доски
+   * остаются в списке.
+   */
+  const packSource: HandoffSource = {
+    ...source,
+    workflows: {
+      continues,
+      list: () =>
+        store.read((view) => {
+          const jobs = list();
+          const options = { reconfigureApplies: engine.reconfigureApplies(view) };
+          const newest = new Map<string, string>();
+          for (const job of jobs)
+            if (job.startedAt > (newest.get(job.id) ?? '')) newest.set(job.id, job.startedAt);
+          return jobs.filter(
+            (job) => job.startedAt >= newest.get(job.id)! || continues(job, view, options),
+          );
+        }),
+    },
+  };
+  return { source, packSource, workflows, engine, current, inputOf };
+}
+
+/**
+ * Остановка выдачи «очередь ведёт другой controller» (`CONTROLLER_BUSY`) в
+ * пакете без открытых поручений: выдавать нечего, а сервер, держащий роль
+ * controller, — обычное состояние, а не шаг ведущего.
+ */
+export function withoutIdleControllerStop(pack: HandoffPack): HandoffPack {
+  if (pack.summary.open || !pack.controller?.live) return pack;
+  const stops = pack.stops.filter((s) => s.code !== 'CONTROLLER_BUSY');
+  if (stops.length < pack.stops.length) return { ...pack, stops };
+  // Остановку отбросил предел пакета: она — среди `truncated.stops`.
+  if (!pack.truncated.stops) return pack;
+  return { ...pack, truncated: { ...pack.truncated, stops: pack.truncated.stops - 1 } };
 }
 
 /** Наследуемое значение короче — обычное слово или число, а не учётные данные. */
@@ -1156,8 +1197,10 @@ export function devcontourHandoffWithin(
     );
   const request = parsed.data;
   const harness = harnessOf(h);
-  const { source, engine } = harness;
+  const { packSource, engine } = harness;
   const { store } = executionOf(h);
+  const packOf = (options: Parameters<typeof handoffPack>[1]) =>
+    withoutIdleControllerStop(handoffPack(packSource, options));
   try {
     return store.read((v) => {
       const state = store.stateOf(v);
@@ -1199,7 +1242,7 @@ export function devcontourHandoffWithin(
         ...(request.intentions ? { intentions: request.intentions } : {}),
         redact: handoffRedactor(h.config, engine.policy),
       };
-      const pack = handoffPack(source, options);
+      const pack = packOf(options);
       const locale = hintLocaleOf(h.config);
       const ctx = hostContext(h, harness, v, state, () => pack);
       const liveBoards = [...new Set(ctx.jobs.filter(ctx.live).map((j) => j.id))];
@@ -1257,7 +1300,7 @@ export function devcontourHandoffWithin(
       // ответ в пределе не удержать (вызывающий проверяет размер сам).
       const clamp = (n: number) => Math.min(HANDOFF_MAX_BYTES, Math.max(HANDOFF_MIN_BYTES, n));
       const build = (maxBytes: number) =>
-        handoffPack(source, {
+        packOf({
           ...options,
           maxBytes,
           measure: limit.format === 'md' ? 'markdown' : 'json',

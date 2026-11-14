@@ -27,7 +27,13 @@ import { repositories, repository } from '../core/repositories.ts';
 import { z, ZodError } from 'zod';
 import { readFileSync } from 'node:fs';
 import { AgentContext, contextInputs, type ContextOperation } from './context.ts';
-import { DevContour, SERVER_STOPPING, scopeGapWarning, specDigest } from '../core/service.ts';
+import {
+  DevContour,
+  SERVER_STOPPING,
+  scopeDigest,
+  scopeGapWarning,
+  specDigest,
+} from '../core/service.ts';
 import { taskIngest, DomainError, type Task } from '../core/model.ts';
 import { planIngest } from '../core/plan.ts';
 import { Workspace, changeSetInput } from '../core/workspace.ts';
@@ -41,7 +47,9 @@ import { applyCases } from '../runner/recovery.ts';
 import { proveScenario, scenarioProofInput } from '../runner/scenario-proof.ts';
 import { ContractChanges } from '../runner/contract-change.ts';
 import { contractProposal, limitsMessage, proposalLimitIssues } from '../runner/agent-control.ts';
-import { queueStopOf, quietAttempts, quietOperations } from './queue-stop.ts';
+import { queueStopOf } from './queue-stop.ts';
+import { publicJob, workflowStatus, workflowStatusInput } from './workflow-status.ts';
+import { oversized } from './response-limit.ts';
 import { InputService, inputOperationInputs } from './input.ts';
 import { AttentionService } from './attention.ts';
 import { attentionInputs } from '../core/attention-model.ts';
@@ -50,6 +58,7 @@ import { gateTestcases, testcasesInput } from './testcases.ts';
 
 const id = z.string().regex(/^[A-Za-z0-9_-]{1,80}$/);
 export { SERVER_STOPPING };
+export { oversized };
 export const agentInputs = {
   ...preparationInputs,
   ...intentInputs,
@@ -59,7 +68,7 @@ export const agentInputs = {
   signal_ingest: signalInput,
   signal_status: z.strictObject({ repositoryId: id }),
   workflow_start: workflowInput,
-  workflow_status: z.strictObject({ repositoryId: id.optional() }),
+  workflow_status: workflowStatusInput,
   workflow_retry: z.strictObject({
     repositoryId: id.optional(),
     key: z.string().regex(/^[a-f0-9]{64}$/),
@@ -88,7 +97,15 @@ export const agentInputs = {
     .strict(),
   task_create: z.object({ boardId: id, task: taskIngest }).strict(),
   task_edit: z
-    .object({ taskId: id, expectedDigest: z.string().regex(/^[a-f0-9]{64}$/), task: taskIngest })
+    .object({
+      taskId: id,
+      expectedDigest: z.string().regex(/^[a-f0-9]{64}$/),
+      expectedScopeDigest: z
+        .string()
+        .regex(/^[a-f0-9]{64}$/)
+        .optional(),
+      task: taskIngest,
+    })
     .strict(),
   task_retry: z.object({ taskId: id }).strict(),
   task_assign: z
@@ -240,7 +257,7 @@ export const descriptions: Record<AgentOperation, string> = {
   workflow_start:
     'Enqueue idempotent board review, execution and acceptance or ChangeSet verification. A running server may invoke models. Operator policy remains enforced.',
   workflow_status:
-    'Read owner-local durable stage jobs, the queue stop and running attempts and checks without movement (liveness and operations: quiet or stalled, idle time, activity, next step). Without repositoryId, jobs are the workspace jobs and otherOwners counts the jobs of component-local boards per repositoryId (jobs, active) with otherOwnersHint; pass repositoryId to read them. A queued or running job has waiting when its stage waits: input (writer questions) for a board, verification (verificationId, startedAt, elapsedMs) for a ChangeSet at stage 1 while its joint verification runs. No model calls or execution leases are granted.',
+    'Read owner-local durable stage jobs, the queue stop and running attempts and checks without movement (liveness and operations: quiet or stalled, idle time, activity, next step). Without repositoryId, jobs are the workspace jobs and otherOwners counts the jobs of component-local boards per repositoryId (jobs, active) with otherOwnersHint; pass repositoryId to read them. A queued or running job has waiting when its stage waits: input (writer questions) for a board, verification (verificationId, startedAt, elapsedMs) for a ChangeSet at stage 1 while its joint verification runs. Active jobs (queued, running) are listed in full. Finished jobs (completed, failed, stale) are folded: by default the latest 10 by end time plus up to 10 retryable failed jobs (attempts below maxAttempts and still the newest job of their board or ChangeSet; the hint counts the retryable ones not listed) in a compact form (no history; endedAt, endedAtEstimated when the queue stamped no end time, lastEvent, historyLength, error up to 1000 chars, retryable), counted in finished {total, byStatus, retryable, listed, omitted, compact, hint}; jobs keep store order, not time order. Filters: key (one job in full: whole error and history), kind and id (the jobs of one board or ChangeSet in full), active (true: only queued and running, finished still counted; false: only finished), limit (finished jobs listed, 1-200). Over the response limit the history of full jobs is cut to its last 20 events (historyOmitted, historyClipped) when the active jobs alone do not fit or finished jobs are named; then finished jobs are dropped, oldest first, retryable failed ones last, never the job named by key (counted in finished.omitted). No model calls or execution leases are granted.',
   workflow_retry:
     'Retry a diagnosed failed stage within its original attempt budget. Never retries failed task implementations automatically.',
   workflow_metrics:
@@ -262,7 +279,7 @@ export const descriptions: Record<AgentOperation, string> = {
   project_overview:
     'Read bounded summaries of the common workspace or one repository; follow nextCursor.',
   task_briefing:
-    'Read all pages of the task requirements, contracts, execution policy and blocking reasons. Optional repositoryId (multi-repository workspace): the task must belong to that component, otherwise the call is refused.',
+    'Read all pages of the task requirements, contracts, execution policy and blocking reasons. execution.gates are the gates an attempt of this task runs: its own gates (groups expanded, gateScope task) or, without them, the whole profile (gateScope profile); a gate with when.paths runs only when the diff touches its paths; a task with requirements also runs the requirement-source check (kind requirement). outsideScope lists profile gates outside the task scope (another task or board acceptance runs them), consumerGates the checks of its consumers. Optional repositoryId (multi-repository workspace): the task must belong to that component, otherwise the call is refused.',
   checkpoint_save:
     'Save an immutable Git-portable context note in the selected owner, requiring the current overview revision. This does not approve work.',
   checkpoint_changes:
@@ -273,7 +290,7 @@ export const descriptions: Record<AgentOperation, string> = {
   task_create:
     "Add a draft task to an active board; DAG and component ownership are validated. In a product change the task is bound to task.preparation.changeId when given (changeId alone is enough; supplied digests must equal the current approved ones), otherwise to the change of the board's tasks, otherwise to the active change; a change other than that of the board's live tasks is refused; the response names the binding. An accepted board takes no tasks: open the next stage with plan_import and its boardId; board_correct only changes accepted results.",
   task_edit:
-    "Edit a draft task using the specDigest read from task_briefing. Stale edits are rejected. task.preparation.changeId rebinds the task to that product change (changeId alone is enough; stale supplied digests are refused, as is a change other than that of the board's other live tasks); without it the task keeps its own change. The response names the binding.",
+    "Edit a draft task using the specDigest read from task_briefing. Stale edits are rejected. gates and consumers are not part of specDigest: they are pinned separately as scopeDigest (returned here and by task_briefing) by plan review and approval, so a gates-only edit returns the same specDigest and a new scopeDigest, and a plan reviewed before the edit is not approved. Pass expectedScopeDigest (from task_briefing) whenever the edit carries gates or consumers: a mismatch is refused like a stale specDigest, otherwise an edit from a stale view could silently revert another gates edit. A gates-only edit counts as a draft edit for discussion_resolve. task.preparation.changeId rebinds the task to that product change (changeId alone is enough; stale supplied digests are refused, as is a change other than that of the board's other live tasks); without it the task keeps its own change. The response names the binding.",
   task_retry:
     'Explicitly retry a failed or cancelled task within the attempt budget. Diagnose the failure first.',
   task_assign: 'Assign a task to a team member. Assignment is not a distributed lease.',
@@ -466,11 +483,10 @@ export class AgentService {
   execute(raw: unknown): Record<string, unknown> {
     const request = parseAgentRequest(raw);
     markLeadActivity(this.h.store, 'agent', request.operation);
-    return this.bounded(this.dispatch(request));
+    return this.bounded(this.dispatch(request), request.operation);
   }
-  private bounded(result: Record<string, unknown>) {
-    if (!checkJsonBytes(result, 65536).within)
-      throw new DomainError('Ответ превышает 64 KiB; сузьте запрос или используйте CLI-отчёт', 413);
+  private bounded(result: Record<string, unknown>, operation: string) {
+    if (!checkJsonBytes(result, 65536).within) throw new DomainError(oversized(operation), 413);
     return result;
   }
   /** Общий вход транспортов: синхронные операции и операции с внешними процессами. */
@@ -478,17 +494,18 @@ export class AgentService {
     const request = parseAgentRequest(raw);
     // Обращение ведущего — его присутствие, даже если операция только читает.
     markLeadActivity(this.h.store, 'agent', request.operation);
+    const bounded = (result: Record<string, unknown>) => this.bounded(result, request.operation);
     // Отчёт требований читает Git и считает доказательства всех задач
     // компонента: в процессе сервера — без блокировки цикла событий, чтобы
     // другие запросы не ждали его.
     if (request.operation === 'requirements_report') {
       checkAgentInput(request);
       const v = agentInputs.requirements_report.parse(request.input ?? {});
-      return this.bounded(
+      return bounded(
         requirementReportPage(await requirementReportAsync(this.h, v.repositoryId), v),
       );
     }
-    if (!asyncOperations.has(request.operation)) return this.bounded(this.dispatch(request));
+    if (!asyncOperations.has(request.operation)) return bounded(this.dispatch(request));
     if (!this.root)
       throw new DomainError('Операция запускает процессы и требует каталога данных контура', 409);
     checkAgentInput(request);
@@ -496,9 +513,9 @@ export class AgentService {
     const input = request.input ?? {};
     switch (request.operation) {
       case 'feasibility_spike':
-        return this.bounded({ spike: await runSpike(this.h, this.root, input) });
+        return bounded({ spike: await runSpike(this.h, this.root, input) });
       case 'checks_case_submit':
-        return this.bounded(await submitCase(this.h, this.root, input));
+        return bounded(await submitCase(this.h, this.root, input));
       case 'recovery_decide': {
         const v = agentInputs.recovery_decide.parse(input);
         const decided = this.h.recoveryDecide(
@@ -525,7 +542,7 @@ export class AgentService {
           this.h.recoveryApplied(v.taskId, v.recoveryId, await applyCases(this.h, this.root, task));
         }
         const task = this.h.store.read().tasks.find((t) => t.id === v.taskId)!;
-        return this.bounded({
+        return bounded({
           taskId: v.taskId,
           recovery: task.recovery
             ? {
@@ -547,7 +564,7 @@ export class AgentService {
         const issues = proposalLimitIssues((input as { proposal?: unknown } | null)?.proposal);
         if (issues.length) throw new DomainError(limitsMessage(issues), 400);
         const v = agentInputs.contract_change_revise.parse(input);
-        return this.bounded(
+        return bounded(
           await new ContractChanges(this.h, this.root).revise(
             v.id,
             v.expectedVersion,
@@ -557,9 +574,9 @@ export class AgentService {
         );
       }
       case 'input_context':
-        return this.bounded(await new InputService(this.h, this.root).context(input));
+        return bounded(await new InputService(this.h, this.root).context(input));
       case 'input_review':
-        return this.bounded(await new InputService(this.h, this.root).review(input));
+        return bounded(await new InputService(this.h, this.root).review(input));
       case 'task_scenario_proof':
         // Что существующий тест проверяет сценарий — решение того, кто
         // утверждает: в operator mode агент его сам не записывает.
@@ -568,14 +585,13 @@ export class AgentService {
             'В approvalMode operator доказательство сценария записывает оператор: devcontour scenario-proof --task ID --gate G --scenario ... --test-id ... --reason ...',
             409,
           );
-        return this.bounded(await proveScenario(this.h, this.root, input, 'agent'));
+        return bounded(await proveScenario(this.h, this.root, input, 'agent'));
       default:
         throw new DomainError('Неизвестная операция', 400);
     }
   }
   private workflowView(job: ReturnType<LeadWorkflow['start']>) {
-    const { token: _token, ...publicJob } = job;
-    return publicJob;
+    return publicJob(job);
   }
   /**
    * Предупреждение, не отказ: черновики, которые утверждение отклонит из-за
@@ -658,33 +674,8 @@ export class AgentService {
           ...(gaps.length ? { coverageGaps: gaps, warning: scopeGapWarning(gaps) } : {}),
         };
       }
-      case 'workflow_status': {
-        const owner = agentInputs.workflow_status.parse(input).repositoryId;
-        const state = h.store.read();
-        const now = Date.now();
-        return {
-          jobs: (() => {
-            const workflow = new LeadWorkflow(h);
-            return workflow.list(owner).map((j) => {
-              // Стадия ждёт только ответов на вопросы исполнителя: «ждёт ответа», не сбой.
-              const waiting = ['queued', 'running'].includes(j.status)
-                ? workflow.waitingOf(j, state)
-                : undefined;
-              return { ...this.workflowView(j), ...(waiting ? { waiting } : {}) };
-            });
-          })(),
-          // Задания досок компонентов идут у своих владельцев: без repositoryId
-          // они не в `jobs`, но их число и подсказка — здесь.
-          ...(owner === undefined ? new LeadWorkflow(h).otherOwners() : {}),
-          operatorBlocked: h.config.approvalMode === 'operator',
-          // Стадии ждут выдачи: остановленная очередь и её причина — рядом.
-          queue: queueStopOf(h, state),
-          // Идущие попытки без движения: зависание замечают без запроса журнала.
-          liveness: quietAttempts(state, now, owner),
-          // Проверки вне попыток (совместная, базы, доски) без движения.
-          operations: quietOperations(h, state, now, 'agent', owner),
-        };
-      }
+      case 'workflow_status':
+        return workflowStatus(h, input);
       case 'workflow_retry': {
         const v = agentInputs.workflow_retry.parse(input);
         return this.workflowView(new LeadWorkflow(h).retry(v.key, v.repositoryId));
@@ -726,17 +717,24 @@ export class AgentService {
           taskId: task.id,
           status: task.status,
           specDigest: specDigest(task),
+          scopeDigest: scopeDigest(task),
           ...bindingView(h, task),
           ...this.storyWarning(undefined, [task]),
         };
       }
       case 'task_edit': {
         const value = agentInputs.task_edit.parse(input),
-          task = h.editTask(value.taskId, value.task, value.expectedDigest);
+          task = h.editTask(
+            value.taskId,
+            value.task,
+            value.expectedDigest,
+            value.expectedScopeDigest,
+          );
         return {
           taskId: task.id,
           status: task.status,
           specDigest: specDigest(task),
+          scopeDigest: scopeDigest(task),
           ...bindingView(h, task),
         };
       }

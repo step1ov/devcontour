@@ -266,18 +266,10 @@ export interface SiblingContract {
 
 /** Запись дерева `to` по пути: blob и режим обычного файла или `undefined`. */
 async function regularFile(repoPath: string, to: string, path: string) {
-  let entry: string;
-  try {
-    entry = await git(repoPath, 'ls-tree', '-z', to, '--', path);
-  } catch {
+  const entry = await treeEntry(repoPath, to, path);
+  if (!entry || entry.type !== 'blob' || (entry.mode !== '100644' && entry.mode !== '100755'))
     return undefined;
-  }
-  const records = entry.split('\0').filter(Boolean);
-  const match = /^(\d+) (\w+) ([0-9a-f]+)\t([\s\S]*)$/.exec(records[0] ?? '');
-  if (records.length !== 1 || !match || match[4] !== path) return undefined;
-  const [, mode, type, blob] = match;
-  if (type !== 'blob' || (mode !== '100644' && mode !== '100755')) return undefined;
-  return { mode, blob };
+  return { mode: entry.mode, blob: entry.blob };
 }
 
 /** Другие контракты открытой работы закрепляют `path` в другой редакции. */
@@ -398,4 +390,161 @@ export async function siblingContractLifts(
     }
   }
   return lifted;
+}
+
+/** Запись дерева `at` по пути: `null` — пути нет, `undefined` — Git не ответил. */
+async function treeEntry(repoPath: string, at: string, path: string) {
+  let entry: string;
+  try {
+    entry = await git(repoPath, 'ls-tree', '-z', at, '--', path);
+  } catch {
+    return undefined;
+  }
+  const records = entry.split('\0').filter(Boolean);
+  if (!records.length) return null;
+  const match = /^(\d+) (\w+) ([0-9a-f]+)\t([\s\S]*)$/.exec(records[0]);
+  if (records.length !== 1 || !match || match[4] !== path) return undefined;
+  return { mode: match[1], type: match[2], blob: match[3] };
+}
+
+/** Снятия путей контрактов, зарегистрированных без операции, и что перезакрепить. */
+export interface RegisteredContractLifts {
+  lifted: Map<string, SiblingContractLift>;
+  /** Контракты снятых документов, которые закрепляет context pack. */
+  packed: string[];
+}
+
+/**
+ * Пути из `paths`, которые операция contract-change вправе перенести в базу,
+ * потому что это одобренные редакции контрактов, зарегистрированных без
+ * операции (`review-contract`): новый документ этапа или поправка, у которой
+ * нет открытых задач на прежней редакции. Правила те же, что у соседей
+ * (`siblingContractLifts`): редакция — последняя для своего документа и
+ * годится для снятия (`reviewedRedaction`); документ — обычный файл с blob
+ * одобренного текста (`reviewedContractDocument`), закреплённый артефакт —
+ * обычный файл с закреплённым blob, не документ и не файл context pack, и
+ * другой контракт открытой работы не закрепляет его иначе. Режим: у
+ * артефакта — тот же, что на commit закрепления; у документа — тот же, что
+ * на базе, а нового документа — любой обычный (правило F28 проверки базы).
+ *
+ * Не снимаются: пути живых операций (`held`, их несут они сами или ждут),
+ * редакции, которые зарегистрировала незавершённая операция (`excluded`:
+ * отменённая, заменённая, устаревшая — ведущий её остановил), защищённые,
+ * генерируемые и конфигурационные пути и данные контура. Документ из context
+ * pack снимается только при `packs` — тогда его перезакрепляет шаг `context`
+ * этой операции (`packed`).
+ */
+export async function registeredContractLifts(
+  h: DevContour,
+  dataRoot: string,
+  s: Readonly<DevContourState>,
+  repositoryId: string,
+  paths: string[],
+  to: string,
+  base: string,
+  options: {
+    held: Set<string>;
+    excluded: Set<string>;
+    packs: boolean;
+    /**
+     * Редакции, которые зарегистрировала завершённая операция contract-change:
+     * она уже записала корректировки принятых задач всех редакций до неё.
+     */
+    corrected?: Set<string>;
+  },
+): Promise<RegisteredContractLifts> {
+  const lifted = new Map<string, SiblingContractLift>();
+  const packed: string[] = [];
+  const wanted = paths.filter((p) => !options.held.has(p));
+  if (!wanted.length) return { lifted, packed };
+  const repo = repository(h.config, repositoryId);
+  const rules = baseRules(h, dataRoot, s, repositoryId);
+  const own = (r?: string) => (r ?? 'main') === repositoryId;
+  // Последняя годная редакция документа, зарегистрированная не незавершённой
+  // операцией. Поправка, заменившая по смыслу редакцию с принятыми задачами,
+  // требует операции: корректировки принятых задач (`corrections`) создаёт
+  // только contract-change.
+  const current = (source: string) => {
+    const c = reviewedRedaction(h.config, s, repositoryId, source);
+    if (!c || options.excluded.has(c.id)) return undefined;
+    const done = s.tasks.filter((t) => t.status === 'done');
+    // Считаются только редакции начиная с последней, которую провела
+    // завершённая операция: принятые задачи прежних она уже назвала в своих
+    // корректировках. Её собственная редакция считается: задачи, принятые
+    // по ней, следующая поправка без операции заменила бы без корректировки.
+    const records = contractRedactionsOf(s.contracts, source, repositoryId);
+    const since = Math.max(
+      records.findLastIndex((r) => options.corrected?.has(r.id)),
+      0,
+    );
+    const corrected = records
+      .slice(since)
+      .some(
+        (r) =>
+          r.id !== c.id &&
+          supersededBy(s.contracts, r.id) &&
+          done.some((t) => t.contracts.includes(r.id)),
+      );
+    return corrected ? undefined : c;
+  };
+  // Действующие договоры компонента: последние редакции документов и
+  // контракты без документа.
+  const latest = s.contracts.filter(
+    (x) =>
+      own(x.repositoryId) &&
+      (!x.source || latestRedaction(s.contracts, x.source, repositoryId)?.id === x.id),
+  );
+  for (const path of wanted) {
+    if (rules.restricted(path)) continue;
+    if (rules.documents.has(path)) {
+      const c = current(path);
+      if (!c || rules.artifact(path) || (!options.packs && rules.pack(path))) continue;
+      const proof = await reviewedContractDocument(h, s, repositoryId, path, to);
+      const now = await treeEntry(repo.path, to, path);
+      const was = await treeEntry(repo.path, base, path);
+      if (!proof || proof.contractId !== c.id || !now || now.blob !== proof.blob) continue;
+      if (was === undefined || (was && was.mode !== now.mode)) continue;
+      lifted.set(path, {
+        path,
+        contractId: c.id,
+        kind: 'document',
+        blob: now.blob,
+        mode: now.mode,
+      });
+      if (rules.pack(path)) packed.push(c.id);
+      continue;
+    }
+    if (rules.pack(path) || rules.document(path)) continue;
+    for (const c of s.contracts) {
+      const pin = (c.artifacts ?? []).find(
+        (a) => a.repositoryId === repositoryId && a.path === path,
+      );
+      if (!pin || !own(c.repositoryId) || !c.source || current(c.source)?.id !== c.id) continue;
+      if (pinnedElsewhere(s, repositoryId, c.id, path, pin.blob)) continue;
+      // Два действующих договора закрепляют путь по-разному: какой из них
+      // верен, решает не порядок реестра, а ведущий.
+      if (
+        latest.some(
+          (x) =>
+            x.id !== c.id &&
+            (x.artifacts ?? []).some(
+              (a) => a.repositoryId === repositoryId && a.path === path && a.blob !== pin.blob,
+            ),
+        )
+      )
+        break;
+      const now = await regularFile(repo.path, to, path);
+      const seen = await regularFile(repo.path, pin.revision, path);
+      if (!now || !seen || now.mode !== seen.mode || now.blob !== pin.blob) continue;
+      lifted.set(path, {
+        path,
+        contractId: c.id,
+        kind: 'artifact',
+        blob: now.blob,
+        mode: now.mode,
+      });
+      break;
+    }
+  }
+  return { lifted, packed: [...new Set(packed)] };
 }

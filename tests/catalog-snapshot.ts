@@ -170,5 +170,25 @@
 // Намеренное изменение: описание input_target называет правило вопроса с
 // минимумами (перепривязку проводит завершённая операция contract-change);
 // прочие операции байтово прежние.
-export const CATALOG_DIGEST = '1eca28b4801112bdf4cfe402c51975defaf3e12aa193d9353b936969c60c4a17';
+// Намеренное изменение: описание task_briefing называет gates попытки задачи
+// (gateScope, outsideScope, consumerGates, when.paths), описание task_edit —
+// scopeDigest (gates и consumers вне specDigest, закреплены отдельно);
+// прочие операции байтово прежние.
+// Намеренное изменение: task_edit принимает необязательный expectedScopeDigest,
+// описание task_edit называет его и правку gates для discussion_resolve,
+// описание task_briefing — проверку requirement-source; прочие операции
+// байтово прежние.
+// Намеренное изменение: workflow_status принимает фильтры key, kind, id,
+// active и limit; описание называет свёртку законченных заданий (компактный
+// вид, finished) и сокращение ответа по пределу; прочие операции байтово
+// прежние.
+// Намеренное изменение (ревью F43): описание workflow_status называет
+// повторяемые упавшие задания, finished.byStatus и retryable, endedAt и
+// порядок сокращения ответа; прочие операции байтово прежние.
+// Намеренное изменение (ревью F43, раунд 2): повторяемое упавшее задание —
+// последнее для своего предмета, перечислено не больше 10; прочие операции
+// байтово прежние.
+// Объединение веток alpha.40: описания F42 (task_briefing, task_edit) и F43
+// (workflow_status) вместе.
+export const CATALOG_DIGEST = 'f6afcba94172055fd2a2c8b932e5da9503644491f3a5920266c3705a215c84f8';
 export const SNAPSHOT_VERSION = '0.4.0-alpha.7';
