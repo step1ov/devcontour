@@ -61,6 +61,9 @@ export class LoopMonitor {
 
   start() {
     if (this.timer) return;
+    // Время остановки монитора — не задержка основного потока.
+    this.lastMono = this.mono();
+    this.lastWall = this.wall();
     this.timer = setInterval(() => this.check(), this.options.intervalMs ?? 1000);
     this.timer.unref();
   }

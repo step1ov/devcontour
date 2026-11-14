@@ -364,22 +364,18 @@ export class Scheduler {
    */
   private noteGap(type: 'server.loop-stalled' | 'server.clock-jump', gap: LoopGap) {
     if (this.stopped) return;
+    // Без проекций и без долгого ожидания занятой базы: незаписанный разрыв
+    // оставляет сигнал опоздавшего продления.
     try {
-      this.h.store.atomic(() =>
-        this.h.store.appendEvent(
-          type,
-          {
-            owner: this.owner,
-            from: new Date(gap.from).toISOString(),
-            to: new Date(gap.to).toISOString(),
-            monoMs: gap.monoMs,
-            wallMs: gap.wallMs,
-          },
-          'lease',
-        ),
-      );
+      this.h.store.tryLeaseEvent(type, {
+        owner: this.owner,
+        from: new Date(gap.from).toISOString(),
+        to: new Date(gap.to).toISOString(),
+        monoMs: gap.monoMs,
+        wallMs: gap.wallMs,
+      });
     } catch {
-      /* Хранилище занято или закрыто: разрыв останется незаписанным. */
+      /* Хранилище закрыто: разрыв останется незаписанным. */
     }
   }
   /**

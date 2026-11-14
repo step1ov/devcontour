@@ -24,7 +24,8 @@ import { adapters, type AgentRequest } from '../src/runner/adapters.ts';
 import { repositories } from '../src/core/repositories.ts';
 import { git } from '../src/runner/process.ts';
 import { LoopMonitor, type LoopGap } from '../src/runner/loop-monitor.ts';
-import { LATE_HEARTBEAT, hostStarved, repairDecision } from '../src/core/repair.ts';
+import { LATE_HEARTBEAT, hostStarved, loopGaps, repairDecision } from '../src/core/repair.ts';
+import { DatabaseSync } from 'node:sqlite';
 
 const demos = demoPool(testDemo);
 after(() => demos.close());
@@ -98,6 +99,60 @@ test('Монитор меряет задержку монотонными час
   step(1000, -59_000);
   assert.equal(jumps.length, 2);
   assert.equal(stalls.length, 1, 'сон и перевод часов — не перегрузка');
+});
+
+test('Перезапуск монитора не считает время остановки задержкой', () => {
+  let mono = 0,
+    wall = 1_000_000;
+  const stalls: LoopGap[] = [];
+  const monitor = new LoopMonitor({
+    leaseMs: 30_000,
+    onStall: (g) => stalls.push(g),
+    onClockJump: () => assert.fail('скачка часов нет'),
+    mono: () => mono,
+    wall: () => wall,
+  });
+  monitor.start();
+  monitor.stop();
+  mono += 60_000;
+  wall += 60_000;
+  monitor.start();
+  try {
+    assert.equal(monitor.check(), undefined);
+    assert.deepEqual(stalls, []);
+  } finally {
+    monitor.stop();
+  }
+});
+
+test('Событие о задержке не пересчитывает проекции и не ждёт занятую базу', () => {
+  const w = workspace();
+  try {
+    let projected = 0;
+    w.store.onCommit = () => projected++;
+    assert.equal(w.store.tryLeaseEvent('server.loop-stalled', { owner: 'a' }), true);
+    assert.equal(projected, 0, 'проекции не пересчитаны');
+    const other = new DatabaseSync(w.store.file);
+    other.exec('PRAGMA busy_timeout=0; BEGIN IMMEDIATE');
+    try {
+      const startedAt = Date.now();
+      assert.equal(w.store.tryLeaseEvent('server.loop-stalled', { owner: 'b' }, 100), false);
+      assert.ok(Date.now() - startedAt < 5000, 'занятую базу не ждёт 20 с');
+    } finally {
+      other.exec('ROLLBACK');
+      other.close();
+    }
+    const owners = w.store
+      .events()
+      .filter((e) => e.type === 'server.loop-stalled')
+      .map((e) => (e.data as { owner: string }).owner);
+    assert.deepEqual(owners, ['a'], 'отброшенное событие не записано');
+    // Обычное ожидание занятости восстановлено.
+    w.h.createBoard('After');
+    assert.ok(projected > 0, 'обычные изменения проекции пересчитывают');
+  } finally {
+    w.cleanup();
+  }
 });
 
 test('Монитор замечает настоящую блокировку event loop', () => {
@@ -184,6 +239,13 @@ test('Сервер записывает задержку раньше, чем и
       const data = stall.data as { owner: string; monoMs: number };
       assert.equal(data.owner, scheduler.owner);
       assert.ok(data.monoMs >= LEASE + 3000 - 50, String(data.monoMs));
+      // Сигнал окна сам по себе, без опоздавшего продления: записанная
+      // задержка владельца покрывает конец срока.
+      assert.equal(
+        hostStarved({ ...lost, error: undefined }, loopGaps(h)),
+        true,
+        'задержка владельца покрывает конец срока',
+      );
       const decided = repairDecision(h, [{ id: task.id }], options);
       assert.equal(decided?.action, 'retry', decided?.reason);
       assert.equal(decided?.action === 'retry' && decided.hostStarved, true);
