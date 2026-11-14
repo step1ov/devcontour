@@ -443,6 +443,39 @@ for (const [name, open] of [
     s.close();
   });
 
+  test(`${name}: собственный отказ изменения не оставляет его открытым; Store.change внутри Store.atomic вне изменения разрешён`, () => {
+    const s = open(temp());
+    seed(s.store);
+    const events = s.store.eventCount();
+    assert.throws(
+      () =>
+        s.store.update('task.edited', (d) => {
+          d.edit().tasks[0].title = 'Откатится';
+          throw new Error('свой отказ');
+        }),
+      /свой отказ/,
+    );
+    assert.equal(s.store.read().tasks[0].title, 'Добавить приветствие');
+    s.store.update('task.edited', (d) => {
+      d.edit().tasks[0].title = 'Следующее изменение';
+    });
+    assert.equal(s.store.read().tasks[0].title, 'Следующее изменение');
+    // Store.atomic без открытого изменения документа не держит: изменения в
+    // нём идут одно за другим, каждое видит предыдущее.
+    s.store.atomic(() => {
+      s.store.change('task.edited', (st) => {
+        st.tasks[0].title = 'Первое';
+      });
+      s.store.change('task.edited', (st) => {
+        st.tasks[0].description = st.tasks[0].title + ' и второе';
+      });
+    });
+    assert.equal(s.store.read().tasks[0].title, 'Первое');
+    assert.equal(s.store.read().tasks[0].description, 'Первое и второе');
+    assert.equal(s.store.eventCount(), events + 3);
+    s.close();
+  });
+
   test(`${name}: событие без изменения документа пишется Store.appendEvent; heartbeat события не пишет`, () => {
     const s = open(temp());
     seed(s.store);

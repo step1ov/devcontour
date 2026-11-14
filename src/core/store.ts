@@ -621,6 +621,11 @@ export class Store {
     };
   }
   // Synchronous composition: local idempotency records and domain mutations commit together.
+  // Nesting: atomic inside atomic is a savepoint; update/change inside atomic
+  // is allowed when no update is open (each change reads the previous one's
+  // document). An update/change inside another update's action — including an
+  // execution-store host/transact frame — is refused: the outer update would
+  // write its own document copy over it. Inside a frame, use host/transact.
   atomic<T>(action: () => T): T {
     const outer = this.transaction;
     const point = 'nested_' + ++this.savepoint;
