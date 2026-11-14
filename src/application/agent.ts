@@ -42,12 +42,8 @@ import { proveScenario, scenarioProofInput } from '../runner/scenario-proof.ts';
 import { ContractChanges } from '../runner/contract-change.ts';
 import { contractProposal, limitsMessage, proposalLimitIssues } from '../runner/agent-control.ts';
 import { queueStopOf } from './queue-stop.ts';
-import {
-  WORKFLOW_STATUS_OVERSIZED,
-  publicJob,
-  workflowStatus,
-  workflowStatusInput,
-} from './workflow-status.ts';
+import { publicJob, workflowStatus, workflowStatusInput } from './workflow-status.ts';
+import { oversized } from './response-limit.ts';
 import { InputService, inputOperationInputs } from './input.ts';
 import { AttentionService } from './attention.ts';
 import { attentionInputs } from '../core/attention-model.ts';
@@ -56,15 +52,7 @@ import { gateTestcases, testcasesInput } from './testcases.ts';
 
 const id = z.string().regex(/^[A-Za-z0-9_-]{1,80}$/);
 export { SERVER_STOPPING };
-/**
- * Отказ по пределу ответа называет путь, который существует: поля входа самой
- * операции (её inputSchema в capabilities). Прежний текст отсылал к
- * «CLI-отчёту», которого у большинства операций нет.
- */
-export function oversized(operation: string) {
-  if (operation === 'workflow_status') return WORKFLOW_STATUS_OVERSIZED;
-  return `Ответ ${operation} превышает 64 KiB: сузьте запрос полями его входа (фильтры, limit, cursor — inputSchema операции в capabilities)`;
-}
+export { oversized };
 export const agentInputs = {
   ...preparationInputs,
   ...intentInputs,
@@ -255,7 +243,7 @@ export const descriptions: Record<AgentOperation, string> = {
   workflow_start:
     'Enqueue idempotent board review, execution and acceptance or ChangeSet verification. A running server may invoke models. Operator policy remains enforced.',
   workflow_status:
-    'Read owner-local durable stage jobs, the queue stop and running attempts and checks without movement (liveness and operations: quiet or stalled, idle time, activity, next step). Without repositoryId, jobs are the workspace jobs and otherOwners counts the jobs of component-local boards per repositoryId (jobs, active) with otherOwnersHint; pass repositoryId to read them. A queued or running job has waiting when its stage waits: input (writer questions) for a board, verification (verificationId, startedAt, elapsedMs) for a ChangeSet at stage 1 while its joint verification runs. Active jobs (queued, running) are listed in full. Finished jobs (completed, failed, stale) are folded: by default the latest 10 by end time in a compact form (no history; lastEvent, historyLength, error clipped), the rest counted in finished {total, listed, omitted, compact, hint}. Filters: key (one job), kind and id (the jobs of one board or ChangeSet; with key or id finished jobs come in full), active (true: only queued and running; false: only finished), limit (finished jobs listed, 1-200). Over the response limit: when the active jobs alone do not fit, their history is cut to its last 20 events (historyOmitted, historyClipped); then the oldest finished jobs are dropped (counted in finished.omitted). No model calls or execution leases are granted.',
+    'Read owner-local durable stage jobs, the queue stop and running attempts and checks without movement (liveness and operations: quiet or stalled, idle time, activity, next step). Without repositoryId, jobs are the workspace jobs and otherOwners counts the jobs of component-local boards per repositoryId (jobs, active) with otherOwnersHint; pass repositoryId to read them. A queued or running job has waiting when its stage waits: input (writer questions) for a board, verification (verificationId, startedAt, elapsedMs) for a ChangeSet at stage 1 while its joint verification runs. Active jobs (queued, running) are listed in full. Finished jobs (completed, failed, stale) are folded: by default the latest 10 by end time plus every retryable failed job (attempts below maxAttempts) in a compact form (no history; endedAt, endedAtEstimated when the queue stamped no end time, lastEvent, historyLength, error up to 1000 chars, retryable), counted in finished {total, byStatus, retryable, listed, omitted, compact, hint}; jobs keep store order, not time order. Filters: key (one job in full: whole error and history), kind and id (the jobs of one board or ChangeSet in full), active (true: only queued and running, finished still counted; false: only finished), limit (finished jobs listed, 1-200). Over the response limit the history of full jobs is cut to its last 20 events (historyOmitted, historyClipped) when the active jobs alone do not fit or finished jobs are named; then finished jobs are dropped, oldest first, retryable failed ones last, never the job named by key (counted in finished.omitted). No model calls or execution leases are granted.',
   workflow_retry:
     'Retry a diagnosed failed stage within its original attempt budget. Never retries failed task implementations automatically.',
   workflow_metrics:

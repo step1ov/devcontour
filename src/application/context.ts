@@ -28,6 +28,7 @@ import { LeadWorkflow } from '../core/lead-workflow.ts';
 import { queueStopOf } from './queue-stop.ts';
 import { inputHolds } from './input.ts';
 import { executionOf } from '../harness/execution.ts';
+import { oversized } from './response-limit.ts';
 import {
   HarnessError,
   checkJsonBytes,
@@ -428,7 +429,7 @@ export class AgentContext {
   execute(operation: ContextOperation, raw: unknown): unknown {
     const result = this.evaluate(operation, raw);
     if (!checkJsonBytes(result, MAX_RESPONSE).within)
-      throw new DomainError('Ответ превышает 64 KiB; сузьте контекст', 413);
+      throw new DomainError(oversized(operation), 413);
     return result;
   }
   private evaluate(operation: ContextOperation, raw: unknown): unknown {

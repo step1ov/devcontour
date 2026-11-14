@@ -10,20 +10,25 @@
  * - действующие задания (queued, running) идут целиком, как раньше;
  * - законченные (completed, failed, stale) по умолчанию свёрнуты: последние
  *   `limit` (по умолчанию 10) в компактном виде без истории, остальные —
- *   числом в `finished`;
+ *   числом в `finished` (и по статусам). Упавшие задания, которые ещё можно
+ *   повторить (попыток стадии меньше предела), перечислены всегда: ведущий
+ *   разбирает именно их перед `workflow_retry`;
  * - фильтры `key`, `kind`/`id` и `active` сужают список; задания, названные
  *   ключом или предметом, идут целиком;
- * - если ответ всё равно не помещается: когда не помещаются сами действующие,
- *   их история сокращается до последних событий; затем уходят самые старые
- *   законченные задания. Отказ остаётся только для того, что сузить нечем.
+ * - если ответ всё равно не помещается, история полных заданий сокращается
+ *   до последних событий (когда не помещаются обязательные задания или
+ *   законченные названы и идут целиком), затем уходят законченные — сначала
+ *   старейшие неповторяемые, затем старейшие повторяемые. Задание, названное
+ *   `key`, не уходит никогда. Отказ остаётся только для того, что сузить нечем.
  */
 import { z } from 'zod';
-import { checkJsonBytes } from 'devcontour-harness';
+import { checkJsonBytes, jsonBytes } from 'devcontour-harness';
 import { LeadWorkflow, type WorkflowJob } from '../core/lead-workflow.ts';
 import type { DevContour } from '../core/service.ts';
 import { DomainError } from '../core/model.ts';
-import { SHORT, short } from './bounded.ts';
+import { short } from './bounded.ts';
 import { queueStopOf, quietAttempts, quietOperations } from './queue-stop.ts';
+import { WORKFLOW_STATUS_OVERSIZED } from './response-limit.ts';
 
 const id = z.string().regex(/^[A-Za-z0-9_-]{1,80}$/);
 
@@ -33,8 +38,10 @@ export const FINISHED_DEFAULT = 10;
 export const FINISHED_MAX = 200;
 /** Бюджет ответа: предел агентского API 64 KiB с запасом под конверт. */
 const BUDGET = 60000;
-/** Сколько последних событий истории остаётся у действующего задания при нехватке места. */
+/** Сколько последних событий истории остаётся у полного задания при нехватке места. */
 const HISTORY_TAIL = 20;
+/** Предел текста ошибки: столько хранит очередь harness. */
+const ERROR_MAX = 1000;
 
 export const workflowStatusInput = z.strictObject({
   repositoryId: id.optional(),
@@ -49,14 +56,25 @@ export const workflowStatusInput = z.strictObject({
 });
 export type WorkflowStatusInput = z.infer<typeof workflowStatusInput>;
 
-/** Отказ по размеру называет существующий путь сузить запрос. */
-export const WORKFLOW_STATUS_OVERSIZED =
-  'Ответ workflow_status превышает 64 KiB: сузьте запрос полями его входа — key (одно задание), kind и id (задания одной доски или ChangeSet), active (true — только действующие), limit (число законченных)';
-
 const ACTIVE = new Set<WorkflowJob['status']>(['queued', 'running']);
 const isActive = (j: Pick<WorkflowJob, 'status'>) => ACTIVE.has(j.status);
-/** Когда задание закончилось: для порядка «последние сначала». */
-const endedAt = (j: WorkflowJob) => j.finishedAt ?? j.history.at(-1)?.at ?? j.startedAt;
+/** Упавшее задание, которое `workflow_retry` ещё может повторить. */
+const retryable = (j: WorkflowJob) => j.status === 'failed' && j.attempts < j.maxAttempts;
+
+/**
+ * Когда задание закончилось. Завершение пишет `finishedAt`, отказ при взятии
+ * стадии — событие истории со своим статусом. Отказ стадии в ходе работы
+ * (`fail` очереди harness) времени не пишет: лучшее, что есть, — последнее
+ * событие истории (взятие стадии) или начало задания, что позже; такое
+ * время помечено как оценка.
+ */
+function ending(j: WorkflowJob) {
+  const last = j.history.at(-1);
+  if (j.finishedAt) return { at: j.finishedAt, estimated: false };
+  if (last?.event === j.status) return { at: last.at, estimated: false };
+  const at = last && last.at > j.startedAt ? last.at : j.startedAt;
+  return { at, estimated: true };
+}
 
 /** Публичный вид задания: без fencing-токена. */
 export function publicJob<T extends { token?: string }>(job: T) {
@@ -67,6 +85,7 @@ export function publicJob<T extends { token?: string }>(job: T) {
 /** Компактный вид законченного задания: без истории, входного digest и lease. */
 function compactJob(job: WorkflowJob) {
   const last = job.history.at(-1);
+  const end = ending(job);
   return {
     key: job.key,
     kind: job.kind,
@@ -80,18 +99,46 @@ function compactJob(job: WorkflowJob) {
     ...(job.repairs ? { repairs: job.repairs } : {}),
     startedAt: job.startedAt,
     ...(job.finishedAt ? { finishedAt: job.finishedAt } : {}),
-    ...(job.error ? { error: short(job.error, SHORT) } : {}),
-    ...(last ? { lastEvent: last } : {}),
+    endedAt: end.at,
+    ...(end.estimated ? { endedAtEstimated: true } : {}),
+    ...(job.error ? { error: short(job.error, ERROR_MAX) } : {}),
+    // Последнее событие не противоречит статусу: отказ без отметки в истории
+    // назван статусом, без времени (его нет в записи).
+    lastEvent:
+      last?.event === job.status ? last : { stage: job.stage, event: job.status as string },
     historyLength: job.history.length,
+    ...(retryable(job) ? { retryable: true } : {}),
     compact: true as const,
   };
 }
 
-function finishedHint(limit: number) {
+const READ_MORE =
+  'key returns one job in full (whole error and history); kind and id list the jobs of one board or ChangeSet in full; ' +
+  `active true lists only queued and running jobs; limit sets how many finished jobs are listed (up to ${FINISHED_MAX}).`;
+
+function finishedHint(o: {
+  named: boolean;
+  activeOnly: boolean;
+  limit: number;
+  total: number;
+  omitted: number;
+  clipped: boolean;
+}) {
+  if (o.activeOnly)
+    return `active true lists no finished jobs; ${o.total} match: omit active or pass false to list them.`;
+  if (o.named)
+    return (
+      'Finished jobs are listed in full' +
+      (o.clipped ? '; a history longer than 20 events is cut to its tail (historyOmitted)' : '') +
+      (o.omitted
+        ? `; the oldest ${o.omitted} were dropped to fit the response limit: lower limit or read one job by key`
+        : '') +
+      '.'
+    );
   return (
-    `Finished jobs (completed, failed, stale) are listed compact (no history), latest ${limit} first by end time. ` +
-    'Narrow or widen with workflow_status input: key (one job in full), kind and id (the jobs of one board or ChangeSet in full), ' +
-    `active (true: only queued and running; false: only finished), limit (finished jobs listed, up to ${FINISHED_MAX}).`
+    `Finished jobs (completed, failed, stale): the latest ${o.limit} by end time and every retryable failed job ` +
+    'are listed compact, without history; jobs keep store order, not time order (sort by endedAt). ' +
+    READ_MORE
   );
 }
 
@@ -101,25 +148,46 @@ export function workflowStatus(h: DevContour, raw: unknown) {
   const state = h.store.read();
   const now = Date.now();
   const workflow = new LeadWorkflow(h);
-  const all = workflow.list(owner);
-  const selected = all.filter(
-    (j) =>
-      (input.key === undefined || j.key === input.key) &&
-      (input.kind === undefined || j.kind === input.kind) &&
-      (input.id === undefined || j.id === input.id) &&
-      (input.active === undefined || isActive(j) === input.active),
+  // Предмет запроса без `active`: законченные считаются и при active true.
+  const matching = workflow
+    .list(owner)
+    .filter(
+      (j) =>
+        (input.key === undefined || j.key === input.key) &&
+        (input.kind === undefined || j.kind === input.kind) &&
+        (input.id === undefined || j.id === input.id),
+    );
+  const selected = matching.filter(
+    (j) => input.active === undefined || isActive(j) === input.active,
   );
   // Названные ключом или предметом задания — немного и целиком: ведущий
   // разбирает именно их историю.
   const named = input.key !== undefined || input.id !== undefined;
   const limit = input.limit ?? FINISHED_DEFAULT;
-  const finished = selected.filter((j) => !isActive(j));
+  const finished = matching.filter((j) => !isActive(j));
+  const ends = new Map(finished.map((j) => [j.key, ending(j).at]));
   // Последние законченные первыми; при равном времени — по ключу, стабильно.
-  const recent = [...finished].sort(
-    (a, b) => endedAt(b).localeCompare(endedAt(a)) || a.key.localeCompare(b.key),
-  );
-  let listed = recent.slice(0, limit);
+  const recent = selected
+    .filter((j) => !isActive(j))
+    .sort((a, b) => ends.get(b.key)!.localeCompare(ends.get(a.key)!) || a.key.localeCompare(b.key));
+  const chosen = new Set([
+    ...recent.slice(0, limit).map((j) => j.key),
+    ...recent.filter(retryable).map((j) => j.key),
+  ]);
+  // Порядок ухода при нехватке места: старейшие неповторяемые, затем
+  // старейшие повторяемые; задание, названное ключом, не уходит.
+  const dropOrder = [...recent]
+    .reverse()
+    .filter((j) => chosen.has(j.key) && j.key !== input.key)
+    .sort((a, b) => Number(retryable(a)) - Number(retryable(b)));
   let historyClipped = false;
+  const clip = (j: WorkflowJob) =>
+    historyClipped && j.history.length > HISTORY_TAIL
+      ? {
+          history: j.history.slice(-HISTORY_TAIL),
+          historyOmitted: j.history.length - HISTORY_TAIL,
+        }
+      : {};
   // Вид задания не зависит от того, сколько законченных перечислено:
   // пересборка ответа при нехватке места не пересчитывает ожидания.
   const views = new Map<string, Record<string, unknown>>();
@@ -129,19 +197,13 @@ export function workflowStatus(h: DevContour, raw: unknown) {
     return views.get(id)!;
   };
   const viewOf = (j: WorkflowJob): Record<string, unknown> => {
-    if (!isActive(j)) return named ? publicJob(j) : compactJob(j);
+    if (!isActive(j)) return named ? { ...publicJob(j), ...clip(j) } : compactJob(j);
     // Стадия ждёт только ответов на вопросы исполнителя: «ждёт ответа», не сбой.
     const waiting = workflow.waitingOf(j, state, now);
-    const full = publicJob(j);
-    const history =
-      historyClipped && j.history.length > HISTORY_TAIL
-        ? {
-            history: j.history.slice(-HISTORY_TAIL),
-            historyOmitted: j.history.length - HISTORY_TAIL,
-          }
-        : {};
-    return { ...full, ...history, ...(waiting ? { waiting } : {}) };
+    return { ...publicJob(j), ...clip(j), ...(waiting ? { waiting } : {}) };
   };
+  const byStatus = { completed: 0, failed: 0, stale: 0 };
+  for (const j of finished) byStatus[j.status as keyof typeof byStatus] += 1;
   const rest = {
     // Задания досок компонентов идут у своих владельцев: без repositoryId
     // они не в `jobs`, но их число и подсказка — здесь.
@@ -154,37 +216,60 @@ export function workflowStatus(h: DevContour, raw: unknown) {
     // Проверки вне попыток (совместная, базы, доски) без движения.
     operations: quietOperations(h, state, now, 'agent', owner),
   };
-  const build = () => {
-    const shown = new Set(listed.map((j) => j.key));
-    const omitted = finished.length - listed.length;
+  const activeOnly = input.active === true;
+  const build = (shown: Set<string>) => {
+    const omitted = finished.length - shown.size;
     return {
       // Порядок хранилища, как прежде; законченные — только перечисленные.
       jobs: selected.filter((j) => isActive(j) || shown.has(j.key)).map(view),
       finished: {
         total: finished.length,
-        listed: listed.length,
+        byStatus,
+        retryable: finished.filter(retryable).length,
+        listed: shown.size,
         omitted,
         compact: !named,
-        ...(finished.length && (omitted || !named) ? { hint: finishedHint(limit) } : {}),
+        ...(finished.length && (activeOnly || !named || omitted || historyClipped)
+          ? {
+              hint: finishedHint({
+                named,
+                activeOnly,
+                limit,
+                total: finished.length,
+                omitted,
+                clipped: historyClipped,
+              }),
+            }
+          : {}),
       },
       ...(historyClipped ? { historyClipped: true } : {}),
       ...rest,
     };
   };
   const fits = (value: unknown) => checkJsonBytes(value, BUDGET).within;
-  let result = build();
+  const keep = new Set(chosen);
+  let result = build(keep);
   if (!fits(result)) {
-    // Действующие сами не помещаются — их история сокращается до хвоста;
-    // иначе место освобождают законченные, и история остаётся целой.
-    const chosen = listed;
-    listed = [];
-    if (!fits(build())) historyClipped = true;
-    listed = chosen;
-    result = build();
-    // Затем — старейшие законченные по одному: размер зависит от данных.
-    while (!fits(result) && listed.length) {
-      listed = listed.slice(0, -1);
-      result = build();
+    // История сокращается, если без законченных (кроме названного ключом)
+    // ответ всё равно не помещается или законченные названы и идут целиком.
+    const required = new Set([...chosen].filter((k) => k === input.key));
+    if (named || !fits(build(required))) {
+      historyClipped = true;
+      result = build(keep);
+    }
+    // Затем уходят законченные по порядку. Размер вычитается по видам
+    // заданий, без сериализации ответа на каждом шаге; итог сверяется.
+    let size = jsonBytes(result);
+    const pending = [...dropOrder];
+    while (size > BUDGET && pending.length) {
+      const j = pending.shift()!;
+      keep.delete(j.key);
+      size -= jsonBytes(view(j)) + 1;
+    }
+    result = build(keep);
+    while (!fits(result) && pending.length) {
+      keep.delete(pending.shift()!.key);
+      result = build(keep);
     }
   }
   if (!fits(result)) throw new DomainError(WORKFLOW_STATUS_OVERSIZED, 413);

@@ -463,7 +463,9 @@ syncBuiltinESMExports();
   // take seconds, and 450 polls ran out while the task was still integrating.
   const workflowDeadline = Date.now() + 180000;
   while (Date.now() < workflowDeadline) {
-    const report = await agent('workflow_status', { repositoryId: 'main' });
+    // Опрос одного задания по ключу: законченные свёрнуты в общем списке, а
+    // по ключу задание целиком — с полной ошибкой и историей для диагностики.
+    const report = await agent('workflow_status', { repositoryId: 'main', key: job.key });
     lastWorkflowReport = report;
     assert.ok(report.jobs.every((j) => !('token' in j)));
     const current = report.jobs.find((j) => j.key === job.key);

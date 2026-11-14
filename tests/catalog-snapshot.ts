@@ -174,5 +174,8 @@
 // active и limit; описание называет свёртку законченных заданий (компактный
 // вид, finished) и сокращение ответа по пределу; прочие операции байтово
 // прежние.
-export const CATALOG_DIGEST = '00db66c649fbb30db666261ca4fba15ce2bb48b818853bc6f47363510e2123a3';
+// Намеренное изменение (ревью F43): описание workflow_status называет
+// повторяемые упавшие задания, finished.byStatus и retryable, endedAt и
+// порядок сокращения ответа; прочие операции байтово прежние.
+export const CATALOG_DIGEST = '06dc0ef0f7f0afbea55138fdaeedf7f99e15d6f9e3996d973d25f9686e5041a3';
 export const SNAPSHOT_VERSION = '0.4.0-alpha.7';
