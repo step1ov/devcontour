@@ -3066,7 +3066,7 @@
     },
     {
       "name": "task_briefing",
-      "description": "Read all pages of the task requirements, contracts, execution policy and blocking reasons. Optional repositoryId (multi-repository workspace): the task must belong to that component, otherwise the call is refused.",
+      "description": "Read all pages of the task requirements, contracts, execution policy and blocking reasons. execution.gates are the gates an attempt of this task runs: its own gates (groups expanded, gateScope task) or, without them, the whole profile (gateScope profile); a gate with when.paths runs only when the diff touches its paths; a task with requirements also runs the requirement-source check (kind requirement). outsideScope lists profile gates outside the task scope (another task or board acceptance runs them), consumerGates the checks of its consumers. Optional repositoryId (multi-repository workspace): the task must belong to that component, otherwise the call is refused.",
       "readOnly": true,
       "inputSchema": {
         "$schema": "https://json-schema.org/draft/2020-12/schema",
@@ -3745,7 +3745,7 @@
     },
     {
       "name": "task_edit",
-      "description": "Edit a draft task using the specDigest read from task_briefing. Stale edits are rejected. task.preparation.changeId rebinds the task to that product change (changeId alone is enough; stale supplied digests are refused, as is a change other than that of the board's other live tasks); without it the task keeps its own change. The response names the binding.",
+      "description": "Edit a draft task using the specDigest read from task_briefing. Stale edits are rejected. gates and consumers are not part of specDigest: they are pinned separately as scopeDigest (returned here and by task_briefing) by plan review and approval, so a gates-only edit returns the same specDigest and a new scopeDigest, and a plan reviewed before the edit is not approved. Pass expectedScopeDigest (from task_briefing) whenever the edit carries gates or consumers: a mismatch is refused like a stale specDigest, otherwise an edit from a stale view could silently revert another gates edit. A gates-only edit counts as a draft edit for discussion_resolve. task.preparation.changeId rebinds the task to that product change (changeId alone is enough; stale supplied digests are refused, as is a change other than that of the board's other live tasks); without it the task keeps its own change. The response names the binding.",
       "readOnly": false,
       "inputSchema": {
         "$schema": "https://json-schema.org/draft/2020-12/schema",
@@ -3756,6 +3756,10 @@
             "pattern": "^[A-Za-z0-9_-]{1,80}$"
           },
           "expectedDigest": {
+            "type": "string",
+            "pattern": "^[a-f0-9]{64}$"
+          },
+          "expectedScopeDigest": {
             "type": "string",
             "pattern": "^[a-f0-9]{64}$"
           },

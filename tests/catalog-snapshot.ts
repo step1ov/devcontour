@@ -170,5 +170,13 @@
 // Намеренное изменение: описание input_target называет правило вопроса с
 // минимумами (перепривязку проводит завершённая операция contract-change);
 // прочие операции байтово прежние.
-export const CATALOG_DIGEST = '1eca28b4801112bdf4cfe402c51975defaf3e12aa193d9353b936969c60c4a17';
+// Намеренное изменение: описание task_briefing называет gates попытки задачи
+// (gateScope, outsideScope, consumerGates, when.paths), описание task_edit —
+// scopeDigest (gates и consumers вне specDigest, закреплены отдельно);
+// прочие операции байтово прежние.
+// Намеренное изменение: task_edit принимает необязательный expectedScopeDigest,
+// описание task_edit называет его и правку gates для discussion_resolve,
+// описание task_briefing — проверку requirement-source; прочие операции
+// байтово прежние.
+export const CATALOG_DIGEST = '0b677f75fda6de8f03e8957bbe0496dedf8178ac255e10032363e3caaef6181a';
 export const SNAPSHOT_VERSION = '0.4.0-alpha.7';

@@ -13,7 +13,7 @@
 // Источник без такого факта называет ограничение у своего правила.
 import { checkJsonBytes, queuePause, explainStop, stopInputsOf } from 'devcontour-harness';
 import { randomUUID } from 'node:crypto';
-import { SERVER_STOPPING, digest, specDigest } from '../core/service.ts';
+import { SERVER_STOPPING, digest, scopeDigest, specDigest } from '../core/service.ts';
 import { repositories } from '../core/repositories.ts';
 import { Workspace } from '../core/workspace.ts';
 import { IntentService } from '../runner/intent.ts';
@@ -1448,13 +1448,21 @@ const planSource: AttentionSourceRule = {
       if (!approvable.length && !why.drafts.length) return [];
       const byId = new Map(found.tasks.map((t) => [t.id, t]));
       const shown = Object.fromEntries(approvable.map((id) => [id, specDigest(byId.get(id)!)]));
+      // Область проверок (gates, потребители) в digest постановки не входит
+      // и закрепляется отдельно, как у ревью плана: правка одних gates между
+      // показом и решением отклоняется, а карточка получает новую версию.
+      const scopes = Object.fromEntries(approvable.map((id) => [id, scopeDigest(byId.get(id)!)]));
+      const scoped = (id: string) => {
+        const t = byId.get(id)!;
+        return t.gates?.length || t.consumers?.length ? [scopeDigest(t)] : [];
+      };
       const blocked = why.blocked.map((b) => `${b.id} — ${b.reason}`);
       const base = {
         sourceKey: `plan:${board.id}`,
         occurrenceId: `r${found.revision.number}:${approvedAnchor(found.tasks)}`,
         sourceVersion: d({
           taskIds: found.revision.taskIds,
-          drafts: why.drafts.map((id) => [id, specDigest(byId.get(id)!)]),
+          drafts: why.drafts.map((id) => [id, specDigest(byId.get(id)!), ...scoped(id)]),
           stale: why.stale,
           blocked: why.blocked.map((b) => b.id),
           unverified: why.unverified,
@@ -1494,6 +1502,7 @@ const planSource: AttentionSourceRule = {
               revision: found.revision.number,
               taskIds: found.revision.taskIds,
               tasks: shown,
+              scopes,
               reason: found.revision.reason,
             },
           },
@@ -2095,6 +2104,11 @@ const actionHandlers: Record<string, (a: ActContext) => ActOutcome> = {
         revision: number;
         taskIds: string[];
         tasks: Record<string, string>;
+        /**
+         * Основание пересчитывается при действии; область закрепляет окно
+         * между проверкой версии карточки и утверждением.
+         */
+        scopes?: Record<string, string>;
         reason: string;
       };
     }>(item);
