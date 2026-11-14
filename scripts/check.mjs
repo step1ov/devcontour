@@ -2,6 +2,8 @@ import { closeSync, openSync, unlinkSync, writeSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { checkProcesses } from './check-processes.mjs';
+import { describeLoad, measureLoad, waitForQuiet } from './machine-load.mjs';
+import { sweepOrphans } from './orphans.mjs';
 
 // `npm run check` (release) and `npm run check:fast` (one fix).
 //
@@ -64,6 +66,36 @@ const npm = process.platform === 'win32' ? 'npm.cmd' : 'npm';
 const commands = {
   'smoke-package': [process.execPath, ['scripts/smoke-package.mjs']],
 };
+// The machine first. Processes left by a check or e2e run killed outright are
+// stopped (scripts/orphans.mjs). A release check then waits for a quiet
+// machine, up to DEVCONTOUR_CHECK_QUIET_WAIT_MIN minutes (default 10, 0 = no
+// wait): under swapping and busy cores the same tests ran up to nine times
+// slower than alone and timed out. While the check runs, a line every five
+// minutes and a summary at the end say what load it ran under.
+// DEVCONTOUR_CHECK_SWEEP=0 leaves other processes alone (the check's own tests
+// run checks side by side).
+if (process.env.DEVCONTOUR_CHECK_SWEEP !== '0') await sweepOrphans();
+const waitSetting = process.env.DEVCONTOUR_CHECK_QUIET_WAIT_MIN;
+const waitMinutes =
+  waitSetting === undefined || waitSetting === '' ? (isFast ? 0 : 10) : Number(waitSetting);
+if (!(waitMinutes >= 0))
+  throw new Error(
+    `DEVCONTOUR_CHECK_QUIET_WAIT_MIN must be a number of minutes, got ${waitSetting}`,
+  );
+const loads = [(await waitForQuiet({ waitMs: waitMinutes * 60_000 })).measurement];
+let measuring;
+const sampler = setInterval(() => {
+  if (measuring) return;
+  measuring = measureLoad()
+    .then((m) => {
+      loads.push(m);
+      if (loads.length % 5 === 0) console.error(`machine: ${describeLoad(m)}`);
+    })
+    .catch(() => {})
+    .finally(() => (measuring = undefined));
+}, 60_000);
+sampler.unref();
+
 const processes = checkProcesses();
 
 /**
@@ -217,6 +249,18 @@ for (const chains of stages) {
   }
 }
 await processes.dispose();
+clearInterval(sampler);
+{
+  const busy = loads.map((m) => m.busy);
+  const out = loads.map((m) => m.pageoutsPerSecond).filter((v) => v !== undefined);
+  const free = loads.map((m) => m.swapFreeMb).filter((v) => v !== undefined);
+  const parts = [
+    `cpu ${Math.round((100 * busy.reduce((a, b) => a + b, 0)) / busy.length)}% busy on average, ${Math.round(100 * Math.max(...busy))}% at most`,
+  ];
+  if (out.length) parts.push(`swap-out up to ${Math.round(Math.max(...out))} pages/s`);
+  if (free.length) parts.push(`swap free down to ${Math.min(...free)} MB`);
+  console.error(`machine during the check (${loads.length} samples): ${parts.join(', ')}`);
+}
 const total = ((Date.now() - started) / 1000).toFixed(1);
 // The only authoritative result besides the exit code: summary lines of a
 // suite stopped part-way (`ℹ fail 0`, `N passed`) say nothing about the check.
