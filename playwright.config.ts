@@ -25,6 +25,11 @@ if (!process.env.PATH?.startsWith(guard.bin + delimiter))
 const ports = sharedPorts();
 const demoUrl = `http://127.0.0.1:${ports.demo}`;
 const attentionUrl = `http://127.0.0.1:${ports.attention}`;
+// Серверы гаснут вместе с раннером: Playwright останавливает их при обычном
+// завершении, но раннер, убитый извне, оставлял оба демо-сервера на часы.
+// Конфигурация вычисляется и в воркерах, но серверы запускает только раннер,
+// поэтому process.pid здесь — его pid.
+const server = `node scripts/e2e-server.mjs ${process.pid} --`;
 const env = {
   PATH: process.env.PATH,
   GIT_AUTHOR_NAME: 'DevContour fixture',
@@ -58,7 +63,7 @@ export default defineConfig({
       // Демо-данные — во временном каталоге системы, а не в проекте: каждый
       // прогон оставлял рабочие копии и репозитории в дереве, и IDE
       // переиндексировала их после каждого прогона.
-      command: `npm run devcontour -- demo --data ${data} --checkout-root ${checkouts} --port ${ports.demo}`,
+      command: `${server} npm run devcontour -- demo --data ${data} --checkout-root ${checkouts} --port ${ports.demo}`,
       url: `${demoUrl}/api/state`,
       reuseExistingServer: false,
       timeout: 60000,
@@ -67,7 +72,7 @@ export default defineConfig({
       env,
       // Свой демо-сервер центра внимания: его сценарии запускают очередь, и
       // общий демо-проект после них уже не тот, что ждут другие сценарии.
-      command: `npm run devcontour -- demo --data ${join(run, 'attention-data')} --checkout-root ${join(run, 'attention-checkouts')} --port ${ports.attention}`,
+      command: `${server} npm run devcontour -- demo --data ${join(run, 'attention-data')} --checkout-root ${join(run, 'attention-checkouts')} --port ${ports.attention}`,
       url: `${attentionUrl}/api/state`,
       reuseExistingServer: false,
       timeout: 60000,

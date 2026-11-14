@@ -79,7 +79,7 @@ for (const detached of [false, true])
         });
         const scripts = join(root, 'scripts');
         await mkdir(scripts);
-        for (const file of ['check.mjs', 'check-processes.mjs'])
+        for (const file of ['check.mjs', 'check-processes.mjs', 'machine-load.mjs', 'orphans.mjs'])
           await copyFile(join(source, 'scripts', file), join(scripts, file));
         await writeFile(
           join(root, 'package.json'),
@@ -116,7 +116,7 @@ for (const detached of [false, true])
         );
         const child = spawn(process.execPath, [join(scripts, 'check.mjs'), ...['--fast']], {
           cwd: root,
-          env: { ...process.env, CHECK_RUNNER_STUB: root },
+          env: { ...process.env, CHECK_RUNNER_STUB: root, DEVCONTOUR_CHECK_SWEEP: '0' },
           stdio: ['ignore', 'pipe', 'pipe'],
         });
         let output = '';
@@ -425,7 +425,7 @@ async function releaseCheck(body: string, extraEnv: NodeJS.ProcessEnv = {}) {
   const root = await mkdtemp(join(tmpdir(), 'check-release-'));
   const scripts = join(root, 'scripts');
   await mkdir(scripts);
-  for (const file of ['check.mjs', 'check-processes.mjs'])
+  for (const file of ['check.mjs', 'check-processes.mjs', 'machine-load.mjs', 'orphans.mjs'])
     await copyFile(join(source, 'scripts', file), join(scripts, file));
   const steps = ['check:environment', 'lint', 'build:lib', 'check:skill', 'build:assets'];
   await writeFile(
@@ -455,6 +455,8 @@ ${body}`,
     // Inherited by every stub and its descendants: cleanup signals a recorded
     // pid only while it still carries this run's own root.
     CHECK_RUNNER_STUB: root,
+    DEVCONTOUR_CHECK_SWEEP: '0',
+    DEVCONTOUR_CHECK_QUIET_WAIT_MIN: '0',
     ...extraEnv,
   };
   delete env.NODE_TEST_CONTEXT;
