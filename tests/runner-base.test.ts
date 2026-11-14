@@ -139,7 +139,12 @@ test('A stale run base that is a pure fast-forward moves on the next tick; a div
     const diverged = new Scheduler(f.h, f.root, idle);
     await diverged.init();
     f.h.pause(false);
-    await assert.rejects(diverged.tick(), /base-update/);
+    await assert.rejects(diverged.tick(), (e: Error) => {
+      assert.match(e.message, /base-update/);
+      // Продуктовые коммиты: перенос снимут gates, человек не нужен.
+      assert.doesNotMatch(e.message, /подтверждение оператора/);
+      return true;
+    });
     assert.equal(await git(repo.path, 'rev-parse', target), acceptedTip, 'принятое не потеряно');
     await diverged.stop();
     const merged = await updateBase(f.config, f.root);
@@ -218,6 +223,13 @@ test('Auto fast-forward refuses commits that touch acceptance or contour files a
       await assert.rejects(s.tick(), (e: Error) => {
         assert.match(e.message, /base-update/, label);
         assert.match(e.message, pattern, label);
+        // После переноса такую базу подтверждает только человек (D42):
+        // остановка называет этот шаг заранее, а не только base-update.
+        assert.match(
+          e.message,
+          /После переноса очередь продолжит только подтверждение оператора \(main:[^)]+\): «Подтвердить и запустить» в «Внимании»/,
+          label,
+        );
         return true;
       });
       assert.equal(await base(), from, label + ': база не сдвинута');
@@ -276,8 +288,8 @@ test('Auto fast-forward refuses commits that touch acceptance or contour files a
     assert.ok(f.h.leader(s.owner), 'роль controller у проверяемого процесса');
     const forward = async () => {
       const from = await base();
-      const sensitive = await (
-        s as unknown as { fastForwardBase(d: unknown): Promise<string[]> }
+      const { sensitive } = await (
+        s as unknown as { fastForwardBase(d: unknown): Promise<{ sensitive: string[] }> }
       ).fastForwardBase(await s.baseDrift());
       return { moved: (await base()) !== from, sensitive };
     };

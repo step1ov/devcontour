@@ -1,3 +1,4 @@
+import { heldBaseOf } from '../core/work-status.ts';
 import { Preparation } from '../core/preparation.ts';
 import { preparationInputs, type PreparationOperation } from '../core/preparation-model.ts';
 import {
@@ -669,9 +670,27 @@ export class AgentService {
         const workflow = new LeadWorkflow(h);
         const job = workflow.start(input);
         const gaps = workflow.scopeGaps(job.kind, job.id);
+        // Задание доски будет ждать удержанного переноса базы: его снимает
+        // только оператор (`heldBaseOf` — та же причина, что у остановки
+        // очереди и центра внимания), и `queued` без пояснения выглядел бы
+        // как штатный старт.
+        const held =
+          job.kind === 'board' && (job.status === 'queued' || job.status === 'running')
+            ? heldBaseOf(h.store.read())
+            : undefined;
+        const warnings = [
+          ...(gaps.length ? [scopeGapWarning(gaps)] : []),
+          ...(held
+            ? [
+                `Задание будет ждать: перенос базы меняет приёмку или настройку контура (${held.paths.join(', ') || 'пути — в ожидании base-check'}), и выдачу продолжит только подтверждение оператора. ${held.action}. Попросите пользователя подтвердить перенос; задание продолжит доску само.`,
+              ]
+            : []),
+        ];
         return {
           ...this.workflowView(job),
-          ...(gaps.length ? { coverageGaps: gaps, warning: scopeGapWarning(gaps) } : {}),
+          ...(gaps.length ? { coverageGaps: gaps } : {}),
+          ...(held ? { baseHeld: { paths: held.paths, actor: 'operator' as const } } : {}),
+          ...(warnings.length ? { warning: warnings.join(' ') } : {}),
         };
       }
       case 'workflow_status':

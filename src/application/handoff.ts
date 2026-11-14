@@ -29,7 +29,7 @@ import {
   type WorkflowJob as HarnessJob,
 } from 'devcontour-harness';
 import { z } from 'zod';
-import { DomainError, type Config } from '../core/model.ts';
+import { DomainError, type Config, type DevContourState } from '../core/model.ts';
 import type { DevContour } from '../core/service.ts';
 import { LeadWorkflow, jointWaiting, type WorkflowJob } from '../core/lead-workflow.ts';
 import {
@@ -41,7 +41,7 @@ import {
   type LoopOutlook,
 } from '../runner/lead-outlook.ts';
 import { repositories } from '../core/repositories.ts';
-import { heldBasePaths, heldBaseWait, leadLiftsPause, pausedByLead } from '../core/work-status.ts';
+import { heldBaseOf, leadLiftsPause, pausedByLead } from '../core/work-status.ts';
 import { executionOf, toDomain } from '../harness/execution.ts';
 import { resolveIdPrefix } from '../core/id-prefix.ts';
 import type { DevContourExecutionStore } from '../harness/store.ts';
@@ -377,6 +377,41 @@ export function withoutIdleControllerStop(pack: HandoffPack): HandoffPack {
   // Остановку отбросил предел пакета: она — среди `truncated.stops`.
   if (!pack.truncated.stops) return pack;
   return { ...pack, truncated: { ...pack.truncated, stops: pack.truncated.stops - 1 } };
+}
+
+/**
+ * Удержанный перенос базы (`heldBaseOf`) в пакете harness. Пакет видит лишь
+ * паузу `base-check` и называет её ожиданием controller («Очередь ждёт
+ * операции base-check»), хотя её снимает только человек: остановка выдачи и
+ * `next` пакета, где ждёт controller, называют человека (`user`,
+ * `resume-queue`), пути и действие оператора — те же, что у остановки очереди
+ * и центра внимания. Команда harness (`harness run`) в таком `next` не
+ * называется: она ожидание не снимет.
+ */
+export function withHeldBaseStop(
+  pack: HandoffPack,
+  state: Partial<Pick<DevContourState, 'paused' | 'waits'>>,
+  /** Маска пакета: пути и причина — тексты из хранилища. */
+  redact: (text: string) => string = (text) => text,
+): HandoffPack {
+  const held = heldBaseOf(state);
+  if (!held) return pack;
+  const text = redact(
+    `Перенос базы ждёт подтверждения оператора: он меняет приёмку или настройку контура (${held.paths.join(', ') || 'пути — в ожидании base-check'}), а gates базы такое изменение не подтверждают. ${held.action}`,
+  );
+  const waits = (x: { actor: string | null; action: string }) =>
+    x.actor === 'controller' && x.action === 'wait';
+  const stops = pack.stops.map((stop) =>
+    stop.queue && stop.code === 'PAUSED' && waits(stop)
+      ? { ...stop, actor: 'user' as const, action: 'resume-queue' as const, message: text }
+      : stop,
+  );
+  let next = pack.next;
+  if (waits(next)) {
+    next = { ...next, actor: 'user', action: 'resume-queue', detail: text };
+    delete next.command;
+  }
+  return { ...pack, stops, next };
 }
 
 /** Наследуемое значение короче — обычное слово или число, а не учётные данные. */
@@ -1092,15 +1127,17 @@ function hostStep(ctx: HostContext): HandoffHostNext | undefined {
     const live = ctx.jobs.filter(ctx.live);
     // Удержанный перенос базы (`base.check.held`) не снимет ни один цикл
     // задания: «цикл проверит базу» скрыл бы, что ждут человека. Шаг —
-    // подтверждение оператора с путями переноса.
-    const wait = state.waits?.find((w) => w.kind === 'base-check')?.detail;
-    if (state.pauseReason === 'base-check' && heldBaseWait(wait)) {
+    // подтверждение оператора с путями переноса — при любой причине паузы,
+    // как у остановки очереди (`heldBaseOf`): снятие паузы ведущим
+    // (`queue_set`) удержание не снимет.
+    const held = heldBaseOf(state);
+    if (held) {
       const first = live[0];
       return withDetail(h, {
         action: 'operator',
         ...(first ? { boardId: first.id, job: jobRef(first) } : {}),
         code: 'base-held',
-        params: { paths: heldBasePaths(wait) },
+        params: { paths: held.paths },
       });
     }
     // Пауза выдачи общая: её снимает любое действующее задание, чей цикл
@@ -1199,11 +1236,15 @@ export function devcontourHandoffWithin(
   const harness = harnessOf(h);
   const { packSource, engine } = harness;
   const { store } = executionOf(h);
-  const packOf = (options: Parameters<typeof handoffPack>[1]) =>
-    withoutIdleControllerStop(handoffPack(packSource, options));
   try {
     return store.read((v) => {
       const state = store.stateOf(v);
+      const packOf = (options: Parameters<typeof handoffPack>[1]) =>
+        withHeldBaseStop(
+          withoutIdleControllerStop(handoffPack(packSource, options)),
+          state,
+          options?.redact,
+        );
       // Короткая форма из журнала и панели (`B-xxxxxxxx`) — однозначный
       // префикс полного id; неоднозначный называет кандидатов.
       const boardId =
