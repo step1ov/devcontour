@@ -11,6 +11,7 @@ import {
   livenessText,
   operationLiveness,
   queueStopView,
+  heldBaseWait,
   runLiveness,
   type OperationLiveness,
   type RunLiveness,
@@ -50,7 +51,7 @@ export function queueStopOf(
 export function baseWaitOf(h: DevContour | undefined, state: DevContourState) {
   const wait = state.waits?.find((w) => w.kind === 'base-check');
   if (!wait) return undefined;
-  const held = /меняет приёмку или настройку контура/.test(wait.detail);
+  const held = heldBaseWait(wait.detail);
   const failed = wait.detail.startsWith('Проверка базы не пройдена');
   const byEngine =
     Boolean(h) &&

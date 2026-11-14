@@ -6,6 +6,9 @@ import { DomainError, type Config } from '../core/model.ts';
 import { SERVER_STOPPING, type DevContour } from '../core/service.ts';
 import { policyFromConfig } from '../harness/policy.ts';
 import { checkoutRootFor, checkoutRootOption } from './checkout-root.ts';
+import { holdSensitiveBaseMove } from './base-check.ts';
+import { HELD_BASE_ACTION } from '../core/work-status.ts';
+import { handoffRedactor } from '../application/handoff.ts';
 
 /**
  * Начало остановки такта «база прогонов отстала» (`Scheduler.assertBaseCurrent`):
@@ -110,6 +113,7 @@ export async function baseUpdateOperation(
 ) {
   const s = h.store.read();
   const held = !s.paused && h.config.approvalMode === 'agent' && h.holdForBaseUpdate().held;
+  const by = options.by ?? 'operator';
   if (!h.store.read().paused) throw new Error(NOT_PAUSED);
   if (h.store.read().runs.some((r) => r.status === 'active')) throw new Error(ACTIVE);
   // Сдвиг ref — в транзакции проверки (очередь стоит, попыток нет) и
@@ -122,7 +126,7 @@ export async function baseUpdateOperation(
       options.fence?.(view);
     },
     undefined,
-    options.by ?? 'operator',
+    by,
   );
   // Перенесённые до отказа репозитории: их база уже сдвинута и ждёт проверки.
   const moved: { repositoryId: string; from: string; to: string }[] = [];
@@ -147,8 +151,28 @@ export async function baseUpdateOperation(
       }
     throw error;
   }
-  if (base.updated.length) h.baseUpdated(base.updated);
-  else if (held && !liftHold(h))
+  if (base.updated.length) {
+    h.baseUpdated(base.updated);
+    // Перенос, который gates не подтверждают (D42), удержан сразу: ответ,
+    // остановка очереди, центр внимания и пакет ведущего называют человека
+    // с этого момента, а не после такта задания.
+    let paths: string[];
+    try {
+      paths = await holdSensitiveBaseMove(h, dataRoot);
+    } catch (error) {
+      // Разбор путей не удался: удержание определит проверка базы циклом.
+      // «Workflow проверит её gates» здесь обещал бы то, чего никто не знает.
+      return {
+        ...base,
+        baseHeld: { unknown: true as const },
+        next: redactOf(h)(
+          `База обновлена; удержан ли перенос, не определено (${error instanceof Error ? error.message : String(error)}). Если перенос меняет приёмку или настройку контура, его подтверждает оператор: проверьте «Внимание» панели и session_handoff (host.next operator, code base-held); иначе workflow доски проверит базу gates.`,
+        ),
+      };
+    }
+    if (paths.length)
+      return { ...base, baseHeld: { paths }, next: redactOf(h)(heldNext(paths, by)) };
+  } else if (held && !liftHold(h))
     throw new DomainError(
       'Переносить базу не пришлось, но очередь не продолжена: ' +
         SERVER_STOPPING +
@@ -156,6 +180,23 @@ export async function baseUpdateOperation(
       409,
     );
   return base;
+}
+
+/** Маска секретов контура: та же, что у пакета ведущего и центра внимания. */
+const redactOf = (h: DevContour) => handoffRedactor(h.config, executionOf(h).engine.policy);
+
+/**
+ * Шаг после удержанного переноса: его подтверждает оператор, ведущий агент
+ * ожидание не снимает. Ведущему — что делать тем временем.
+ */
+function heldNext(paths: string[], by: 'operator' | 'host') {
+  const head = `База обновлена, но перенос меняет приёмку или настройку контура (${paths.join(', ')}): gates этой базы его не подтверждают, и очередь ждёт подтверждения оператора (D42). `;
+  return by === 'host'
+    ? head +
+        HELD_BASE_ACTION +
+        '. Попросите пользователя подтвердить перенос. Тем временем не снимайте паузу (queue_set) и не повторяйте задание (workflow_retry): workflow доски ждёт и продолжит очередь после подтверждения; session_handoff называет этот шаг (host.next operator, code base-held). Без человека цикл снимает только документы контрактов в редакции, одобренной независимым ревью (review-contract); изменение приёмки — через contract-change.'
+    : head +
+        'Проверьте перенос и подтвердите его: «Подтвердить и запустить» в «Внимании» панели или devcontour queue --start.';
 }
 
 /**

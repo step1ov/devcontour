@@ -10,6 +10,7 @@ import {
   type GateApplicability,
 } from 'devcontour-harness';
 import { baseMovesOf, type DevContour } from '../core/service.ts';
+import type { DevContourState } from '../core/model.ts';
 import { dependsOnRepository, repositories, repository } from '../core/repositories.ts';
 import { executionOf } from '../harness/execution.ts';
 import { CONSUMER_VERSION } from '../harness/host.ts';
@@ -248,6 +249,123 @@ async function basePlan(
  * проверка оставалась бы в журнале без окончания; fencing соблюдается и тогда.
  */
 export type CheckGuard = (options?: { closing?: boolean }) => void;
+/** Предел путей в причине удержания: остальные — в журнале переноса. */
+const HELD_PATHS = 20;
+
+/**
+ * Причина удержанного переноса (`base.check.held`) — единственный источник,
+ * из которого её читают остановка очереди (`stopReason`), центр внимания,
+ * `session_handoff`, `workflow_start` и ответ `base-update`
+ * (`heldBaseWait`/`heldBasePaths`): пути и действие оператора.
+ */
+export const heldBaseDetail = (paths: readonly string[]) =>
+  `${BASE_HELD_DETAIL} (${paths.slice(0, HELD_PATHS).join(', ')}): gates этой базы его не подтверждают. Перенос проверяет и подтверждает оператор: «Подтвердить и запустить» в «Внимании» панели; ведущий агент это ожидание сам не снимает. Сам цикл снимает только документы контрактов в редакции, одобренной независимым ревью (review-contract); изменение приёмки — через contract-change`;
+
+/**
+ * Заменить причину ожидания `base-check` событием `type` — в одной
+ * транзакции со сверкой: ожидание есть и, если передано `at`, это то же
+ * ожидание (иначе его поставил более поздний перенос или оно снято).
+ * `same` — причина уже та же, события нет; `gone` — ожидания нет.
+ */
+function setBaseWaitDetail(
+  h: DevContour,
+  type: string,
+  detail: string,
+  data: Record<string, unknown>,
+  options: {
+    guard?: CheckGuard;
+    at?: string;
+    /**
+     * Удержание: пауза отказа runtime становится паузой `base-check`. Иначе
+     * снятие причины отказа (`clearFailure` при повторе задачи) вернуло бы
+     * выдачу, оставив удержанное ожидание неподтверждённым.
+     */
+    held?: boolean;
+  } = {},
+): 'set' | 'same' | 'gone' {
+  return h.store.atomic(() => {
+    options.guard?.();
+    const state = h.store.read();
+    const wait = state.waits?.find((w) => w.kind === 'base-check');
+    if (!wait || (options.at !== undefined && wait.at !== options.at)) return 'gone';
+    const repause = !!options.held && state.paused && state.pauseReason === 'runtime';
+    if (wait.detail === detail && !repause) return 'same';
+    h.store.change(type, (st) => {
+      st.waits = (st.waits ?? []).map((w) => (w.kind === 'base-check' ? { ...w, detail } : w));
+      if (repause) {
+        st.pauseReason = 'base-check';
+        st.pauseFailures = undefined;
+      }
+      return repause ? { ...data, pauseFrom: 'runtime' } : data;
+    });
+    return wait.detail === detail ? 'same' : 'set';
+  });
+}
+
+/**
+ * Разбор непроверенного переноса (`baseMoves` до текущих SHA целевых
+ * веток): какие чувствительные пути (D42) держат его до подтверждения
+ * человека (`held`, `компонент:путь`, не больше 20) и какие документы
+ * контрактов перенесены в редакции, одобренной независимым ревью
+ * (`reviewed`, их снимает цикл). Одно правило для проверки базы циклом и для
+ * ответа `base-update`: ведущий узнаёт об удержании в момент переноса, а не
+ * после первого такта задания.
+ */
+export async function baseMoveReview(
+  h: DevContour,
+  dataRoot: string,
+  state: Readonly<DevContourState> = h.store.read(),
+) {
+  const bases = await Promise.all(
+    repositories(h.config).map(async (repo) => ({
+      repositoryId: repo.id,
+      sha: await git(repo.path, 'rev-parse', 'refs/heads/' + repo.targetBranch),
+    })),
+  );
+  const held: string[] = [];
+  // Документы контрактов, которые перенос приносит в редакции, одобренной
+  // независимым ревью: их снимает цикл, с доказательством в `base.checked`.
+  const reviewed: ReviewedContractDocument[] = [];
+  for (const m of baseMovesOf(state) ?? []) {
+    const to = bases.find((b) => b.repositoryId === m.repositoryId)?.sha;
+    if (!to) continue;
+    const entries = await sensitiveBaseEntries(h, dataRoot, state, m.repositoryId, m.from, to);
+    for (const e of entries) {
+      const evidence = e.contractDocument
+        ? await reviewedContractDocument(h, state, m.repositoryId, e.path, to)
+        : undefined;
+      if (evidence) reviewed.push(evidence);
+      else held.push(`${m.repositoryId}:${e.path}`);
+    }
+  }
+  return { bases, held: held.slice(0, HELD_PATHS), reviewed };
+}
+
+/**
+ * Записать удержание переноса сразу после `base-update` в режиме агента —
+ * тем же событием и той же причиной, что проверка базы циклом задания
+ * (`checkBase` потом причину не переписывает). Возвращает пути удержания;
+ * пусто — перенос снимут gates, или ожидания этого переноса уже нет.
+ */
+export async function holdSensitiveBaseMove(h: DevContour, dataRoot: string) {
+  const state = h.store.read();
+  if (h.config.approvalMode !== 'agent' || !baseMovesOf(state)) return [];
+  const wait = state.waits?.find((w) => w.kind === 'base-check');
+  if (!state.paused || !wait) return [];
+  const { held } = await baseMoveReview(h, dataRoot, state);
+  if (!held.length) return [];
+  // Ожидание этого переноса (`at`): за время разбора его могли снять
+  // (оператор запустил очередь) или заменить более поздним переносом.
+  const set = setBaseWaitDetail(
+    h,
+    'base.check.held',
+    heldBaseDetail(held),
+    { paths: held, by: 'base-update' },
+    { at: wait.at, held: true },
+  );
+  return set === 'gone' ? [] : held;
+}
+
 /**
  * Проверка перенесённой базы gates компонентов в режиме `approvalMode: agent`.
  *
@@ -309,42 +427,11 @@ export async function checkBase(
   if (!moves) return false;
   /** Ожидание остаётся и называет причину; событие — только при новой причине. */
   const hold = (type: string, detail: string, data: Record<string, unknown>) => {
-    if (h.store.read().waits?.some((w) => w.kind === 'base-check' && w.detail !== detail))
-      h.store.change(type, (s) => {
-        guard();
-        s.waits = (s.waits ?? []).map((w) => (w.kind === 'base-check' ? { ...w, detail } : w));
-        return data;
-      });
+    setBaseWaitDetail(h, type, detail, data, { guard });
     return false;
   };
-  const bases = await Promise.all(
-    repositories(h.config).map(async (repo) => ({
-      repositoryId: repo.id,
-      sha: await git(repo.path, 'rev-parse', 'refs/heads/' + repo.targetBranch),
-    })),
-  );
-  const touched: string[] = [];
-  // Документы контрактов, которые перенос приносит в редакции, одобренной
-  // независимым ревью: их снимает цикл, с доказательством в `base.checked`.
-  const reviewed: ReviewedContractDocument[] = [];
-  for (const m of moves) {
-    const to = bases.find((b) => b.repositoryId === m.repositoryId)?.sha;
-    if (!to) continue;
-    const entries = await sensitiveBaseEntries(h, roots.data, state, m.repositoryId, m.from, to);
-    for (const e of entries) {
-      const evidence = e.contractDocument
-        ? await reviewedContractDocument(h, state, m.repositoryId, e.path, to)
-        : undefined;
-      if (evidence) reviewed.push(evidence);
-      else touched.push(`${m.repositoryId}:${e.path}`);
-    }
-  }
-  if (touched.length)
-    return hold(
-      'base.check.held',
-      `${BASE_HELD_DETAIL} (${touched.slice(0, 20).join(', ')}): gates этой базы его не подтверждают. Перенос проверяет и подтверждает оператор: «Подтвердить и запустить» в «Внимании» панели; ведущий агент это ожидание сам не снимает. Сам цикл снимает только документы контрактов в редакции, одобренной независимым ревью (review-contract); изменение приёмки — через contract-change`,
-      { paths: touched.slice(0, 20) },
-    );
+  const { bases, held: touched, reviewed } = await baseMoveReview(h, roots.data, state);
+  if (touched.length) return hold('base.check.held', heldBaseDetail(touched), { paths: touched });
   const { engine } = executionOf(h);
   const failed: string[] = [];
   // Перенесённые результаты, на которые опирается снятие (`base.checked`).

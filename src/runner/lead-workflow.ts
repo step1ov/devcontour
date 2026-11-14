@@ -1,7 +1,7 @@
 import { join } from 'node:path';
 import { LeadWorkflow, WAITING_BASE_HELD, type WorkflowJob } from '../core/lead-workflow.ts';
-import { heldBaseWait } from '../core/work-status.ts';
-import { SERVER_STOPPING, type DevContour } from '../core/service.ts';
+import { heldBaseOf } from '../core/work-status.ts';
+import { BASE_HELD_REFUSAL, SERVER_STOPPING, type DevContour } from '../core/service.ts';
 import { DomainError, type ChangeSet, type DevContourState } from '../core/model.ts';
 import { repositories, repository } from '../core/repositories.ts';
 import { Workspace, changeSnapshot, currentJoint } from '../core/workspace.ts';
@@ -201,7 +201,11 @@ export class LeadRunner {
           // стадии: она ждёт доменного состояния (пауза остановки), и задание
           // возвращается в очередь без расхода попытки, как стадия «жду».
           // Если и это не записалось — прерывание (тоже снова в очередь).
-          const stopping = e instanceof DomainError && e.message === SERVER_STOPPING;
+          // Отказ снять паузу при удержанном переносе базы — тоже ожидание
+          // (подтверждения человека), а не провал задания.
+          const stopping =
+            e instanceof DomainError &&
+            (e.message === SERVER_STOPPING || e.message.startsWith(BASE_HELD_REFUSAL + ':'));
           if (stopping)
             try {
               this.workflow.finish(job, true);
@@ -242,6 +246,7 @@ export class LeadRunner {
     // клиент успевал отменить задачу: проверка отмены защищала прочитанный
     // снимок, а повтор назначался уже отменённой работе. Внутри транзакции
     // такого промежутка нет, а остановка ничего не пишет и откатывается.
+    let settle = false;
     const decision = this.h.store.atomic(() => {
       // Решение — общее правило цикла (`repairStep`): по нему же пакет
       // передачи называет следующий шаг.
@@ -262,13 +267,40 @@ export class LeadRunner {
         // Правило движка (`clearFailure`): снимается только этот класс,
         // выдача возвращается, когда причин не осталось; пауза человека
         // не трогается.
-        if (decided.blocksQueue) executionOf(this.h).engine.clearFailure([decided.kind]);
+        if (decided.blocksQueue) {
+          const now = this.h.store.read();
+          // Под отказом лежит перенос базы (ожидание base-check): `clearFailure`
+          // вернул бы выдачу, не проверив базу и не дождавшись подтверждения
+          // удержанного переноса, — и ожидание осталось бы в списке мёртвым.
+          // Своя причина снимается после транзакции (`settleFailure`).
+          if (now.paused && now.waits?.some((w) => w.kind === 'base-check')) settle = true;
+          else executionOf(this.h).engine.clearFailure([decided.kind]);
+        }
       });
       return decided;
     });
     if (!decision) return false;
     if (decision.action === 'stop') throw new Error(decision.reason);
+    if (settle) this.settleFailure(decision.kind);
     return true;
+  }
+  /**
+   * Снять причину отказа `kind` под ожиданием проверки базы: очередь не
+   * идёт, а когда причин не осталось, пауза становится паузой `base-check` —
+   * её снимает проверка базы циклом (`checkBase`) или человек, а удержанный
+   * перенос — только человек.
+   */
+  private settleFailure(kind: string) {
+    this.h.store.change('base.check.resumed-wait', (st) => {
+      if (!st.paused || st.pauseReason !== 'runtime') return { kind, kept: st.pauseReason };
+      const left = (st.pauseFailures ?? []).filter((k) => k !== kind);
+      st.pauseFailures = left.length ? left : undefined;
+      if (!left.length) {
+        st.pauseReason = 'base-check';
+        st.pausedAt = new Date().toISOString();
+      }
+      return { kind, after: 'repair' };
+    });
   }
   /**
    * Эпизоды повторяющихся отказов по свойству. Возвращает true, когда
@@ -430,7 +462,9 @@ export class LeadRunner {
         if (pause.lift)
           this.h.store.atomic(() => {
             guard();
-            this.h.pause(false);
+            // Свежее состояние: удержание могли записать после чтения такта.
+            if (heldBaseOf(this.h.store.read())) return;
+            this.h.pause(false, 'operator', 'lead');
           });
       } else {
         if (
@@ -457,7 +491,8 @@ export class LeadRunner {
           if (pause.lift)
             this.h.store.atomic(() => {
               guard();
-              this.h.pause(false);
+              if (heldBaseOf(this.h.store.read())) return;
+              this.h.pause(false, 'operator', 'lead');
             });
           return true;
         }
@@ -531,7 +566,7 @@ export class LeadRunner {
     await checkBase(this.h, { data: this.root, state: this.boardRoot(job) }, guard, signal);
     const after = this.h.store.read();
     const wait = after.waits?.find((w) => w.kind === 'base-check');
-    if (wait && after.paused && after.pauseReason === 'base-check' && heldBaseWait(wait.detail))
+    if (wait && after.pauseReason === 'base-check' && heldBaseOf(after))
       this.workflow.noteWaiting(job, WAITING_BASE_HELD, wait.at);
   }
   /**

@@ -12,9 +12,17 @@ import { queueStopOf } from '../application/queue-stop.ts';
  */
 export async function startQueue(
   h: DevContour,
-  options: { timeoutMs?: number; pollMs?: number } = {},
+  options: {
+    timeoutMs?: number;
+    pollMs?: number;
+    /**
+     * Кто запускает: `lead` (`queue --start --by host`) — ведущий агент,
+     * который удержанный перенос базы не подтверждает (`pause`).
+     */
+    by?: 'operator' | 'lead';
+  } = {},
 ) {
-  const started = h.pause(false);
+  const started = h.pause(false, 'operator', options.by ?? 'operator');
   const leaseOf = () => h.store.read().leader;
   const lease = leaseOf();
   if (!lease || lease.leaseUntil <= Date.now()) return { ...started, server: 'none' as const };
