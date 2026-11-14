@@ -41,7 +41,13 @@ import { applyCases } from '../runner/recovery.ts';
 import { proveScenario, scenarioProofInput } from '../runner/scenario-proof.ts';
 import { ContractChanges } from '../runner/contract-change.ts';
 import { contractProposal, limitsMessage, proposalLimitIssues } from '../runner/agent-control.ts';
-import { queueStopOf, quietAttempts, quietOperations } from './queue-stop.ts';
+import { queueStopOf } from './queue-stop.ts';
+import {
+  WORKFLOW_STATUS_OVERSIZED,
+  publicJob,
+  workflowStatus,
+  workflowStatusInput,
+} from './workflow-status.ts';
 import { InputService, inputOperationInputs } from './input.ts';
 import { AttentionService } from './attention.ts';
 import { attentionInputs } from '../core/attention-model.ts';
@@ -50,6 +56,15 @@ import { gateTestcases, testcasesInput } from './testcases.ts';
 
 const id = z.string().regex(/^[A-Za-z0-9_-]{1,80}$/);
 export { SERVER_STOPPING };
+/**
+ * Отказ по пределу ответа называет путь, который существует: поля входа самой
+ * операции (её inputSchema в capabilities). Прежний текст отсылал к
+ * «CLI-отчёту», которого у большинства операций нет.
+ */
+export function oversized(operation: string) {
+  if (operation === 'workflow_status') return WORKFLOW_STATUS_OVERSIZED;
+  return `Ответ ${operation} превышает 64 KiB: сузьте запрос полями его входа (фильтры, limit, cursor — inputSchema операции в capabilities)`;
+}
 export const agentInputs = {
   ...preparationInputs,
   ...intentInputs,
@@ -59,7 +74,7 @@ export const agentInputs = {
   signal_ingest: signalInput,
   signal_status: z.strictObject({ repositoryId: id }),
   workflow_start: workflowInput,
-  workflow_status: z.strictObject({ repositoryId: id.optional() }),
+  workflow_status: workflowStatusInput,
   workflow_retry: z.strictObject({
     repositoryId: id.optional(),
     key: z.string().regex(/^[a-f0-9]{64}$/),
@@ -240,7 +255,7 @@ export const descriptions: Record<AgentOperation, string> = {
   workflow_start:
     'Enqueue idempotent board review, execution and acceptance or ChangeSet verification. A running server may invoke models. Operator policy remains enforced.',
   workflow_status:
-    'Read owner-local durable stage jobs, the queue stop and running attempts and checks without movement (liveness and operations: quiet or stalled, idle time, activity, next step). Without repositoryId, jobs are the workspace jobs and otherOwners counts the jobs of component-local boards per repositoryId (jobs, active) with otherOwnersHint; pass repositoryId to read them. A queued or running job has waiting when its stage waits: input (writer questions) for a board, verification (verificationId, startedAt, elapsedMs) for a ChangeSet at stage 1 while its joint verification runs. No model calls or execution leases are granted.',
+    'Read owner-local durable stage jobs, the queue stop and running attempts and checks without movement (liveness and operations: quiet or stalled, idle time, activity, next step). Without repositoryId, jobs are the workspace jobs and otherOwners counts the jobs of component-local boards per repositoryId (jobs, active) with otherOwnersHint; pass repositoryId to read them. A queued or running job has waiting when its stage waits: input (writer questions) for a board, verification (verificationId, startedAt, elapsedMs) for a ChangeSet at stage 1 while its joint verification runs. Active jobs (queued, running) are listed in full. Finished jobs (completed, failed, stale) are folded: by default the latest 10 by end time in a compact form (no history; lastEvent, historyLength, error clipped), the rest counted in finished {total, listed, omitted, compact, hint}. Filters: key (one job), kind and id (the jobs of one board or ChangeSet; with key or id finished jobs come in full), active (true: only queued and running; false: only finished), limit (finished jobs listed, 1-200). Over the response limit: when the active jobs alone do not fit, their history is cut to its last 20 events (historyOmitted, historyClipped); then the oldest finished jobs are dropped (counted in finished.omitted). No model calls or execution leases are granted.',
   workflow_retry:
     'Retry a diagnosed failed stage within its original attempt budget. Never retries failed task implementations automatically.',
   workflow_metrics:
@@ -466,11 +481,10 @@ export class AgentService {
   execute(raw: unknown): Record<string, unknown> {
     const request = parseAgentRequest(raw);
     markLeadActivity(this.h.store, 'agent', request.operation);
-    return this.bounded(this.dispatch(request));
+    return this.bounded(this.dispatch(request), request.operation);
   }
-  private bounded(result: Record<string, unknown>) {
-    if (!checkJsonBytes(result, 65536).within)
-      throw new DomainError('Ответ превышает 64 KiB; сузьте запрос или используйте CLI-отчёт', 413);
+  private bounded(result: Record<string, unknown>, operation: string) {
+    if (!checkJsonBytes(result, 65536).within) throw new DomainError(oversized(operation), 413);
     return result;
   }
   /** Общий вход транспортов: синхронные операции и операции с внешними процессами. */
@@ -478,17 +492,18 @@ export class AgentService {
     const request = parseAgentRequest(raw);
     // Обращение ведущего — его присутствие, даже если операция только читает.
     markLeadActivity(this.h.store, 'agent', request.operation);
+    const bounded = (result: Record<string, unknown>) => this.bounded(result, request.operation);
     // Отчёт требований читает Git и считает доказательства всех задач
     // компонента: в процессе сервера — без блокировки цикла событий, чтобы
     // другие запросы не ждали его.
     if (request.operation === 'requirements_report') {
       checkAgentInput(request);
       const v = agentInputs.requirements_report.parse(request.input ?? {});
-      return this.bounded(
+      return bounded(
         requirementReportPage(await requirementReportAsync(this.h, v.repositoryId), v),
       );
     }
-    if (!asyncOperations.has(request.operation)) return this.bounded(this.dispatch(request));
+    if (!asyncOperations.has(request.operation)) return bounded(this.dispatch(request));
     if (!this.root)
       throw new DomainError('Операция запускает процессы и требует каталога данных контура', 409);
     checkAgentInput(request);
@@ -496,9 +511,9 @@ export class AgentService {
     const input = request.input ?? {};
     switch (request.operation) {
       case 'feasibility_spike':
-        return this.bounded({ spike: await runSpike(this.h, this.root, input) });
+        return bounded({ spike: await runSpike(this.h, this.root, input) });
       case 'checks_case_submit':
-        return this.bounded(await submitCase(this.h, this.root, input));
+        return bounded(await submitCase(this.h, this.root, input));
       case 'recovery_decide': {
         const v = agentInputs.recovery_decide.parse(input);
         const decided = this.h.recoveryDecide(
@@ -525,7 +540,7 @@ export class AgentService {
           this.h.recoveryApplied(v.taskId, v.recoveryId, await applyCases(this.h, this.root, task));
         }
         const task = this.h.store.read().tasks.find((t) => t.id === v.taskId)!;
-        return this.bounded({
+        return bounded({
           taskId: v.taskId,
           recovery: task.recovery
             ? {
@@ -547,7 +562,7 @@ export class AgentService {
         const issues = proposalLimitIssues((input as { proposal?: unknown } | null)?.proposal);
         if (issues.length) throw new DomainError(limitsMessage(issues), 400);
         const v = agentInputs.contract_change_revise.parse(input);
-        return this.bounded(
+        return bounded(
           await new ContractChanges(this.h, this.root).revise(
             v.id,
             v.expectedVersion,
@@ -557,9 +572,9 @@ export class AgentService {
         );
       }
       case 'input_context':
-        return this.bounded(await new InputService(this.h, this.root).context(input));
+        return bounded(await new InputService(this.h, this.root).context(input));
       case 'input_review':
-        return this.bounded(await new InputService(this.h, this.root).review(input));
+        return bounded(await new InputService(this.h, this.root).review(input));
       case 'task_scenario_proof':
         // Что существующий тест проверяет сценарий — решение того, кто
         // утверждает: в operator mode агент его сам не записывает.
@@ -568,14 +583,13 @@ export class AgentService {
             'В approvalMode operator доказательство сценария записывает оператор: devcontour scenario-proof --task ID --gate G --scenario ... --test-id ... --reason ...',
             409,
           );
-        return this.bounded(await proveScenario(this.h, this.root, input, 'agent'));
+        return bounded(await proveScenario(this.h, this.root, input, 'agent'));
       default:
         throw new DomainError('Неизвестная операция', 400);
     }
   }
   private workflowView(job: ReturnType<LeadWorkflow['start']>) {
-    const { token: _token, ...publicJob } = job;
-    return publicJob;
+    return publicJob(job);
   }
   /**
    * Предупреждение, не отказ: черновики, которые утверждение отклонит из-за
@@ -658,33 +672,8 @@ export class AgentService {
           ...(gaps.length ? { coverageGaps: gaps, warning: scopeGapWarning(gaps) } : {}),
         };
       }
-      case 'workflow_status': {
-        const owner = agentInputs.workflow_status.parse(input).repositoryId;
-        const state = h.store.read();
-        const now = Date.now();
-        return {
-          jobs: (() => {
-            const workflow = new LeadWorkflow(h);
-            return workflow.list(owner).map((j) => {
-              // Стадия ждёт только ответов на вопросы исполнителя: «ждёт ответа», не сбой.
-              const waiting = ['queued', 'running'].includes(j.status)
-                ? workflow.waitingOf(j, state)
-                : undefined;
-              return { ...this.workflowView(j), ...(waiting ? { waiting } : {}) };
-            });
-          })(),
-          // Задания досок компонентов идут у своих владельцев: без repositoryId
-          // они не в `jobs`, но их число и подсказка — здесь.
-          ...(owner === undefined ? new LeadWorkflow(h).otherOwners() : {}),
-          operatorBlocked: h.config.approvalMode === 'operator',
-          // Стадии ждут выдачи: остановленная очередь и её причина — рядом.
-          queue: queueStopOf(h, state),
-          // Идущие попытки без движения: зависание замечают без запроса журнала.
-          liveness: quietAttempts(state, now, owner),
-          // Проверки вне попыток (совместная, базы, доски) без движения.
-          operations: quietOperations(h, state, now, 'agent', owner),
-        };
-      }
+      case 'workflow_status':
+        return workflowStatus(h, input);
       case 'workflow_retry': {
         const v = agentInputs.workflow_retry.parse(input);
         return this.workflowView(new LeadWorkflow(h).retry(v.key, v.repositoryId));

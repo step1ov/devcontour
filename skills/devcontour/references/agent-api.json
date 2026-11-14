@@ -2790,7 +2790,7 @@
     },
     {
       "name": "workflow_status",
-      "description": "Read owner-local durable stage jobs, the queue stop and running attempts and checks without movement (liveness and operations: quiet or stalled, idle time, activity, next step). Without repositoryId, jobs are the workspace jobs and otherOwners counts the jobs of component-local boards per repositoryId (jobs, active) with otherOwnersHint; pass repositoryId to read them. A queued or running job has waiting when its stage waits: input (writer questions) for a board, verification (verificationId, startedAt, elapsedMs) for a ChangeSet at stage 1 while its joint verification runs. No model calls or execution leases are granted.",
+      "description": "Read owner-local durable stage jobs, the queue stop and running attempts and checks without movement (liveness and operations: quiet or stalled, idle time, activity, next step). Without repositoryId, jobs are the workspace jobs and otherOwners counts the jobs of component-local boards per repositoryId (jobs, active) with otherOwnersHint; pass repositoryId to read them. A queued or running job has waiting when its stage waits: input (writer questions) for a board, verification (verificationId, startedAt, elapsedMs) for a ChangeSet at stage 1 while its joint verification runs. Active jobs (queued, running) are listed in full. Finished jobs (completed, failed, stale) are folded: by default the latest 10 by end time in a compact form (no history; lastEvent, historyLength, error clipped), the rest counted in finished {total, listed, omitted, compact, hint}. Filters: key (one job), kind and id (the jobs of one board or ChangeSet; with key or id finished jobs come in full), active (true: only queued and running; false: only finished), limit (finished jobs listed, 1-200). Over the response limit: when the active jobs alone do not fit, their history is cut to its last 20 events (historyOmitted, historyClipped); then the oldest finished jobs are dropped (counted in finished.omitted). No model calls or execution leases are granted.",
       "readOnly": true,
       "inputSchema": {
         "$schema": "https://json-schema.org/draft/2020-12/schema",
@@ -2799,6 +2799,29 @@
           "repositoryId": {
             "type": "string",
             "pattern": "^[A-Za-z0-9_-]{1,80}$"
+          },
+          "key": {
+            "type": "string",
+            "pattern": "^[a-f0-9]{64}$"
+          },
+          "kind": {
+            "type": "string",
+            "enum": [
+              "board",
+              "changeset"
+            ]
+          },
+          "id": {
+            "type": "string",
+            "pattern": "^[A-Za-z0-9_-]{1,80}$"
+          },
+          "active": {
+            "type": "boolean"
+          },
+          "limit": {
+            "type": "integer",
+            "minimum": 1,
+            "maximum": 200
           }
         },
         "additionalProperties": false

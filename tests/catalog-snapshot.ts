@@ -170,5 +170,9 @@
 // Намеренное изменение: описание input_target называет правило вопроса с
 // минимумами (перепривязку проводит завершённая операция contract-change);
 // прочие операции байтово прежние.
-export const CATALOG_DIGEST = '1eca28b4801112bdf4cfe402c51975defaf3e12aa193d9353b936969c60c4a17';
+// Намеренное изменение: workflow_status принимает фильтры key, kind, id,
+// active и limit; описание называет свёртку законченных заданий (компактный
+// вид, finished) и сокращение ответа по пределу; прочие операции байтово
+// прежние.
+export const CATALOG_DIGEST = '00db66c649fbb30db666261ca4fba15ce2bb48b818853bc6f47363510e2123a3';
 export const SNAPSHOT_VERSION = '0.4.0-alpha.7';
