@@ -252,7 +252,10 @@ export class LeadRunner {
       // передачи называет следующий шаг.
       const decided = repairStep(this.h, job, taskIds);
       if (!decided || decided.action === 'stop') return decided;
-      this.workflow.repair(job, `repair:${decided.kind}`, () => {
+      // Потеря аренды перегруженным сервером названа своим событием: это не
+      // отказ сети или runtime, и человеку чинить нечего.
+      const event = decided.hostStarved ? 'repair:host-overloaded' : `repair:${decided.kind}`;
+      this.workflow.repair(job, event, () => {
         this.h.retry(decided.taskId, undefined, 'recovery');
         // Отказ окружения останавливает выдачу — иначе очередь сожгла бы
         // бюджет каждой задачи на одной и той же внешней причине. Раз причина
