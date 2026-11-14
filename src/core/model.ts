@@ -247,6 +247,19 @@ export const taskIngest = taskInput.extend({
  */
 export const CONTRACT_CONTENT_MAX = 60000;
 export const CONTRACT_CONTENT_WARN = 54000;
+/**
+ * С 75 % предела документ пора консолидировать (F20): переписать накопленные
+ * поправки в описание текущего поведения без изменения смысла.
+ */
+export const CONTRACT_CONTENT_CONSOLIDATE = 45000;
+/**
+ * Столько поправок документа (смысловых редакций после первой регистрации
+ * или последней консолидации) — совет консолидировать, если документ не
+ * меньше `CONTRACT_CONSOLIDATE_MIN`: короткий документ, поправки которого
+ * переписаны на месте, консолидировать нечем.
+ */
+export const CONTRACT_CONSOLIDATE_AFTER = 6;
+export const CONTRACT_CONSOLIDATE_MIN = 30000;
 export interface Task extends TaskInput {
   sharedCompletion?: { receipt: CompletionReceipt; sourceCommit: string };
   /**
@@ -437,6 +450,21 @@ export interface Contract {
    * назвать helper приёмки реализацией — другой договор с новым ревью.
    */
   underTest?: string[];
+  /**
+   * Консолидация: редакция переписывает текст `from` — последней редакции
+   * того же документа — без изменения смысла; артефакты, checks и underTest
+   * те же. `review` — попытка ревью равносильности (id каталога решения).
+   * Задачи, привязанные к `from`, сохраняют привязку и утверждение
+   * (`supersededBy`). Нет поля — обычная редакция.
+   */
+  consolidates?: { from: string; review: string };
+  /**
+   * Предыдущая редакция того же документа на момент регистрации. Порядок
+   * редакций — по этим ссылкам, а не по позиции в реестре: после Git sync
+   * записи приходят в порядке ключей (UUID). Нет поля — запись прежней
+   * версии: её место определяют время утверждения и порядок реестра.
+   */
+  previous?: string;
   approvedAt: string;
   approval?: Approval;
 }

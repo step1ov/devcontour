@@ -212,7 +212,9 @@ syncBuiltinESMExports();
     exec(bin, args, {
       cwd: outside,
       env: childEnv,
-      timeout: args[0] === 'engineering-evals' ? 120000 : 30000,
+      // Bounds against hangs, not speed checks: beside the Node suite on a
+      // loaded machine engineering-evals has taken over two minutes.
+      timeout: args[0] === 'engineering-evals' ? 360000 : 90000,
     });
   const help = (await cli('help')).stdout;
   assert.match(help, /DevContour/);
@@ -395,7 +397,9 @@ syncBuiltinESMExports();
     output += data;
   });
   let url;
-  const deadline = Date.now() + 60000;
+  // check runs this beside the Node suite; on a loaded machine the first start
+  // of the installed server can take longer than a minute.
+  const deadline = Date.now() + 180000;
   while (Date.now() < deadline && child.exitCode === null) {
     url = output.match(/http:\/\/127\.0\.0\.1:\d+/)?.[0];
     if (url) break;
@@ -455,7 +459,10 @@ syncBuiltinESMExports();
   );
   let completed = false;
   let lastWorkflowReport;
-  for (let count = 0; count < 450; count++) {
+  // A wall-clock bound, not a count: beside the Node suite one status call can
+  // take seconds, and 450 polls ran out while the task was still integrating.
+  const workflowDeadline = Date.now() + 180000;
+  while (Date.now() < workflowDeadline) {
     const report = await agent('workflow_status', { repositoryId: 'main' });
     lastWorkflowReport = report;
     assert.ok(report.jobs.every((j) => !('token' in j)));

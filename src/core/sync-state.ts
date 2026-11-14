@@ -4,7 +4,16 @@ import { canonicalJson } from 'devcontour-harness';
 import { createHash } from 'node:crypto';
 import { portableTest } from './proof.ts';
 import { validatePreparation } from './preparation.ts';
-import { contractDigest, digest, scopeDigest, specDigest, type DevContour } from './service.ts';
+import {
+  contractDigest,
+  contractRedactionsOf,
+  digest,
+  sameObligations,
+  scopeDigest,
+  specDigest,
+  type DevContour,
+} from './service.ts';
+import { textChecks } from './contract-text.ts';
 import { receiptProblems } from '../harness/receipt.ts';
 import { independentReviewer } from '../harness/policy.ts';
 import {
@@ -419,6 +428,11 @@ export function recordsFromState(
         ...(c.pinVersion ? { pinVersion: c.pinVersion } : {}),
         ...(c.checks ? { checks: c.checks } : {}),
         ...(c.underTest?.length ? { underTest: c.underTest } : {}),
+        // Консолидация — часть происхождения: без неё клон считал бы
+        // равносильную редакцию смысловой и требовал корректировки задач.
+        ...(c.consolidates ? { consolidates: c.consolidates } : {}),
+        // Порядок редакций после sync задают ссылки, а не порядок ключей.
+        ...(c.previous ? { previous: c.previous } : {}),
         approvedAt: c.approvedAt,
       },
     });
@@ -602,6 +616,8 @@ export function stateFromRecords(
       pinVersion?: number;
       checks?: unknown;
       underTest?: string[];
+      consolidates?: unknown;
+      previous?: string;
       approvedAt: string;
     }) =>
       JSON.stringify({
@@ -613,6 +629,8 @@ export function stateFromRecords(
         checks: c.checks ?? null,
         // Новое поле — только если объявлено: прежние записи сравниваются как раньше.
         ...(c.underTest?.length ? { underTest: c.underTest } : {}),
+        ...(c.consolidates ? { consolidates: c.consolidates } : {}),
+        ...(c.previous ? { previous: c.previous } : {}),
         approvedAt: c.approvedAt,
       });
     if (
@@ -624,6 +642,50 @@ export function stateFromRecords(
       throw new Error('Утверждённый контракт неизменяем: ' + record.data.id);
     return previous ?? record.data;
   });
+  // Известные контракты сохраняют местный порядок реестра, новые идут за
+  // ними в порядке записей. Порядок редакций документа всё равно задают
+  // ссылки (`orderRedactions`); местный порядок — запасной для записей без них.
+  const local = new Map(old.contracts.map((c, i) => [c.id, i]));
+  const incoming = new Map(s.contracts.map((c, i) => [c.id, i]));
+  s.contracts.sort(
+    (a, b) =>
+      (local.get(a.id) ?? local.size + incoming.get(a.id)!) -
+      (local.get(b.id) ?? local.size + incoming.get(b.id)!),
+  );
+  // Новые для этого клона записи контрактов проверяются один раз, при
+  // первом импорте: принятые ранее не пересуживаются (поздний сосед или
+  // новые правила проверки иначе навсегда закрыли бы sync — историю удалить
+  // нельзя). `previous` — редакция того же документа. Консолидация
+  // принимается, только если консолидирует непосредственно предыдущую
+  // редакцию (`previous` = `from`), с теми же обязательствами, и её текст
+  // проходит проверки пары: короче, ID правил на месте. Это чистые функции
+  // двух записей; ссылки соседних документов на якоря здесь не проверяются —
+  // они зависят от чужих, в том числе более поздних, записей. Параллельная
+  // поправка той же редакции не отвергается: порядок редакций
+  // (`orderRedactions`) ставит её после консолидации, и она заменяет обе.
+  const known = new Set(old.contracts.map((c) => c.id));
+  for (const c of s.contracts) {
+    if (known.has(c.id)) continue;
+    const refuse = (why: string) => {
+      throw new Error(`Редакция контракта ${c.id} не принята: ${why}`);
+    };
+    const redactions = c.source ? contractRedactionsOf(s.contracts, c.source, c.repositoryId) : [];
+    if (c.previous !== undefined && !redactions.some((x) => x.id === c.previous && x.id !== c.id))
+      refuse('previous не называет редакцию того же документа');
+    if (!c.consolidates) continue;
+    const from = redactions.find((x) => x.id === c.consolidates!.from);
+    if (!from) refuse('консолидация: нет консолидируемой редакции того же документа');
+    if (c.previous !== from!.id)
+      refuse('консолидация не непосредственно предыдущей редакции (previous ≠ from)');
+    if (!sameObligations(from!, c.artifacts ?? [], c.checks, c.underTest))
+      refuse(
+        'консолидация: artifacts, checks или underTest отличаются от консолидируемой редакции',
+      );
+    const checks = textChecks(from!.content, c.content, c.source!, []);
+    if (checks.longer) refuse('консолидация: текст не короче консолидируемого');
+    if (checks.lost.length)
+      refuse('консолидация: нет ID правил ' + checks.lost.slice(0, 20).join(', '));
+  }
   s.tasks = all
     .filter((x) => x.record.kind === 'task')
     .map(({ owner, record }) => {

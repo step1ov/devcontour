@@ -56,6 +56,7 @@ import {
   orderContentDigest,
   reboundByOperation,
   reboundOf,
+  waitingOperation,
   type ContractChangeTrace,
 } from './input-rebound.ts';
 import { repositories } from '../core/repositories.ts';
@@ -514,14 +515,7 @@ export class InputService {
     // не одна форма изменения (ручная регистрация и правка задачи).
     let byOperation: 'yes' | 'pending' | 'no' = 'yes';
     if (changes && request.floors.length)
-      byOperation = reboundByOperation(
-        changes,
-        repositories(this.h.config).flatMap((r) =>
-          Object.values(this.h.store.localRecords<ContractChangeTrace>('contract-change', r.id)),
-        ),
-        work.id,
-        request.createdAt,
-      );
+      byOperation = reboundByOperation(changes, this.operations(), work.id, request.createdAt);
     if (byOperation === 'no') return 'moved';
     const atOrigin =
       (work.status === 'failed' && work.failureKind === 'needs-input') || work.status === 'ready';
@@ -530,6 +524,27 @@ export class InputService {
       return work.status === 'draft' ? 'pending' : 'moved';
     if (byOperation === 'pending') return 'pending';
     return changes ? 'rebound' : 'holds';
+  }
+
+  /** Записи операций изменения контракта всех компонентов (только нужные проверке поля). */
+  private operations() {
+    return repositories(this.h.config).flatMap((r) =>
+      Object.values(this.h.store.localRecords<ContractChangeTrace>('contract-change', r.id)),
+    );
+  }
+
+  /**
+   * Причина ожидания исходной остановки (`pending`), называющая операцию
+   * изменения контракта, которую она ждёт, и выход. Ответ переносит не
+   * завершение операции, а `input_target`/`input_apply` или проход сервера.
+   */
+  private waitingProblem(taskId: string) {
+    const op = waitingOperation(this.operations(), taskId);
+    if (!op) return undefined;
+    const carry = 'затем input_target и input_apply или проход сервера';
+    return op.status === 'failed'
+      ? `исходная остановка ждёт упавшую операцию изменения контракта ${op.id}: продолжите (contract-change --id ${op.id}), пересмотрите (contract-change --id ${op.id} --revise --expected-version ${op.version ?? 0}) или отмените (contract-change --id ${op.id} --abandon, затем вопрос заменяют); ${carry}`
+      : `исходная остановка ждёт операцию изменения контракта ${op.id} (${op.status}): она продолжится сама или командой contract-change --id ${op.id}; ${carry}`;
   }
 
   /** Исходная остановка открытого блокирующего вопроса не держится: применение откажет (F39). */
@@ -552,13 +567,18 @@ export class InputService {
     const origin = this.originOf(view, request);
     const answer = latestAnswer(request);
     const rebound = origin === 'rebound' && answer?.kind === 'clarification';
+    const waiting = origin === 'pending' ? this.waitingProblem(request.workId) : undefined;
     return {
       ...proposed,
       origin,
       rebound,
+      // Ожидание операции заменяет совет движка заменить вопрос: путь
+      // rebound ещё открыт, и причина ожидания идёт первой.
       problems: rebound
         ? proposed.problems.filter((p) => !p.startsWith(ORIGIN_PROBLEM))
-        : proposed.problems,
+        : waiting
+          ? [waiting, ...proposed.problems.filter((p) => !p.startsWith(ORIGIN_PROBLEM))]
+          : proposed.problems,
     };
   }
 

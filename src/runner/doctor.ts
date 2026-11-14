@@ -3,7 +3,14 @@ import { access, mkdir, readFile, readdir, realpath, rm, writeFile } from 'node:
 import { constants, existsSync, statSync } from 'node:fs';
 import { delimiter, dirname, isAbsolute, join, resolve } from 'node:path';
 import { randomUUID } from 'node:crypto';
-import { emptyState, type Config, type DevContourState, type Role } from '../core/model.ts';
+import {
+  CONTRACT_CONSOLIDATE_AFTER,
+  CONTRACT_CONSOLIDATE_MIN,
+  emptyState,
+  type Config,
+  type DevContourState,
+  type Role,
+} from '../core/model.ts';
 import {
   codeReviewVendor,
   declaredRoles,
@@ -26,6 +33,7 @@ import { gateTimeoutSum, packageRegistryDomains } from './setup.ts';
 import { validateWorkflow } from '../core/workflow.ts';
 import { command, git } from './process.ts';
 import { outdatedContextPacks } from './context-library.ts';
+import { guideDrift, guideDriftText } from './guides.ts';
 import { executionEnvironment, runSteps, withEnvironment } from './environment.ts';
 import { withResources } from './resources.ts';
 import { agentEnvironment, reviewerRunsChecks, toolProfileFor, writerRunsChecks } from './tools.ts';
@@ -42,11 +50,19 @@ import {
   APPLIED_KEYS_KEY,
   APPLIED_KEYS_NAMESPACE,
   DevContour,
-  supersededBy,
+  contractForks,
+  meaningRedactionsSinceConsolidation,
+  newerRedaction,
   type AppliedConfigKeys,
 } from '../core/service.ts';
 import { repository } from '../core/repositories.ts';
-import { artifactGuard, CONTINUATION, contractSize, thousands } from './agent-control.ts';
+import {
+  artifactGuard,
+  CONSOLIDATE_HINT,
+  CONTINUATION,
+  contractSize,
+  thousands,
+} from './agent-control.ts';
 import { unguardedMessage } from './artifact-closure.ts';
 import {
   Store,
@@ -894,6 +910,7 @@ export async function doctor(
       .map((p) => `${p.id} ${p.version} → ${p.library}`)
       .join('; ')}. Решите: остаться на своей версии или перейти — context-adopt --pack <id>`;
   });
+  checks.push(...(await guideChecks(config, root)));
   await check('write-scope', async () => {
     const open = bindings
       .filter((b) => !b.review && !roleBinding(config, b.role, b.repo.id)?.writePaths?.length)
@@ -1041,6 +1058,7 @@ export async function doctor(
   // с ним отклоняется до ревью (review-contract, contract-change).
   checks.push(...(await contractClosureChecks(config, state?.contracts ?? [])));
   checks.push(...contractSizeChecks(state?.contracts ?? []));
+  checks.push(...contractForkChecks(state?.contracts ?? []));
   // Состояние прочитано не полностью: контракты баз компонентов не видны, и
   // отсутствие находок закрепления ничего не доказывает.
   if (stateCheck)
@@ -1113,6 +1131,52 @@ export async function doctor(
 }
 
 /**
+ * Копии руководств DevContour в продукте (`docs/devcontour-*.md`): setup
+ * записывает их один раз, и без сверки долгоживущий продукт читает руководства
+ * прежней версии. Расхождение не блокирует работу — `degraded` с командой
+ * исправления. Проверяется основной репозиторий setup и компоненты, в которых
+ * копии есть; репозиторий без копий вовсе не сверяется.
+ */
+export async function guideChecks(config: Config, root: string): Promise<Check[]> {
+  const checks: Check[] = [];
+  const target = guideTarget(config, root);
+  for (const { id, path } of guideRepositories(config)) {
+    let entries;
+    try {
+      entries = await guideDrift(path);
+    } catch (e) {
+      checks.push({
+        id: `guides:${id}`,
+        status: 'degraded',
+        detail: `Копии руководств в ${path} не читаются: ${e instanceof Error ? e.message : String(e)}`,
+      });
+      continue;
+    }
+    if (!entries.length) continue;
+    const drift = guideDriftText(entries, target);
+    checks.push({
+      id: `guides:${id}`,
+      status: drift ? 'degraded' : 'passed',
+      detail: `${path}: ${drift ?? 'копии руководств DevContour совпадают с установленной версией'}`,
+    });
+  }
+  return checks;
+}
+
+/** Репозитории, где могут лежать копии: компоненты и репозиторий setup. */
+export function guideRepositories(config: Config): { id: string; path: string }[] {
+  const listed = repositories(config).map((r) => ({ id: r.id, path: r.path }));
+  if (listed.some((r) => r.path === config.repository)) return listed;
+  // Репозиторий setup вне списка компонентов: id `main`, если он не занят.
+  const id = listed.some((r) => r.id === 'main') ? 'setup' : 'main';
+  return [{ id, path: config.repository }, ...listed];
+}
+
+/** Как назвать конфигурацию в подсказке: workspace или каталог данных прежней конфигурации. */
+export const guideTarget = (config: Pick<Config, 'workspaceRoot'>, root: string) =>
+  config.workspaceRoot ? `--workspace ${config.workspaceRoot}` : `--data ${root}`;
+
+/**
  * Где лежат рабочие деревья попыток и проверок (`checkout-root.ts`). Каталог
  * состояния закрыт песочнице целиком: checkout внутри него (или внутри
  * репозитория) упирает инструменты, которые ищут конфигурацию вверх по
@@ -1154,34 +1218,68 @@ export function checkoutsCheck(config: Config, root: string): Check {
 /**
  * Действующие контракты у предела размера документа. Контракт растёт
  * поправками от этапа к этапу, а предел обнаруживался только отказом
- * следующей редакции на review-contract. Предупреждение — с порога
- * `contractSize`; готовность не снимает.
+ * следующей редакции на review-contract. Предупреждение — с порога совета
+ * `contractSize` (75 % предела: консолидировать) и после
+ * `CONTRACT_CONSOLIDATE_AFTER` смысловых редакций документа с последней
+ * консолидации; готовность не снимает.
  */
 export function contractSizeChecks(contracts: DevContourState['contracts']): Check[] {
   return (
     contracts
       // doctor читает состояние до разбора схемой: запись без текста документа
       // (незавершённая или чужой формы) не мерится, а не роняет весь doctor.
-      .filter((c) => typeof c.content === 'string' && !supersededBy(contracts, c.id))
+      .filter((c) => typeof c.content === 'string' && !newerRedaction(contracts, c.id))
       .flatMap((c) => {
         const size = contractSize(c.content);
+        const name = `Контракт ${c.id} (${c.title}${c.source ? `, ${c.source}` : ''})`;
         // Текст отказа регистрации («не будет зарегистрирован») здесь неверен:
         // контракт уже зарегистрирован и действует, отказ получит следующая
         // редакция.
         const detail = size.refusal
-          ? `документ — ${thousands(size.chars)} знаков при пределе ${thousands(size.max)}, длиннее на ${thousands(size.chars - size.max)}. Контракт зарегистрирован и действует, но следующая его редакция будет отклонена до ревью. ${CONTINUATION}.`
-          : size.warning;
-        return detail
-          ? [
-              {
-                id: `contract-size:${c.id}`,
-                status: 'degraded' as const,
-                detail: `Контракт ${c.id} (${c.title}${c.source ? `, ${c.source}` : ''}): ${detail}`,
-              },
-            ]
-          : [];
+          ? `документ — ${thousands(size.chars)} знаков при пределе ${thousands(size.max)}, длиннее на ${thousands(size.chars - size.max)}. Контракт зарегистрирован и действует, но следующая его редакция будет отклонена до ревью. ${CONSOLIDATE_HINT}. Если правила не помещаются и после консолидации — ${CONTINUATION[0].toLowerCase()}${CONTINUATION.slice(1)}.`
+          : (size.warning ?? size.hint);
+        const redactions = c.source
+          ? meaningRedactionsSinceConsolidation(contracts, c.source, c.repositoryId)
+          : 0;
+        return [
+          // Совет от 75 % готовности и статуса не меняет: до предела далеко.
+          ...(detail
+            ? [
+                {
+                  id: `contract-size:${c.id}`,
+                  status:
+                    size.refusal || size.warning ? ('degraded' as const) : ('passed' as const),
+                  detail: `${name}: ${detail}`,
+                },
+              ]
+            : []),
+          ...(redactions >= CONTRACT_CONSOLIDATE_AFTER && size.chars >= CONTRACT_CONSOLIDATE_MIN
+            ? [
+                {
+                  id: `contract-consolidate:${c.id}`,
+                  status: 'degraded' as const,
+                  detail: `${name}: ${redactions} поправок документа с последней консолидации — поправки копятся в тексте. ${CONSOLIDATE_HINT}.`,
+                },
+              ]
+            : []),
+        ];
       })
   );
+}
+
+/**
+ * Развилки истории документов контрактов (`contractForks`): две поправки
+ * одной редакции, сделанные параллельно на разных клонах. Действует
+ * последняя по порядку, поправка другой в текущий договор не вошла. Выход —
+ * редакция, сводящая обе поправки (contract-change). Готовность не снимает.
+ */
+export function contractForkChecks(contracts: DevContourState['contracts']): Check[] {
+  const valid = contracts.filter((c) => typeof c.content === 'string');
+  return contractForks(valid).map((f) => ({
+    id: `contract-fork:${f.repositoryId ?? 'main'}:${f.source}`,
+    status: 'degraded' as const,
+    detail: `Контракт ${f.source}: редакции ${f.branches.join(', ')} параллельно поправили одну редакцию ${f.base}; действует ${f.winner}, поправки остальных в текущий договор не вошли. Сведите их новой редакцией через contract-change.`,
+  }));
 }
 
 /**
@@ -1197,7 +1295,7 @@ export async function contractClosureChecks(
   const out: Check[] = [];
   let checked = 0;
   for (const c of contracts) {
-    if (!c.artifacts?.length || supersededBy(contracts, c.id)) continue;
+    if (!c.artifacts?.length || newerRedaction(contracts, c.id)) continue;
     const byRepo = new Map<string, typeof c.artifacts>();
     for (const a of c.artifacts)
       byRepo.set(a.repositoryId, [...(byRepo.get(a.repositoryId) ?? []), a]);

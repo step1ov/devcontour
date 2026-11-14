@@ -31,7 +31,8 @@ import { markLeadActivity } from './runner/lead-activity.ts';
 import { serveMcp } from './server/mcp.ts';
 import { readAgentJson } from './runner/json-file.ts';
 import { repositories } from './core/repositories.ts';
-import { dataDoctor, doctor, doctorState } from './runner/doctor.ts';
+import { dataDoctor, doctor, doctorState, guideRepositories } from './runner/doctor.ts';
+import { refreshGuides, type GuideRefresh } from './runner/guides.ts';
 import { cleanupEnvironment } from './runner/environment.ts';
 import { environmentRoots } from './runner/checkout-root.ts';
 import { importKnowledge } from './runner/knowledge.ts';
@@ -45,7 +46,7 @@ import { contextSources, importContextSource } from './runner/context-import.ts'
 import { lockContextFile, taskContext } from './runner/context.ts';
 import { ResourcePool, resourceDatabase, processAlive } from './runner/resources.ts';
 import { mkdir, writeFile, readFile, realpath, rename } from 'node:fs/promises';
-import { join, resolve, dirname, sep, basename } from 'node:path';
+import { join, resolve, dirname, sep, basename, posix } from 'node:path';
 import { Store } from './core/store.ts';
 import { DevContour } from './core/service.ts';
 import { configSchema } from './core/model.ts';
@@ -67,7 +68,7 @@ import { InputService } from './application/input.ts';
 import { DiscussionService } from './application/discussion.ts';
 import { randomUUID } from 'node:crypto';
 import { acceptBoard, reviewContract, reviewPlan } from './runner/agent-control.ts';
-import { specDigest } from './core/service.ts';
+import { currentContracts, specDigest } from './core/service.ts';
 import { WorkspaceRunner } from './runner/workspace.ts';
 import { setupWorkspace } from './runner/workspace-setup.ts';
 import { Workspace } from './core/workspace.ts';
@@ -720,6 +721,56 @@ async function main() {
     if (!result.ready) process.exitCode = 1;
     return;
   }
+  // Копии руководств DevContour в продукте: пишутся только файлы, которые
+  // записал инструмент и которые с тех пор не правили (guides.ts). Состояние
+  // не меняется, коммита нет — копии ложатся в рабочее дерево.
+  if (operation === 'guides-refresh') {
+    const replaceUnmarked = args.includes('--replace-unmarked');
+    const results: (GuideRefresh & { id: string })[] = [];
+    // Только репозитории, где копии уже есть: doctor называет расхождение
+    // ровно там же, а репозиторий без копий команда не трогает.
+    for (const { id, path } of guideRepositories(config))
+      results.push({ id, ...(await refreshGuides(path, { replaceUnmarked })) });
+    // Пакет контекста, который сам назвал копию, закреплён по её прежнему
+    // тексту: после коммита закрепление нужно обновить.
+    const pinned = config.contextPacks.flatMap((pack) => {
+      const written = results.find((r) => r.id === pack.repositoryId)?.written ?? [];
+      const hit = [...pack.files, ...(pack.references ?? [])]
+        .map((f) => posix.normalize(f))
+        .filter((f) => written.includes(f));
+      return hit.length ? [`${pack.id} (${hit.join(', ')})`] : [];
+    });
+    const replaced = results.flatMap((r) => r.replacedUnmarked);
+    console.log(
+      JSON.stringify(
+        {
+          repositories: results,
+          next: [
+            'Копии записаны в рабочее дерево и не закоммичены: проверьте git diff и закоммитьте их на рабочей ветке.',
+            'Прогоны видят новые копии, только когда рабочая ветка перенесена в их базу: base-update.',
+            ...(replaced.length
+              ? [
+                  `Заменены копии без метки: ${replaced.join(', ')}. Проверьте в git diff, не было ли в них правок продукта; прежний текст — в истории Git.`,
+                ]
+              : []),
+            ...(pinned.length
+              ? [
+                  `Копии входят в пакеты контекста: ${pinned.join('; ')}. Их закрепление относится к прежнему тексту: после коммита и base-update приостановите очередь (queue --pause) и выполните context-lock.`,
+                ]
+              : []),
+            ...(results.some((r) => r.kept.length)
+              ? [
+                  'Оставленные копии названы в kept с причиной; doctor продолжит называть расхождение.',
+                ]
+              : []),
+          ],
+        },
+        null,
+        2,
+      ),
+    );
+    return;
+  }
   // Отчёт об эффекте только читает базу (как doctor): рядом может работать
   // serve, второй writer не появляется.
   if (operation === 'report') {
@@ -1095,7 +1146,7 @@ async function main() {
         result = await taskContext(
           config,
           task,
-          store.read().contracts.filter((c) => task.contracts.includes(c.id)),
+          currentContracts(store.read().contracts, task.contracts),
         );
       } else if (operation === 'resources' || operation === 'resource-release') {
         const pool = new ResourcePool(resourceDatabase(config));
@@ -1170,10 +1221,12 @@ async function main() {
           result = await changes.advance(revised.operation.id);
         } else if (args.includes('--id')) result = await changes.advance(option('--id', ''));
         else {
+          // --consolidate: переписать документ без изменения смысла (F20).
           const started = await changes.start(
             await readAgentJson(resolve(option('--file', 'contract.json'))),
             authorRuntime(),
             include,
+            args.includes('--consolidate') ? 'consolidate' : undefined,
           );
           for (const w of 'warnings' in started ? (started.warnings ?? []) : [])
             console.error('Предупреждение: ' + w.message);

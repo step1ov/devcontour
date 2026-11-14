@@ -6,7 +6,8 @@ import { z } from 'zod';
 import { fencedRefMove } from 'devcontour-harness';
 import { executionOf } from '../harness/execution.ts';
 import { DomainError, type Contract } from '../core/model.ts';
-import { contractDigest, digest, type DevContour } from '../core/service.ts';
+import { contractDigest, digest, latestRedaction, type DevContour } from '../core/service.ts';
+import { consolidationPlan, reviewConsolidation, StaleConsolidation } from './consolidation.ts';
 import { repositories, repository } from '../core/repositories.ts';
 import {
   contractContent,
@@ -64,8 +65,24 @@ const orders = {
   2: ['hold', 'drain', 'review', 'rebind', 'base', 'plan', 'release'],
   3: ['hold', 'drain', 'review', 'rebind', 'base', 'context', 'reconfigure', 'plan', 'release'],
 } as const;
+/**
+ * Консолидация (F20): тот же порядок без перепривязки и ревью планов —
+ * смысл договора не меняется, задачи сохраняют привязку и утверждение.
+ * Удержание и drain остаются: перенос базы и перезакрепление context packs
+ * не должны пройти под идущей попыткой.
+ */
+const consolidateOrder = [
+  'hold',
+  'drain',
+  'review',
+  'base',
+  'context',
+  'reconfigure',
+  'release',
+] as const satisfies readonly Step[];
 type Step = (typeof orders)[3][number];
-const stepsOf = (op: { order?: 2 | 3 }): readonly Step[] => orders[op.order ?? 1];
+const stepsOf = (op: { order?: 2 | 3; mode?: 'consolidate' }): readonly Step[] =>
+  op.mode === 'consolidate' ? consolidateOrder : orders[op.order ?? 1];
 
 export type ContractChange = {
   id: string;
@@ -78,6 +95,12 @@ export type ContractChange = {
   step: number;
   /** Порядок шагов; отсутствует у операций, начатых при первом порядке. */
   order?: 2 | 3;
+  /**
+   * `consolidate` — консолидация документа без изменения смысла (F20): свой
+   * порядок шагов, предпроверки равносильности и ревью `consolidationReview`,
+   * регистрация с `consolidates`. Нет поля — изменение контракта.
+   */
+  mode?: 'consolidate';
   /**
    * Digest `config.json` до и после перезакрепления: на них сверяются запись
    * файла и применение конфигурации; по ним повтор узнаёт сделанное.
@@ -236,11 +259,21 @@ export class ContractChanges {
   }
 
   /** Начать операцию или вернуть уже идущую по тому же предложению. */
-  async start(input: unknown, authorRuntime: 'codex' | 'claude', include: string[] = []) {
+  async start(
+    input: unknown,
+    authorRuntime: 'codex' | 'claude',
+    include: string[] = [],
+    mode?: 'consolidate',
+  ) {
     if (this.h.config.approvalMode === 'operator')
       throw new DomainError(
         'В режиме operator изменение контракта проводит оператор: ревью ждёт его подтверждения',
         409,
+      );
+    if (mode === 'consolidate' && include.length)
+      throw new DomainError(
+        'Консолидация не меняет задачи и не проводит ревью планов: --include к ней не относится',
+        400,
       );
     const proposal = parseProposal(input);
     const impact = await contractImpact(this.h, proposal);
@@ -255,14 +288,16 @@ export class ContractChanges {
     // привязаны к нему.
     if ('registeredUnder' in impact && impact.registeredUnder?.length)
       throw new DomainError(impact.warning!, 409);
+    // Предпроверки равносильности — до удержаний и до вызова модели.
+    if (mode === 'consolidate') await consolidationPlan(this.h, proposal, impact.proposed.revision);
     const owner = impact.repositoryId;
     const key = digest({ owner, source: proposal.file ?? `title:${proposal.title}` });
     return this.h.store.atomic(() => {
       const existing = this.list().find((x) => x.key === key && active(x));
       if (existing) {
-        if (existing.expected.proposedDigest !== impact.proposed.digest)
+        if (existing.expected.proposedDigest !== impact.proposed.digest || existing.mode !== mode)
           throw new DomainError(
-            `Контракт уже меняет операция ${existing.id} по другой редакции; продолжите или отмените её`,
+            `Контракт уже меняет операция ${existing.id} по другой редакции${existing.mode === 'consolidate' ? ' (консолидация)' : ''}; продолжите или отмените её`,
             409,
           );
         return { status: 'existing' as const, operation: existing };
@@ -280,6 +315,7 @@ export class ContractChanges {
         },
         step: 0,
         order: 3,
+        ...(mode ? { mode } : {}),
         status: 'queued',
         startedAt: new Date().toISOString(),
         held: [],
@@ -494,6 +530,16 @@ export class ContractChanges {
     if (!['failed', 'stale', 'waiting', 'queued', 'running'].includes(op.status))
       throw new DomainError(`Пересмотр недоступен операции в состоянии ${op.status}`, 409);
     const proposal = input === undefined ? op.proposal : parseProposal(input);
+    if (op.mode === 'consolidate' && (op.contractId || op.step > stepsOf(op).indexOf('review')))
+      throw new DomainError(
+        'Консолидация уже зарегистрирована: её не пересматривают. Продолжите её (contract-change --id) или проведите новую консолидацию',
+        409,
+      );
+    if (op.mode === 'consolidate' && include?.length)
+      throw new DomainError(
+        'Консолидация не меняет задачи и не проводит ревью планов: --include к ней не относится',
+        400,
+      );
     const impact = await contractImpact(this.h, proposal);
     // Тот же отказ, что у старта: файл, зарегистрированный под другим
     // компонентом, — параллельный контракт, а не новая редакция.
@@ -539,6 +585,8 @@ export class ContractChanges {
       throw new DomainError('Редакция не изменилась: закоммитьте исправленный документ', 400);
     if (impact.status === 'unchanged')
       throw new DomainError('Новая редакция совпадает с утверждённой: менять нечего', 400);
+    if (op.mode === 'consolidate')
+      await consolidationPlan(this.h, proposal, impact.proposed.revision);
     const effects =
       !!op.contractId || op.rebound.length > 0 || op.step > stepsOf(op).indexOf('review');
     const at = new Date().toISOString();
@@ -741,6 +789,40 @@ export class ContractChanges {
     }
   }
 
+  /**
+   * Ревью равносильности и регистрация консолидации. Консолидируется та
+   * редакция, с которой операцию начали: новая редакция документа после
+   * старта — устаревшая операция, а не консолидация другого текста.
+   */
+  private async consolidate(op: ContractChange) {
+    const current = () =>
+      latestRedaction(this.h.store.read().contracts, op.proposal.file!, op.proposal.repositoryId)
+        ?.id ?? null;
+    if (current() !== op.expected.current)
+      throw new StaleChange(
+        `Действующая редакция ${op.proposal.file} сменилась после начала консолидации: начните её заново по текущей редакции`,
+      );
+    const contract = await reviewConsolidation(
+      this.h,
+      this.root,
+      op.proposal,
+      op.authorRuntime,
+      this.runtimes,
+      () => {
+        this.guard(op);
+        if (current() !== op.expected.current)
+          throw new StaleChange(
+            `Действующая редакция ${op.proposal.file} сменилась во время ревью консолидации`,
+          );
+      },
+      op.expected.head,
+    ).catch((error: unknown) => {
+      // Вход изменился во время ревью — устаревшая операция, а не отказ.
+      throw error instanceof StaleConsolidation ? new StaleChange(error.message) : error;
+    });
+    return { status: 'approved' as const, contract };
+  }
+
   private revisions(op: ContractChange) {
     const p = op.proposal;
     return this.h.store
@@ -766,9 +848,12 @@ export class ContractChanges {
         this.advanceStep(op, (current) => {
           this.h.hold(held, op.id, 'Меняется контракт ' + (op.proposal.file ?? op.proposal.title));
           current.held = held;
-          current.corrections = impact.tasks.direct
-            .filter((t) => t.status === 'done')
-            .map((t) => t.id);
+          // Консолидация не меняет смысла: принятые задачи остаются принятыми
+          // без корректировки.
+          current.corrections =
+            op.mode === 'consolidate'
+              ? []
+              : impact.tasks.direct.filter((t) => t.status === 'done').map((t) => t.id);
         });
         return {};
       }
@@ -786,14 +871,18 @@ export class ContractChanges {
       case 'review': {
         // Регистрация редакции — под проверкой владения в той же транзакции:
         // ответ ревью, пришедший после перехвата операции, ничего не создаёт.
-        const result = await reviewContract(
-          this.h,
-          this.root,
-          op.proposal,
-          op.authorRuntime,
-          this.runtimes,
-          () => this.guard(op),
-          op.expected.head,
+        const result = await (
+          op.mode === 'consolidate'
+            ? this.consolidate(op)
+            : reviewContract(
+                this.h,
+                this.root,
+                op.proposal,
+                op.authorRuntime,
+                this.runtimes,
+                () => this.guard(op),
+                op.expected.head,
+              )
         ).catch((error: unknown) => {
           // Отказ ревью называет каталог своего решения: по нему операция
           // связывает запись истории с попыткой. Сбой без ревью его не несёт.
@@ -1321,7 +1410,9 @@ export class ContractChanges {
     // Не после переноса базы и не после ревью плана (у операций первого
     // порядка оно идёт до базы): рецензент плана видел прежний HEAD.
     const steps = stepsOf(op);
-    if (op.step > steps.indexOf('base') || op.step >= steps.indexOf('plan')) return undefined;
+    // У консолидации ревью планов нет: ограничивает только перенос базы.
+    const plan = steps.includes('plan') ? steps.indexOf('plan') : Infinity;
+    if (op.step > steps.indexOf('base') || op.step >= plan) return undefined;
     if (!(await isAncestor(repoPath, op.expected.head, head))) return undefined;
     const changed = await changedPaths(repoPath, op.expected.head, head);
     // Свой путь в итоговом изменении — другой blob или режим: ревью его не
