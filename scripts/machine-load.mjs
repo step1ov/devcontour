@@ -1,6 +1,7 @@
 import { execFileSync } from 'node:child_process';
-import { readFileSync } from 'node:fs';
+import { existsSync, readFileSync, realpathSync } from 'node:fs';
 import { cpus, loadavg } from 'node:os';
+import { delimiter, join } from 'node:path';
 import { setTimeout as delay } from 'node:timers/promises';
 
 // Load of the machine a check runs on. The same tests ran up to nine times
@@ -153,4 +154,28 @@ export async function waitForQuiet({
     );
     await delay(intervalMs);
   }
+}
+
+/**
+ * The git the tests start, when it runs translated: an x86_64-only git on
+ * Apple silicon starts in about 32 ms against 3.6 ms for a native one, and one
+ * contract-change test starts git 172 times. Returns its path, or undefined.
+ */
+export function translatedGit(
+  path = process.env.PATH ?? '',
+  describe = (file) => read('/usr/bin/file', ['-b', file]),
+) {
+  try {
+    if (process.platform !== 'darwin') return undefined;
+    if (read('/usr/sbin/sysctl', ['-n', 'hw.optional.arm64']).trim() !== '1') return undefined;
+    for (const dir of path.split(delimiter)) {
+      const file = dir && join(dir, 'git');
+      if (!file || !existsSync(file)) continue;
+      const real = realpathSync(file);
+      return /\barm64/.test(describe(real)) ? undefined : real;
+    }
+  } catch {
+    /* Unknown: nothing to say. */
+  }
+  return undefined;
 }

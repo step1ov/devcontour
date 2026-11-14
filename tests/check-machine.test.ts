@@ -2,14 +2,14 @@ import { test } from 'node:test';
 import assert from 'node:assert/strict';
 import { spawn } from 'node:child_process';
 import { existsSync } from 'node:fs';
-import { mkdtemp, readFile, rm } from 'node:fs/promises';
+import { mkdir, mkdtemp, readFile, rm, writeFile } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
-import { join } from 'node:path';
+import { delimiter, join } from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { setTimeout as delay } from 'node:timers/promises';
 import { findOrphans, parseRows, sweepOrphans } from '../scripts/orphans.mjs';
 import type { ProcessRow } from '../scripts/orphans.mjs';
-import { busyReason, describeLoad, waitForQuiet } from '../scripts/machine-load.mjs';
+import { busyReason, describeLoad, translatedGit, waitForQuiet } from '../scripts/machine-load.mjs';
 
 const source = fileURLToPath(new URL('../', import.meta.url));
 const MARK = 'DEVCONTOUR_CHECK_INVOCATION';
@@ -150,6 +150,28 @@ test('The check waits for a quiet machine and runs anyway when it stays busy', a
     /^machine: busy — cores 95% busy \(limit 50%\)\. The check runs anyway/,
   );
 });
+
+test(
+  'A git without arm64 code is named on Apple silicon; the first git in PATH decides',
+  { skip: process.platform !== 'darwin' || process.arch !== 'arm64' },
+  async () => {
+    const root = await mkdtemp(join(tmpdir(), 'translated-git-'));
+    try {
+      for (const dir of ['intel', 'native', 'empty']) await mkdir(join(root, dir));
+      for (const dir of ['intel', 'native']) await writeFile(join(root, dir, 'git'), '');
+      const describe = (file: string) =>
+        file.includes('intel')
+          ? 'Mach-O universal binary with 2 architectures: [x86_64] [i386]'
+          : 'Mach-O universal binary with 2 architectures: [x86_64] [arm64]';
+      const path = (...dirs: string[]) => dirs.map((d) => join(root, d)).join(delimiter);
+      assert.match(translatedGit(path('empty', 'intel', 'native'), describe) ?? '', /intel/);
+      assert.equal(translatedGit(path('native', 'intel'), describe), undefined);
+      assert.equal(translatedGit(path('empty'), describe), undefined);
+    } finally {
+      await rm(root, { recursive: true, force: true });
+    }
+  },
+);
 
 test('The sweep signals a process only while a fresh list still shows it orphaned', async () => {
   const victim = spawn(process.execPath, ['-e', 'setInterval(()=>{},1000)'], { stdio: 'ignore' });

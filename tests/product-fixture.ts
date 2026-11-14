@@ -3,6 +3,7 @@ import { mkdtemp, mkdir, writeFile, rm, realpath } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { config, input, testCheckoutRoot } from './helpers.ts';
+import { loadConfig } from '../src/runner/config.ts';
 import { repositorySchema, type Repository } from '../src/core/model.ts';
 import { intentDefinition } from '../src/core/intent.ts';
 import { DevContour } from '../src/core/service.ts';
@@ -248,8 +249,13 @@ process.exitCode=ok?0:1;`,
       },
     ],
   });
+  // Процесс теста работает с той же конфигурацией, что CLI прочитает из
+  // config.json: загрузка нормализует её (проверки и защищённые пути — из
+  // репозиториев). Иначе политики расходятся, и вызов CLI проходит, только
+  // пока lease controller теста уже истёк.
+  await writeFile(join(root, 'config.json'), JSON.stringify(c));
   const store = new Store(join(root, 'state.sqlite')),
-    h = new DevContour(store, c),
+    h = new DevContour(store, loadConfig(join(root, 'config.json'))),
     intent = new IntentService(h);
   for (const repo of repos) {
     await writeFile(
@@ -263,7 +269,6 @@ process.exitCode=ok?0:1;`,
     await commit(control, 'Product map');
   };
   await save(initial);
-  await writeFile(join(root, 'config.json'), JSON.stringify(c));
   const scheduler = new Scheduler(h, root),
     runner = new WorkspaceRunner(h, root);
   await scheduler.init();
@@ -321,7 +326,8 @@ process.exitCode=ok?0:1;`,
   };
   return {
     root,
-    c,
+    // Конфигурация процесса: тест меняет её на месте, как прежде.
+    c: h.config,
     h,
     intent,
     runner,

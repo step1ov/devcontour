@@ -21,3 +21,7 @@ export function waitForQuiet(options: {
   measure?: (ms?: number) => Promise<LoadMeasurement>;
   intervalMs?: number;
 }): Promise<{ quiet: boolean; measurement: LoadMeasurement }>;
+export function translatedGit(
+  path?: string,
+  describe?: (file: string) => string,
+): string | undefined;

@@ -2,7 +2,7 @@ import { closeSync, openSync, unlinkSync, writeSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { checkProcesses } from './check-processes.mjs';
-import { describeLoad, measureLoad, waitForQuiet } from './machine-load.mjs';
+import { describeLoad, measureLoad, translatedGit, waitForQuiet } from './machine-load.mjs';
 import { sweepOrphans } from './orphans.mjs';
 
 // `npm run check` (release) and `npm run check:fast` (one fix).
@@ -91,6 +91,11 @@ if (!(Number.isFinite(waitMinutes) && waitMinutes >= 0))
     `DEVCONTOUR_CHECK_QUIET_WAIT_MIN must be a number of minutes, got ${waitSetting}`,
   );
 const loads = [(await waitForQuiet({ waitMs: waitMinutes * 60_000 })).measurement];
+const slowGit = translatedGit();
+if (slowGit)
+  console.error(
+    `machine: git ${slowGit} has no arm64 code and runs under Rosetta: every git call starts about nine times slower, and the tests make thousands. Put a native git first in PATH (/Library/Developer/CommandLineTools/usr/bin/git or Homebrew).`,
+  );
 process.removeListener('SIGINT', interruptedEarly);
 process.removeListener('SIGTERM', interruptedEarly);
 // A sample still running when the check ends is cancelled, so no load line
