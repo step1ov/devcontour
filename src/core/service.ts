@@ -2211,7 +2211,9 @@ export class DevContour {
   restoreBaseHold() {
     const held = (s: Pick<DevContourState, 'paused' | 'waits'>) =>
       !s.paused && heldBaseWait(s.waits?.find((w) => w.kind === 'base-check')?.detail);
-    if (!held(this.store.read())) return false;
+    // Каждый такт очереди: проверка — по замороженному снимку (`view`), без
+    // разбора документа; запись — только когда инвариант нарушен.
+    if (!held(this.store.view())) return false;
     return this.store.change('base.check.hold.restored', (s) => {
       if (!held(s)) return { restored: false };
       s.paused = true;
