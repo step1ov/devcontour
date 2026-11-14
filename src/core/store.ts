@@ -223,6 +223,11 @@ export class Store {
   private components?: ComponentStorage;
   private transaction = false;
   private savepoint = 0;
+  /**
+   * Открытое изменение (`update`/`change`, в том числе внешняя транзакция
+   * хранилища исполнения): его документ — копия, снятая в начале.
+   */
+  private editing = false;
   private projectionPending = false;
   onCommit?: () => void;
   // Which projections onCommit writes: 'product' before a stack exists,
@@ -665,6 +670,16 @@ export class Store {
    * не переписывает.
    */
   update<T>(type: string, action: (draft: Draft) => T): T {
+    // Вложенное изменение записало бы документ и событие журнала, а внешнее
+    // при фиксации переписало бы документ своей копией: изменение пропало
+    // бы, событие о нём осталось. Отказ — до любой записи.
+    if (this.editing)
+      throw new Error(
+        `Store.change('${type}') внутри открытой транзакции изменения: внешняя транзакция ` +
+          'запишет свою копию документа поверх этого изменения. Меняйте документ открытой ' +
+          'транзакции (HostTransaction.state, ExecutionStore.host/transact) или выполните ' +
+          'изменение после её фиксации',
+      );
     return this.atomic(() => {
       const row = controllerRow(this.db);
       let before: string;
@@ -694,7 +709,13 @@ export class Store {
         );
       }
       const leaderBefore = JSON.stringify(draft.leader ?? null);
-      const result = action(draft);
+      let result: T;
+      this.editing = true;
+      try {
+        result = action(draft);
+      } finally {
+        this.editing = false;
+      }
       const leader = draft.leader;
       const leaderChanged = JSON.stringify(leader ?? null) !== leaderBefore;
       // В документ идёт метка роли (`rowMarker`), сама роль — в строку. Роль
