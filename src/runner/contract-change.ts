@@ -1468,6 +1468,11 @@ export class ContractChanges {
       .filter((o): o is ContractChange => Boolean(o) && !(active(o!) && o!.step < base(o!)));
     throw new DomainError(
       [
+        // Первым: длинные списки ниже ограничены пределом текста ошибки.
+        // Запись делает assertInputs в этом же продолжении: читается сохранённая.
+        this.get(op.id).history.some((e) => e.event === 'rebased')
+          ? `Операция приняла сдвинутую рабочую ветку (запись истории rebased, HEAD ${reviewed.slice(0, 12)}): пути ниже могли измениться после её ревью.`
+          : '',
         foreign.length
           ? `Рабочая ветка несёт изменения вне контракта: ${foreign.slice(0, 20).join(', ')}.`
           : '',
@@ -1482,9 +1487,6 @@ export class ContractChanges {
           : '',
         gone.length
           ? `Операции, которых ждала эта, больше не ведут свои контракты к базе: ${gone.map((o) => `${o.id} (${o.status})`).join(', ')}.`
-          : '',
-        op.history.some((e) => e.event === 'rebased')
-          ? `Операция приняла сдвинутую рабочую ветку (запись истории rebased, HEAD ${reviewed.slice(0, 12)}): пути выше могли измениться после её ревью.`
           : '',
         way,
       ]

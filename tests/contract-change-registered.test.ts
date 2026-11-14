@@ -250,6 +250,14 @@ test('A registered document that is not the approved redaction is not carried; f
     // Документ заказов отменённой B: её редакцию переносит только она.
     assert.match(refused.error ?? '', /docs\/contracts\/orders\.md/);
     assert.equal(base(), before, 'база не сдвинута');
+    // Вторая правка без регистрации: HEAD принят (путь действующей
+    // редакции), но перенос отказывает и называет принятый сдвиг.
+    await writeFile(join(s.repo, NEW[0]), '# payments\n\nEdited again.\n');
+    s.sh('commit', '-qam', 'payments edited again');
+    const adopted = await s.changes().advance(a.id);
+    assert.equal(adopted.status, 'failed');
+    assert.ok(events(a.id).includes('rebased'));
+    assert.match(adopted.error ?? '', /приняла сдвинутую рабочую ветку \(запись истории rebased/);
     // Ведущий исправляет документ и регистрирует его снова; HEAD сдвинулся
     // только в документе контракта без операции — A его принимает.
     await writeFile(join(s.repo, NEW[0]), '# payments\n\nReads catalog.md, fixed.\n');
