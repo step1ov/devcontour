@@ -1,4 +1,4 @@
-import { test, expect, type Request } from '@playwright/test';
+import { test, expect, type Request, type Route } from '@playwright/test';
 import AxeBuilder from '@axe-core/playwright';
 import { execFileSync } from 'node:child_process';
 import { mkdirSync, mkdtempSync, realpathSync, rmSync, writeFileSync } from 'node:fs';
@@ -233,7 +233,7 @@ test('Quick change: one change per request key, five steps, facts, setup plan, r
       next: null,
       diff: null,
     });
-    await page.route('**/api/preparation/quick?*', async (route) => {
+    const mock = async (route: Route) => {
       const response = await route.fetch();
       const body = (await response.json()) as Record<string, unknown>;
       await route.fulfill({
@@ -279,7 +279,16 @@ test('Quick change: one change per request key, five steps, facts, setup plan, r
           ],
         },
       });
-    });
+    };
+    // Панель опрашивает сервер каждые 3 с: снятая подмена может ещё ждать
+    // route.fetch, когда страница и сервер закрываются. Её поздняя ошибка —
+    // не ошибка теста.
+    let mocked = true;
+    await page.route('**/api/preparation/quick?*', (route) =>
+      mock(route).catch((error: unknown) => {
+        if (mocked) throw error;
+      }),
+    );
     const summary = page
       .getByRole('region', { name: 'Быстрое изменение' })
       .getByRole('list', { name: 'Задачи изменения' });
@@ -308,6 +317,7 @@ test('Quick change: one change per request key, five steps, facts, setup plan, r
     await expect(items.nth(1)).toContainText(
       'серьёзность 4 · исполнитель оценил 1 · поднята: объявленная область',
     );
+    mocked = false;
     await page.unroute('**/api/preparation/quick?*');
 
     expect((await new AxeBuilder({ page }).analyze()).violations).toEqual([]);
