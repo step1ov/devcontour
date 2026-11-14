@@ -74,22 +74,35 @@ const commands = {
 // minutes and a summary at the end say what load it ran under.
 // DEVCONTOUR_CHECK_SWEEP=0 leaves other processes alone (the check's own tests
 // run checks side by side).
+// Until the stages start there is nothing of the check's own to clean up: an
+// interrupt only names itself.
+const interruptedEarly = (signal) => {
+  console.error(`check${isFast ? ':fast' : ''}: interrupted before any step (${signal})`);
+  process.exit(signal === 'SIGINT' ? 130 : 143);
+};
+process.once('SIGINT', interruptedEarly);
+process.once('SIGTERM', interruptedEarly);
 if (process.env.DEVCONTOUR_CHECK_SWEEP !== '0') await sweepOrphans();
 const waitSetting = process.env.DEVCONTOUR_CHECK_QUIET_WAIT_MIN;
 const waitMinutes =
   waitSetting === undefined || waitSetting === '' ? (isFast ? 0 : 10) : Number(waitSetting);
-if (!(waitMinutes >= 0))
+if (!(Number.isFinite(waitMinutes) && waitMinutes >= 0))
   throw new Error(
     `DEVCONTOUR_CHECK_QUIET_WAIT_MIN must be a number of minutes, got ${waitSetting}`,
   );
 const loads = [(await waitForQuiet({ waitMs: waitMinutes * 60_000 })).measurement];
+process.removeListener('SIGINT', interruptedEarly);
+process.removeListener('SIGTERM', interruptedEarly);
+// A sample still running when the check ends is cancelled, so no load line
+// follows the outcome line and the process does not linger.
+const sampling = new AbortController();
 let measuring;
 const sampler = setInterval(() => {
   if (measuring) return;
-  measuring = measureLoad()
+  measuring = measureLoad(5000, sampling.signal)
     .then((m) => {
       loads.push(m);
-      if (loads.length % 5 === 0) console.error(`machine: ${describeLoad(m)}`);
+      if (loads.length % 5 === 1) console.error(`machine: ${describeLoad(m)}`);
     })
     .catch(() => {})
     .finally(() => (measuring = undefined));
@@ -250,15 +263,17 @@ for (const chains of stages) {
 }
 await processes.dispose();
 clearInterval(sampler);
+sampling.abort();
+await measuring;
 {
   const busy = loads.map((m) => m.busy);
-  const out = loads.map((m) => m.pageoutsPerSecond).filter((v) => v !== undefined);
-  const free = loads.map((m) => m.swapFreeMb).filter((v) => v !== undefined);
+  const out = loads.map((m) => m.swapOutsPerSecond).filter((v) => v !== undefined);
+  const memory = loads.map((m) => m.memoryAvailablePercent).filter((v) => v !== undefined);
   const parts = [
     `cpu ${Math.round((100 * busy.reduce((a, b) => a + b, 0)) / busy.length)}% busy on average, ${Math.round(100 * Math.max(...busy))}% at most`,
   ];
   if (out.length) parts.push(`swap-out up to ${Math.round(Math.max(...out))} pages/s`);
-  if (free.length) parts.push(`swap free down to ${Math.min(...free)} MB`);
+  if (memory.length) parts.push(`memory available down to ${Math.min(...memory)}%`);
   console.error(`machine during the check (${loads.length} samples): ${parts.join(', ')}`);
 }
 const total = ((Date.now() - started) / 1000).toFixed(1);

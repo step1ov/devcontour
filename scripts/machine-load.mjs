@@ -17,22 +17,31 @@ const cpuTimes = () =>
     { busy: 0, total: 0 },
   );
 
-/** Free swap in MB; undefined where it cannot be read or there is no swap. */
-export function swapFreeMb() {
+// A hung system tool must not hang the check: these run beside its stages.
+const read = (file, args) =>
+  execFileSync(file, args, {
+    encoding: 'utf8',
+    timeout: 5000,
+    stdio: ['ignore', 'pipe', 'ignore'],
+  });
+
+/**
+ * Share of memory available to programs, in percent; undefined where unknown.
+ * Free swap is not a measure of pressure on macOS: it is the slack inside swap
+ * files already allocated and stays low for hours after one spike.
+ */
+export function memoryAvailablePercent() {
   try {
     if (process.platform === 'darwin') {
-      const text = execFileSync('/usr/sbin/sysctl', ['-n', 'vm.swapusage'], { encoding: 'utf8' });
-      const total = /total = ([\d.,]+)M/.exec(text);
-      const free = /free = ([\d.,]+)M/.exec(text);
-      if (!total || !free || Number(total[1].replace(',', '.')) === 0) return undefined;
-      return Math.round(Number(free[1].replace(',', '.')));
+      const level = Number(read('/usr/sbin/sysctl', ['-n', 'kern.memorystatus_level']).trim());
+      return Number.isFinite(level) && level > 0 ? level : undefined;
     }
     if (process.platform === 'linux') {
       const info = readFileSync('/proc/meminfo', 'utf8');
-      const total = /SwapTotal:\s+(\d+)/.exec(info);
-      const free = /SwapFree:\s+(\d+)/.exec(info);
-      if (!total || !free || Number(total[1]) === 0) return undefined;
-      return Math.round(Number(free[1]) / 1024);
+      const total = /MemTotal:\s+(\d+)/.exec(info);
+      const available = /MemAvailable:\s+(\d+)/.exec(info);
+      if (!total || !available) return undefined;
+      return Math.round((100 * Number(available[1])) / Number(total[1]));
     }
   } catch {
     /* Unknown: the gate does not hold on it. */
@@ -40,38 +49,43 @@ export function swapFreeMb() {
   return undefined;
 }
 
-/** Pages written to swap since boot (macOS vm_stat); undefined elsewhere. */
-function pageouts() {
-  if (process.platform !== 'darwin') return undefined;
+/** Pages written to swap since boot; undefined where unknown. */
+export function swapOuts() {
   try {
-    const text = execFileSync('/usr/bin/vm_stat', { encoding: 'utf8' });
-    const row = /Pageouts:\s+(\d+)/.exec(text);
-    return row ? Number(row[1]) : undefined;
+    if (process.platform === 'darwin') {
+      const row = /Swapouts:\s+(\d+)/.exec(read('/usr/bin/vm_stat', []));
+      return row ? Number(row[1]) : undefined;
+    }
+    if (process.platform === 'linux') {
+      const row = /^pswpout (\d+)$/m.exec(readFileSync('/proc/vmstat', 'utf8'));
+      return row ? Number(row[1]) : undefined;
+    }
   } catch {
-    return undefined;
+    /* Unknown. */
   }
+  return undefined;
 }
 
 /**
- * One measurement over `ms`: the busy share of all cores (0..1), swap-outs
- * per second, free swap, and the load average for reference. The load average
- * alone misleads on macOS: it stays near 30 on an idle ten-core machine whose
- * cores are three-quarters free.
+ * One measurement over `ms`: the busy share of all cores (0..1), pages
+ * swapped out per second, memory available, and the load average for
+ * reference. The load average alone misleads on macOS: it stays near 30 on an
+ * idle ten-core machine whose cores are three-quarters free.
  */
-export async function measureLoad(ms = 5000) {
+export async function measureLoad(ms = 5000, signal) {
   const cpu0 = cpuTimes();
-  const out0 = pageouts();
+  const out0 = swapOuts();
   const started = Date.now();
-  await delay(ms);
+  await delay(ms, undefined, { signal });
   const cpu1 = cpuTimes();
-  const out1 = pageouts();
+  const out1 = swapOuts();
   const seconds = (Date.now() - started) / 1000;
   const total = cpu1.total - cpu0.total;
   return {
     busy: total > 0 ? (cpu1.busy - cpu0.busy) / total : 0,
-    pageoutsPerSecond:
+    swapOutsPerSecond:
       out0 === undefined || out1 === undefined ? undefined : (out1 - out0) / seconds,
-    swapFreeMb: swapFreeMb(),
+    memoryAvailablePercent: memoryAvailablePercent(),
     load1: loadavg()[0],
     cores: cpus().length,
   };
@@ -79,26 +93,32 @@ export async function measureLoad(ms = 5000) {
 
 export function describeLoad(m) {
   const parts = [`cpu ${Math.round(m.busy * 100)}% busy of ${m.cores} cores`];
-  if (m.pageoutsPerSecond !== undefined)
-    parts.push(`swap-out ${Math.round(m.pageoutsPerSecond)} pages/s`);
-  if (m.swapFreeMb !== undefined) parts.push(`swap free ${m.swapFreeMb} MB`);
+  if (m.swapOutsPerSecond !== undefined)
+    parts.push(`swap-out ${Math.round(m.swapOutsPerSecond)} pages/s`);
+  if (m.memoryAvailablePercent !== undefined)
+    parts.push(`memory ${m.memoryAvailablePercent}% available`);
   parts.push(`load ${m.load1.toFixed(1)}`);
   return parts.join(', ');
 }
 
 /** Limits of a quiet machine: below them the check's timings mean something. */
-export const QUIET = { maxBusy: 0.5, minSwapFreeMb: 1024, maxPageoutsPerSecond: 50 };
+export const QUIET = { maxBusy: 0.5, minMemoryAvailablePercent: 15, maxSwapOutsPerSecond: 50 };
 
 /** Why the machine is not quiet, or undefined when it is. */
 export function busyReason(m, limits = QUIET) {
   const reasons = [];
   if (m.busy > limits.maxBusy)
     reasons.push(`cores ${Math.round(m.busy * 100)}% busy (limit ${limits.maxBusy * 100}%)`);
-  if (m.swapFreeMb !== undefined && m.swapFreeMb < limits.minSwapFreeMb)
-    reasons.push(`swap free ${m.swapFreeMb} MB (limit ${limits.minSwapFreeMb} MB)`);
-  if (m.pageoutsPerSecond !== undefined && m.pageoutsPerSecond > limits.maxPageoutsPerSecond)
+  if (
+    m.memoryAvailablePercent !== undefined &&
+    m.memoryAvailablePercent < limits.minMemoryAvailablePercent
+  )
     reasons.push(
-      `swapping ${Math.round(m.pageoutsPerSecond)} pages/s (limit ${limits.maxPageoutsPerSecond})`,
+      `memory ${m.memoryAvailablePercent}% available (limit ${limits.minMemoryAvailablePercent}%)`,
+    );
+  if (m.swapOutsPerSecond !== undefined && m.swapOutsPerSecond > limits.maxSwapOutsPerSecond)
+    reasons.push(
+      `swapping ${Math.round(m.swapOutsPerSecond)} pages/s (limit ${limits.maxSwapOutsPerSecond})`,
     );
   return reasons.length ? reasons.join(', ') : undefined;
 }
@@ -112,7 +132,7 @@ export async function waitForQuiet({
   log = console.error,
   measure = measureLoad,
   intervalMs = 30_000,
-} = {}) {
+}) {
   const deadline = Date.now() + waitMs;
   for (;;) {
     // Without a wait the measurement only goes to the log: a short one.
@@ -124,7 +144,7 @@ export async function waitForQuiet({
     }
     if (Date.now() >= deadline) {
       log(
-        `machine: still busy after ${Math.round(waitMs / 60000)} min — ${reason}. The check runs anyway; its timings and timeouts reflect this load. Close the programs that hold it (ps -axo pcpu,rss,comm -r | head).`,
+        `machine: busy — ${reason}. The check runs anyway; its timings and timeouts reflect this load. Close the programs that hold it (ps -axo pcpu,rss,comm -r | head).`,
       );
       return { quiet: false, measurement: m };
     }

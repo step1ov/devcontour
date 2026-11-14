@@ -5,7 +5,7 @@ export interface ProcessRow {
   command: string;
   mark?: string;
 }
-export function parseRows(stdout: string): ProcessRow[];
+export function parseRows(argvStdout: string, envStdout: string): ProcessRow[];
 export function findOrphans(
   rows: ProcessRow[],
   self?: number,
@@ -13,4 +13,5 @@ export function findOrphans(
 export function sweepOrphans(options?: {
   log?: (line: string) => void;
   graceMs?: number;
+  list?: () => Promise<ProcessRow[]>;
 }): Promise<number>;
