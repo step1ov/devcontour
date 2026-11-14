@@ -58,8 +58,35 @@ export type WorkflowStatusInput = z.infer<typeof workflowStatusInput>;
 
 const ACTIVE = new Set<WorkflowJob['status']>(['queued', 'running']);
 const isActive = (j: Pick<WorkflowJob, 'status'>) => ACTIVE.has(j.status);
-/** Упавшее задание, которое `workflow_retry` ещё может повторить. */
-const retryable = (j: WorkflowJob) => j.status === 'failed' && j.attempts < j.maxAttempts;
+/** Сколько повторяемых упавших заданий перечислено сверх `limit`. */
+export const RETRYABLE_PINNED = 10;
+
+/**
+ * Упавшие задания, которые `workflow_retry` ещё может повторить: попыток
+ * стадии меньше предела и задание — последнее для своего предмета (доски или
+ * ChangeSet). Обычный выход после диагностики — новая регистрация того же
+ * предмета под новым ключом; прежнее упавшее задание остаётся `failed`
+ * навсегда (очередь пересматривает только queued и running), и его повтор
+ * отклоняется. Более новое задание того же предмета — дешёвый признак этого.
+ */
+function retryableKeys(jobs: WorkflowJob[]) {
+  const newest = new Map<string, WorkflowJob>();
+  for (const j of jobs) {
+    const subject = `${j.kind}:${j.id}`;
+    const seen = newest.get(subject);
+    if (
+      !seen ||
+      j.startedAt > seen.startedAt ||
+      (j.startedAt === seen.startedAt && j.key > seen.key)
+    )
+      newest.set(subject, j);
+  }
+  return new Set(
+    [...newest.values()]
+      .filter((j) => j.status === 'failed' && j.attempts < j.maxAttempts)
+      .map((j) => j.key),
+  );
+}
 
 /**
  * Когда задание закончилось. Завершение пишет `finishedAt`, отказ при взятии
@@ -83,7 +110,7 @@ export function publicJob<T extends { token?: string }>(job: T) {
 }
 
 /** Компактный вид законченного задания: без истории, входного digest и lease. */
-function compactJob(job: WorkflowJob) {
+function compactJob(job: WorkflowJob, retryable: boolean) {
   const last = job.history.at(-1);
   const end = ending(job);
   return {
@@ -107,7 +134,7 @@ function compactJob(job: WorkflowJob) {
     lastEvent:
       last?.event === job.status ? last : { stage: job.stage, event: job.status as string },
     historyLength: job.history.length,
-    ...(retryable(job) ? { retryable: true } : {}),
+    ...(retryable ? { retryable: true } : {}),
     compact: true as const,
   };
 }
@@ -123,6 +150,7 @@ function finishedHint(o: {
   total: number;
   omitted: number;
   clipped: boolean;
+  retryableUnlisted: number;
 }) {
   if (o.activeOnly)
     return `active true lists no finished jobs; ${o.total} match: omit active or pass false to list them.`;
@@ -136,8 +164,12 @@ function finishedHint(o: {
       '.'
     );
   return (
-    `Finished jobs (completed, failed, stale): the latest ${o.limit} by end time and every retryable failed job ` +
-    'are listed compact, without history; jobs keep store order, not time order (sort by endedAt). ' +
+    `Finished jobs (completed, failed, stale): the latest ${o.limit} by end time and up to ${RETRYABLE_PINNED} retryable failed jobs ` +
+    '(the newest job of their board or ChangeSet, attempts left) are listed compact, without history; ' +
+    'jobs keep store order, not time order (sort by endedAt). ' +
+    (o.retryableUnlisted
+      ? `${o.retryableUnlisted} retryable failed jobs are not listed (over ${RETRYABLE_PINNED} or dropped to fit the response limit): read them by key, or with active false and a smaller limit. `
+      : '') +
     READ_MORE
   );
 }
@@ -148,15 +180,17 @@ export function workflowStatus(h: DevContour, raw: unknown) {
   const state = h.store.read();
   const now = Date.now();
   const workflow = new LeadWorkflow(h);
+  const owned = workflow.list(owner);
+  // Повторяемость решают все задания владельца, а не только выбранные.
+  const retryables = retryableKeys(owned);
+  const retryable = (j: WorkflowJob) => retryables.has(j.key);
   // Предмет запроса без `active`: законченные считаются и при active true.
-  const matching = workflow
-    .list(owner)
-    .filter(
-      (j) =>
-        (input.key === undefined || j.key === input.key) &&
-        (input.kind === undefined || j.kind === input.kind) &&
-        (input.id === undefined || j.id === input.id),
-    );
+  const matching = owned.filter(
+    (j) =>
+      (input.key === undefined || j.key === input.key) &&
+      (input.kind === undefined || j.kind === input.kind) &&
+      (input.id === undefined || j.id === input.id),
+  );
   const selected = matching.filter(
     (j) => input.active === undefined || isActive(j) === input.active,
   );
@@ -172,7 +206,10 @@ export function workflowStatus(h: DevContour, raw: unknown) {
     .sort((a, b) => ends.get(b.key)!.localeCompare(ends.get(a.key)!) || a.key.localeCompare(b.key));
   const chosen = new Set([
     ...recent.slice(0, limit).map((j) => j.key),
-    ...recent.filter(retryable).map((j) => j.key),
+    ...recent
+      .filter(retryable)
+      .slice(0, RETRYABLE_PINNED)
+      .map((j) => j.key),
   ]);
   // Порядок ухода при нехватке места: старейшие неповторяемые, затем
   // старейшие повторяемые; задание, названное ключом, не уходит.
@@ -197,7 +234,7 @@ export function workflowStatus(h: DevContour, raw: unknown) {
     return views.get(id)!;
   };
   const viewOf = (j: WorkflowJob): Record<string, unknown> => {
-    if (!isActive(j)) return named ? { ...publicJob(j), ...clip(j) } : compactJob(j);
+    if (!isActive(j)) return named ? { ...publicJob(j), ...clip(j) } : compactJob(j, retryable(j));
     // Стадия ждёт только ответов на вопросы исполнителя: «ждёт ответа», не сбой.
     const waiting = workflow.waitingOf(j, state, now);
     return { ...publicJob(j), ...clip(j), ...(waiting ? { waiting } : {}) };
@@ -238,6 +275,7 @@ export function workflowStatus(h: DevContour, raw: unknown) {
                 total: finished.length,
                 omitted,
                 clipped: historyClipped,
+                retryableUnlisted: recent.filter((j) => retryable(j) && !shown.has(j.key)).length,
               }),
             }
           : {}),
@@ -272,6 +310,12 @@ export function workflowStatus(h: DevContour, raw: unknown) {
       result = build(keep);
     }
   }
-  if (!fits(result)) throw new DomainError(WORKFLOW_STATUS_OVERSIZED, 413);
+  if (!fits(result))
+    throw new DomainError(
+      input.key === undefined
+        ? WORKFLOW_STATUS_OVERSIZED
+        : 'Ответ workflow_status превышает 64 KiB даже для одного задания key: не помещается и хвост его истории (последние 20 событий). Сузить запрос нечем',
+      413,
+    );
   return result;
 }

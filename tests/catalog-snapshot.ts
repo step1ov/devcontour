@@ -177,5 +177,8 @@
 // Намеренное изменение (ревью F43): описание workflow_status называет
 // повторяемые упавшие задания, finished.byStatus и retryable, endedAt и
 // порядок сокращения ответа; прочие операции байтово прежние.
-export const CATALOG_DIGEST = '06dc0ef0f7f0afbea55138fdaeedf7f99e15d6f9e3996d973d25f9686e5041a3';
+// Намеренное изменение (ревью F43, раунд 2): повторяемое упавшее задание —
+// последнее для своего предмета, перечислено не больше 10; прочие операции
+// байтово прежние.
+export const CATALOG_DIGEST = 'e2b91c59ea7b65365614742712d94fa1288e73399e3f79c35e2d8f23a2cad3ac';
 export const SNAPSHOT_VERSION = '0.4.0-alpha.7';

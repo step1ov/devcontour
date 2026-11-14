@@ -96,13 +96,14 @@ const keys = (jobs: { key: string }[]) => jobs.map((j) => j.key).sort();
  * 80 законченных заданий (completed, failed, stale по кругу) с длинной
  * историей и одно действующее. Время конца законченного задания i — минута
  * (i+1)·10; самые новые — с наибольшим i. Задание 4 — давнее упавшее, которое
- * ещё можно повторить; прочие упавшие исчерпали попытки.
+ * ещё можно повторить (единственное задание своей доски); прочие упавшие
+ * исчерпали попытки.
  */
 function seed(f: Fixture) {
   const statuses: WorkflowJob['status'][] = ['completed', 'failed', 'stale'];
   const finished = Array.from({ length: 80 }, (_, i) =>
     job('done-' + i, statuses[i % 3], (i + 1) * 10, 30, {
-      ...(i < 70 ? { id: 'B-many' } : {}),
+      ...(i < 70 && i !== 4 ? { id: 'B-many' } : {}),
       ...(i === 4 ? { attempts: 1 } : {}),
     }),
   );
@@ -262,23 +263,20 @@ test('workflow_status: не помещающийся ответ сокращае
   const original = Object.getOwnPropertyDescriptor(LeadWorkflow.prototype, 'waitingOf')!;
   try {
     const { finished } = seed(f);
-    // 70 заданий одной доски целиком (id назван) — больше предела: история
-    // сокращена, затем ушли старейшие неповторяемые; повторяемое осталось.
+    // 69 заданий одной доски целиком (id назван) — больше предела: история
+    // сокращена, затем ушли старейшие.
     const many = status(f, { kind: 'board', id: 'B-many', limit: 200 });
     assert.ok(checkJsonBytes(many, 60000).within);
     assert.equal(many.historyClipped, true);
-    assert.equal(many.finished.total, 70);
+    assert.equal(many.finished.total, 69);
     assert.ok(many.finished.omitted > 0 && many.finished.listed > 1);
-    assert.equal(many.finished.listed + many.finished.omitted, 70);
+    assert.equal(many.finished.listed + many.finished.omitted, 69);
     for (const j of many.jobs) {
       assert.equal(j.history?.length, 20);
       assert.equal(j.historyOmitted, 10);
     }
-    const ofBoard = finished.filter((j, i) => j.id === 'B-many' && i !== 4);
-    assert.deepEqual(
-      keys(many.jobs),
-      keys([...ofBoard.slice(-(many.finished.listed - 1)), finished[4]]),
-    );
+    const ofBoard = finished.filter((j) => j.id === 'B-many');
+    assert.deepEqual(keys(many.jobs), keys(ofBoard.slice(-many.finished.listed)));
     assert.match(
       many.finished.hint ?? '',
       /^Finished jobs are listed in full; a history longer than 20 events is cut.*the oldest \d+ were dropped/,
@@ -303,22 +301,44 @@ test('workflow_status: не помещающийся ответ сокращае
     put(f, [wide]);
     assert.throws(
       () => status(f, { key: wide.key }),
-      (e: unknown) => e instanceof DomainError && e.status === 413 && /key.*limit/.test(e.message),
+      (e: unknown) =>
+        e instanceof DomainError && e.status === 413 && /одного задания key.*хвост/.test(e.message),
     );
     // Без фильтра место освобождают законченные, история действующих цела.
     const retryables = Array.from({ length: 120 }, (_, i) =>
       job('retry-' + i, 'failed', 100 + i, 2, { attempts: 1 }),
     );
     put(f, retryables);
-    const crowded = status(f);
+    // По умолчанию перечислены не больше 10 повторяемых — самые новые;
+    // остальные названы числом в подсказке.
+    const capped = status(f);
+    const pinned = retryables.slice(-10);
+    assert.equal(capped.finished.retryable, 121);
+    assert.deepEqual(keys(capped.jobs.filter((j) => j.retryable)), keys(pinned));
+    assert.deepEqual(
+      keys(capped.jobs.filter((j) => j.status !== 'running' && !j.retryable)),
+      // Последние законченные: long и wide выше, затем задания 72–79.
+      keys([long, wide, ...finished.slice(-8)]),
+    );
+    assert.match(capped.finished.hint ?? '', /111 retryable failed jobs are not listed/);
+    // limit 200 не помещается: место освобождают законченные, история
+    // действующих цела; уходят сначала неповторяемые, затем старейшие
+    // повторяемые — 10 самых новых повторяемых остаются.
+    const crowded = status(f, { limit: 200 });
     assert.ok(checkJsonBytes(crowded, 60000).within);
     assert.equal(crowded.historyClipped, undefined);
     assert.equal(crowded.jobs.find((j) => j.key === key('live'))!.history?.length, 30);
     assert.ok(crowded.finished.omitted > 69);
-    // Уходят сначала неповторяемые: из последних 10 законченных (без
-    // повторяемых) не осталось ни одного, а повторяемые — самые новые.
     const listed = crowded.jobs.filter((j) => j.status !== 'running');
+    assert.ok(listed.length >= 10);
     assert.ok(listed.every((j) => j.retryable === true));
+    const listedKeys = new Set(listed.map((j) => j.key));
+    assert.ok(pinned.every((j) => listedKeys.has(j.key)));
+    const unlisted = 121 - listed.length;
+    assert.match(
+      crowded.finished.hint ?? '',
+      new RegExp(`${unlisted} retryable failed jobs are not listed`),
+    );
     // Действующее задание с огромной историей: хвост последних 20 событий,
     // ожидание стадии сохраняется.
     put(f, [job('huge', 'queued', 5000, 3000)]);
@@ -338,6 +358,31 @@ test('workflow_status: не помещающийся ответ сокращае
     assert.equal(status(f, { key: key('live') }).historyClipped, undefined);
   } finally {
     Object.defineProperty(LeadWorkflow.prototype, 'waitingOf', original);
+    f.cleanup();
+  }
+});
+
+test('workflow_status: упавшее задание повторяемо, только пока оно последнее для своего предмета', () => {
+  const f = fixture();
+  try {
+    // Доска B-x: упавшее задание (попытки остались), затем новая регистрация.
+    const old = job('x-old', 'failed', 100, 2, { id: 'B-x', attempts: 1 });
+    const newer = job('x-new', 'completed', 200, 2, { id: 'B-x', startedAt: at(150) });
+    // Доска B-y: прежнее завершённое, затем последнее — упавшее с попытками.
+    const before = job('y-old', 'completed', 100, 2, { id: 'B-y' });
+    const last = job('y-new', 'failed', 90, 2, { id: 'B-y', startedAt: at(95), attempts: 1 });
+    put(f, [old, newer, before, last]);
+    const s = status(f, { limit: 1 });
+    assert.equal(s.finished.retryable, 1);
+    // Старое упавшее B-x не закреплено и не повторяемо; последнее B-y — да.
+    assert.deepEqual(keys(s.jobs), keys([newer, last]));
+    assert.equal(s.jobs.find((j) => j.key === last.key)!.retryable, true);
+    const all = status(f, { limit: 4 });
+    assert.equal(all.jobs.find((j) => j.key === old.key)!.retryable, undefined);
+    assert.doesNotMatch(all.finished.hint ?? '', /retryable failed jobs are not listed/);
+    // Фильтр не меняет повторяемость: она решается по всем заданиям владельца.
+    assert.equal(status(f, { key: old.key }).finished.retryable, 0);
+  } finally {
     f.cleanup();
   }
 });
