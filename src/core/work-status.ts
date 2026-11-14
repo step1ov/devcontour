@@ -96,7 +96,9 @@ export const HELD_BASE_ACTION =
  * Удержанный перенос базы на остановленной очереди: причина ожидания
  * `base-check` (`base.check.held`), её пути и действие оператора. Один
  * источник для остановки очереди (`queueStopView`), центра внимания,
- * пакета ведущего (`session_handoff`), `workflow_start` и `base-update`.
+ * пакета ведущего (`session_handoff`), `workflow_start`, ответа
+ * `base-update`, правила паузы цикла задания (`pauseStep`) и отказа снять
+ * паузу ведущим (`pause(false)` с `by: lead`).
  */
 export function heldBaseOf(state: Partial<Pick<DevContourState, 'paused' | 'waits'>>) {
   if (!state.paused) return undefined;
@@ -176,7 +178,7 @@ export function queueStopView(
       ];
     if (wait) {
       const checkFailed = wait.startsWith('Проверка базы не пройдена');
-      const held = heldBaseWait(wait);
+      const held = !!heldBaseOf(state);
       return [
         wait,
         held

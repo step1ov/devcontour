@@ -15,7 +15,8 @@ import { SignalInbox, signalInput } from '../core/signals.ts';
 import { LeadWorkflow, workflowInput } from '../core/lead-workflow.ts';
 import { workflowMetrics } from './metrics.ts';
 import { agentValueReport, valueReportInput } from './value-report.ts';
-import { agentHandoff, handoffInput } from './handoff.ts';
+import { agentHandoff, handoffInput, handoffRedactor } from './handoff.ts';
+import { executionOf } from '../harness/execution.ts';
 import {
   requirementSnapshot,
   requirementReport,
@@ -58,6 +59,9 @@ import { markLeadActivity } from '../runner/lead-activity.ts';
 import { gateTestcases, testcasesInput } from './testcases.ts';
 
 const id = z.string().regex(/^[A-Za-z0-9_-]{1,80}$/);
+
+/** Маска секретов контура — та же, что у пакета ведущего и центра внимания. */
+const redactOf = (h: DevContour) => handoffRedactor(h.config, executionOf(h).engine.policy);
 export { SERVER_STOPPING };
 export { oversized };
 export const agentInputs = {
@@ -682,14 +686,23 @@ export class AgentService {
           ...(gaps.length ? [scopeGapWarning(gaps)] : []),
           ...(held
             ? [
-                `Задание будет ждать: перенос базы меняет приёмку или настройку контура (${held.paths.join(', ') || 'пути — в ожидании base-check'}), и выдачу продолжит только подтверждение оператора. ${held.action}. Попросите пользователя подтвердить перенос; задание продолжит доску само.`,
+                redactOf(h)(
+                  `Задание будет ждать: перенос базы меняет приёмку или настройку контура (${held.paths.join(', ') || 'пути — в ожидании base-check'}), и выдачу продолжит только подтверждение оператора. ${held.action}. Попросите пользователя подтвердить перенос; задание продолжит доску само.`,
+                ),
               ]
             : []),
         ];
         return {
           ...this.workflowView(job),
           ...(gaps.length ? { coverageGaps: gaps } : {}),
-          ...(held ? { baseHeld: { paths: held.paths, actor: 'operator' as const } } : {}),
+          ...(held
+            ? {
+                baseHeld: {
+                  paths: held.paths.map(redactOf(h)),
+                  actor: 'operator' as const,
+                },
+              }
+            : {}),
           ...(warnings.length ? { warning: warnings.join(' ') } : {}),
         };
       }

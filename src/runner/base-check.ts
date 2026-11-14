@@ -67,25 +67,29 @@ export const heldBaseDetail = (paths: readonly string[]) =>
   `${BASE_HELD_DETAIL} (${paths.slice(0, HELD_PATHS).join(', ')}): gates этой базы его не подтверждают. Перенос проверяет и подтверждает оператор: «Подтвердить и запустить» в «Внимании» панели; ведущий агент это ожидание сам не снимает. Сам цикл снимает только документы контрактов в редакции, одобренной независимым ревью (review-contract); изменение приёмки — через contract-change`;
 
 /**
- * Заменить причину ожидания `base-check` событием `type`; без ожидания или
- * при той же причине ничего не пишется.
+ * Заменить причину ожидания `base-check` событием `type` — в одной
+ * транзакции со сверкой: ожидание есть и, если передано `at`, это то же
+ * ожидание (иначе его поставил более поздний перенос или оно снято).
+ * `same` — причина уже та же, события нет; `gone` — ожидания нет.
  */
 function setBaseWaitDetail(
   h: DevContour,
   type: string,
   detail: string,
   data: Record<string, unknown>,
-  guard?: CheckGuard,
-) {
-  if (!h.store.read().waits?.some((w) => w.kind === 'base-check' && w.detail !== detail))
-    return false;
-  h.store.change(type, (s) => {
-    guard?.();
-    if (!s.waits?.some((w) => w.kind === 'base-check')) return { ...data, skipped: true };
-    s.waits = s.waits.map((w) => (w.kind === 'base-check' ? { ...w, detail } : w));
-    return data;
+  options: { guard?: CheckGuard; at?: string } = {},
+): 'set' | 'same' | 'gone' {
+  return h.store.atomic(() => {
+    options.guard?.();
+    const wait = h.store.read().waits?.find((w) => w.kind === 'base-check');
+    if (!wait || (options.at !== undefined && wait.at !== options.at)) return 'gone';
+    if (wait.detail === detail) return 'same';
+    h.store.change(type, (st) => {
+      st.waits = (st.waits ?? []).map((w) => (w.kind === 'base-check' ? { ...w, detail } : w));
+      return data;
+    });
+    return 'set';
   });
-  return true;
 }
 
 /**
@@ -131,19 +135,25 @@ export async function baseMoveReview(
  * Записать удержание переноса сразу после `base-update` в режиме агента —
  * тем же событием и той же причиной, что проверка базы циклом задания
  * (`checkBase` потом причину не переписывает). Возвращает пути удержания;
- * пусто — перенос снимут gates.
+ * пусто — перенос снимут gates, или ожидания этого переноса уже нет.
  */
 export async function holdSensitiveBaseMove(h: DevContour, dataRoot: string) {
   const state = h.store.read();
   if (h.config.approvalMode !== 'agent' || !baseMovesOf(state)) return [];
-  if (!state.paused || !state.waits?.some((w) => w.kind === 'base-check')) return [];
+  const wait = state.waits?.find((w) => w.kind === 'base-check');
+  if (!state.paused || !wait) return [];
   const { held } = await baseMoveReview(h, dataRoot, state);
-  if (held.length)
-    setBaseWaitDetail(h, 'base.check.held', heldBaseDetail(held), {
-      paths: held,
-      by: 'base-update',
-    });
-  return held;
+  if (!held.length) return [];
+  // Ожидание этого переноса (`at`): за время разбора его могли снять
+  // (оператор запустил очередь) или заменить более поздним переносом.
+  const set = setBaseWaitDetail(
+    h,
+    'base.check.held',
+    heldBaseDetail(held),
+    { paths: held, by: 'base-update' },
+    { at: wait.at },
+  );
+  return set === 'gone' ? [] : held;
 }
 
 /**
@@ -202,7 +212,7 @@ export async function checkBase(
   if (!moves) return false;
   /** Ожидание остаётся и называет причину; событие — только при новой причине. */
   const hold = (type: string, detail: string, data: Record<string, unknown>) => {
-    setBaseWaitDetail(h, type, detail, data, guard);
+    setBaseWaitDetail(h, type, detail, data, { guard });
     return false;
   };
   const { bases, held: touched, reviewed } = await baseMoveReview(h, roots.data, state);

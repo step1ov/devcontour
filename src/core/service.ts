@@ -42,7 +42,7 @@ import { approvalPolicyDigest } from '../harness/policy.ts';
 import { rebindInputContext } from '../harness/input-host.ts';
 import { planIngest } from './plan.ts';
 import { boardOwner, completion, receiptHolds, receiptRecordBytes } from './sync-state.ts';
-import { carriedTaskIds, pausedByLead } from './work-status.ts';
+import { carriedTaskIds, heldBaseOf, pausedByLead } from './work-status.ts';
 import { assertDag, descendants, latestTaskId, impactGraph } from './graph.ts';
 import {
   DomainError,
@@ -2044,6 +2044,17 @@ export class DevContour {
         ) {
           // Без записи и без события журнала: паузы ведущего не было.
           return { paused: true, reason: before.pauseReason, kept: 'operator' as const };
+        }
+        // Удержанный перенос базы (D42) подтверждает только человек: снятие
+        // паузы ведущим (`queue_set`, цикл задания) сняло бы и ожидание
+        // проверки базы без подтверждения.
+        if (!value && by === 'lead') {
+          const held = heldBaseOf(before);
+          if (held)
+            throw new DomainError(
+              `Очередь не продолжена: перенос базы меняет приёмку или настройку контура (${held.paths.join(', ') || 'пути — в ожидании base-check'}). ${held.action}`,
+              409,
+            );
         }
         const { control } = value ? engine.pause(reason) : engine.resume();
         // Кто поставил паузу `operator`: ведущий агент — отметкой со временем

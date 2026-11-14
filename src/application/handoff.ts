@@ -379,14 +379,20 @@ export function withoutIdleControllerStop(pack: HandoffPack): HandoffPack {
   return { ...pack, truncated: { ...pack.truncated, stops: pack.truncated.stops - 1 } };
 }
 
+/** Предел строки факта пакета harness (`HANDOFF_LIMITS.text`). */
+const PACK_TEXT_CHARS = 300;
+
 /**
  * Удержанный перенос базы (`heldBaseOf`) в пакете harness. Пакет видит лишь
  * паузу `base-check` и называет её ожиданием controller («Очередь ждёт
- * операции base-check»), хотя её снимает только человек: остановка выдачи и
- * `next` пакета, где ждёт controller, называют человека (`user`,
- * `resume-queue`), пути и действие оператора — те же, что у остановки очереди
- * и центра внимания. Команда harness (`harness run`) в таком `next` не
- * называется: она ожидание не снимет.
+ * операции base-check»), хотя её снимает только человек: остановка выдачи
+ * очереди, `next` пакета и `next` поручений, где ждёт controller, называют
+ * человека (`user`, `resume-queue`), пути и действие оператора — ту же
+ * причину, что у остановки очереди и центра внимания. Команда harness
+ * (`harness run`) в таких шагах не называется: она ожидание не снимет.
+ * Остановку очереди, отброшенную пределом размера, пакет получает обратно:
+ * она — единственное место пакета, где назван человек. Текст — под маской
+ * и в пределе строки пакета (полный — `host.next.detail`).
  */
 export function withHeldBaseStop(
   pack: HandoffPack,
@@ -396,22 +402,57 @@ export function withHeldBaseStop(
 ): HandoffPack {
   const held = heldBaseOf(state);
   if (!held) return pack;
-  const text = redact(
-    `Перенос базы ждёт подтверждения оператора: он меняет приёмку или настройку контура (${held.paths.join(', ') || 'пути — в ожидании base-check'}), а gates базы такое изменение не подтверждают. ${held.action}`,
-  );
+  const chars = [
+    ...redact(
+      `Перенос базы ждёт подтверждения оператора: «Подтвердить и запустить» во «Внимании» панели; ведущий его не снимает (${held.paths.join(', ') || 'пути — в ожидании base-check'})`,
+    ),
+  ];
+  const text =
+    chars.length > PACK_TEXT_CHARS
+      ? chars.slice(0, PACK_TEXT_CHARS - 1).join('') + '…'
+      : chars.join('');
   const waits = (x: { actor: string | null; action: string }) =>
     x.actor === 'controller' && x.action === 'wait';
-  const stops = pack.stops.map((stop) =>
-    stop.queue && stop.code === 'PAUSED' && waits(stop)
+  const toUser = <T extends { actor: string | null; action: string; command?: unknown }>(
+    x: T,
+    field: 'detail',
+  ): T => {
+    const out = { ...x, actor: 'user', action: 'resume-queue', [field]: text } as T;
+    delete out.command;
+    return out;
+  };
+  const queueStop = (stop: HandoffPack['stops'][number]) =>
+    !!stop.queue && stop.code === 'PAUSED' && waits(stop);
+  let stops = pack.stops.map((stop) =>
+    queueStop(stop)
       ? { ...stop, actor: 'user' as const, action: 'resume-queue' as const, message: text }
       : stop,
   );
-  let next = pack.next;
-  if (waits(next)) {
-    next = { ...next, actor: 'user', action: 'resume-queue', detail: text };
-    delete next.command;
+  let truncated = pack.truncated;
+  if (!stops.some((x) => x.queue) && pack.truncated.stops) {
+    stops = [
+      {
+        code: 'PAUSED',
+        cause: 'not-ready',
+        phase: 'claim',
+        actor: 'user',
+        action: 'resume-queue',
+        retryPlanned: false,
+        message: text,
+        evidence: [],
+        queue: true,
+      },
+      ...stops,
+    ];
+    truncated = { ...truncated, stops: truncated.stops - 1 };
   }
-  return { ...pack, stops, next };
+  const works = pack.works.map((w) =>
+    waits(w.next) && w.next.step === 'awaiting-claim'
+      ? { ...w, next: toUser(w.next, 'detail') }
+      : w,
+  );
+  const next = waits(pack.next) ? toUser(pack.next, 'detail') : pack.next;
+  return { ...pack, stops, works, next, truncated };
 }
 
 /** Наследуемое значение короче — обычное слово или число, а не учётные данные. */

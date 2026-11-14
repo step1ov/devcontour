@@ -530,22 +530,30 @@ test('session_handoff: host.next по состоянию — сервер, за�
       assert.deepEqual(lead?.params, { by: 'lead' });
       assert.match(lead?.detail ?? '', /paused by the lead \(queue_set\)/);
       // Под паузой ведущего удержанный перенос базы: снятие паузы сняло бы и
-      // ожидание, которое подтверждает только человек, — шаг снова решение
-      // пользователя.
+      // ожидание, которое подтверждает только человек, — шаг называет
+      // подтверждение оператора и пути переноса (F45), а queue_set ведущего
+      // паузу не снимает.
       f.store.change('fixture', (s) => {
         s.waits = [
           {
             kind: 'base-check',
-            detail: `${BASE_HELD_DETAIL} (main:contracts/api.md)`,
+            detail: `${BASE_HELD_DETAIL} (main:contracts/api.md): gates этой базы его не подтверждают`,
             at: new Date().toISOString(),
           },
         ];
         return {};
       });
       const held = at().host.next;
-      assert.equal(held?.code, 'pause-operator');
-      assert.deepEqual(held?.params, {});
-      assert.match(held?.detail ?? '', /only on the user's decision/);
+      assert.equal(held?.action, 'operator');
+      assert.equal(held?.code, 'base-held');
+      assert.deepEqual(held?.params, { paths: ['main:contracts/api.md'] });
+      assert.match(held?.detail ?? '', /^operator: confirm the base move/);
+      await assert.rejects(
+        async () =>
+          new AgentService(f.h, f.root).run({ operation: 'queue_set', input: { paused: false } }),
+        /Подтвердить и запустить/,
+      );
+      assert.equal(f.store.read().paused, true, 'пауза ведущего не снята при удержании');
       // Обычное ожидание переноса базы (не удержанное) под паузой ведущего —
       // тоже решение человека: снятие паузы сняло бы его без проверки базы.
       f.store.change('fixture', (s) => {

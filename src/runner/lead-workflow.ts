@@ -1,6 +1,6 @@
 import { join } from 'node:path';
 import { LeadWorkflow, WAITING_BASE_HELD, type WorkflowJob } from '../core/lead-workflow.ts';
-import { heldBaseWait } from '../core/work-status.ts';
+import { heldBaseOf } from '../core/work-status.ts';
 import { SERVER_STOPPING, type DevContour } from '../core/service.ts';
 import { DomainError, type ChangeSet, type DevContourState } from '../core/model.ts';
 import { repositories, repository } from '../core/repositories.ts';
@@ -430,7 +430,7 @@ export class LeadRunner {
         if (pause.lift)
           this.h.store.atomic(() => {
             guard();
-            this.h.pause(false);
+            this.h.pause(false, 'operator', 'lead');
           });
       } else {
         if (
@@ -457,7 +457,7 @@ export class LeadRunner {
           if (pause.lift)
             this.h.store.atomic(() => {
               guard();
-              this.h.pause(false);
+              this.h.pause(false, 'operator', 'lead');
             });
           return true;
         }
@@ -531,7 +531,7 @@ export class LeadRunner {
     await checkBase(this.h, { data: this.root, state: this.boardRoot(job) }, guard, signal);
     const after = this.h.store.read();
     const wait = after.waits?.find((w) => w.kind === 'base-check');
-    if (wait && after.paused && after.pauseReason === 'base-check' && heldBaseWait(wait.detail))
+    if (wait && after.pauseReason === 'base-check' && heldBaseOf(after))
       this.workflow.noteWaiting(job, WAITING_BASE_HELD, wait.at);
   }
   /**

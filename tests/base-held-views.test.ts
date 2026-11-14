@@ -14,7 +14,12 @@ import { git } from '../src/runner/process.ts';
 import { LeadWorkflow } from '../src/core/lead-workflow.ts';
 import { BASE_HELD_DETAIL, checkBase, heldBaseDetail } from '../src/runner/base-check.ts';
 import { baseUpdateOperation } from '../src/runner/base-update.ts';
-import { devcontourHandoff } from '../src/application/handoff.ts';
+import { devcontourHandoff, withHeldBaseStop } from '../src/application/handoff.ts';
+import { LeadRunner } from '../src/runner/lead-workflow.ts';
+import { liftsPause, loopAhead, pauseStep } from '../src/runner/lead-outlook.ts';
+import { Scheduler } from '../src/runner/scheduler.ts';
+import { STALE_BASE } from '../src/runner/base-update.ts';
+import { holdSensitiveBaseMove } from '../src/runner/base-check.ts';
 import { AgentService } from '../src/application/agent.ts';
 import { queueStopOf } from '../src/application/queue-stop.ts';
 import { HELD_BASE_ACTION } from '../src/core/work-status.ts';
@@ -211,7 +216,7 @@ test('session_handoff: удержанный перенос в пакете — �
           assert.equal(pack.next.actor, 'user', label);
           assert.equal(pack.next.action, 'resume-queue', label);
           assert.match(pack.next.detail!, /main:tests\/config\.json/, label);
-          assert.ok(pack.next.detail!.includes(HELD_BASE_ACTION), label);
+          assert.match(pack.next.detail!, /«Подтвердить и запустить»/, label);
           const stop = pack.stops.find((s) => s.queue)!;
           assert.equal(stop.actor, 'user', label);
           assert.equal(stop.action, 'resume-queue', label);
@@ -265,5 +270,220 @@ test('workflow_start предупреждает об удержанном пер
     assert.doesNotMatch(started.warning ?? '', /оператор/);
   } finally {
     plain.cleanup();
+  }
+});
+
+test('Пауза человека до старта задания и удержанный перенос: цикл паузу не снимает, queue_set ведущего отказывает, виды называют оператора', async () => {
+  const f = fixture();
+  const lead = new LeadRunner(f.h, f.root);
+  try {
+    const b = f.h.createBoard('Board', '', 'main');
+    const t = f.h.addTask(b.id, input());
+    f.h.approve(b.id);
+    // Пауза — раньше старта задания: её цикл стадии 1 снял бы (operatorDecided ложно).
+    f.h.pause(true);
+    await new Promise((r) => setTimeout(r, 5));
+    const flow = new LeadWorkflow(f.h);
+    const job = flow.start({ kind: 'board', id: b.id, authorRuntime: 'codex' });
+    const at = new Date().toISOString();
+    const setWait = (detail: string) =>
+      f.store.change('fixture.wait', (s) => {
+        s.baseMoves = {
+          at,
+          bases: [{ repositoryId: 'main', from: 'a'.repeat(40), to: 'b'.repeat(40) }],
+        };
+        s.waits = [{ kind: 'base-check', detail, at }] as never;
+      });
+    const state = () => f.store.read();
+    const stage1 = () => ({ ...flow.get(job.key, job.owner), stage: 1 }) as never;
+    const tasks = () => state().tasks.filter((x) => x.id === t.id);
+    // Контроль: без удержания цикл снял бы эту паузу.
+    setWait('База прогонов перенесена (main): проверьте её гейтами и продолжите очередь');
+    assert.equal(state().pauseReason, 'operator');
+    assert.equal(
+      pauseStep(state(), stage1(), tasks()).lift,
+      true,
+      'без удержания цикл снимает паузу',
+    );
+    // Удержание: ни стадия 1, ни стадия 2 паузу не снимают.
+    setWait(heldBaseDetail(['main:tests/config.json']));
+    assert.equal(pauseStep(state(), stage1(), tasks()).lift, false);
+    assert.equal(
+      pauseStep(state(), { ...flow.get(job.key, job.owner), stage: 2 }, tasks()).lift,
+      false,
+    );
+    const ahead = loopAhead(f.h, state(), flow.get(job.key, job.owner));
+    assert.notEqual(ahead.outlook.step, 'lift-pause', JSON.stringify(ahead));
+    assert.equal(liftsPause(f.h, state(), flow.get(job.key, job.owner) as never), false);
+    // Виды: оператор.
+    const handoff = devcontourHandoff(f.h, { boardId: b.id });
+    assert.equal(handoff.host.next?.code, 'base-held', JSON.stringify(handoff.host.next));
+    const started = agent(f.h, 'workflow_start', {
+      kind: 'board',
+      id: b.id,
+      authorRuntime: 'codex',
+    }) as { baseHeld?: unknown };
+    assert.ok(started.baseHeld);
+    // Цикл задания: такты не снимают паузу и не снимают удержание.
+    for (let i = 0; i < 3; i++) await lead.tick();
+    assert.equal(
+      state().paused,
+      true,
+      'очередь на паузе: ' + JSON.stringify(flow.get(job.key, job.owner)),
+    );
+    assert.ok(
+      state().waits?.some((w) => w.kind === 'base-check' && w.detail.startsWith(BASE_HELD_DETAIL)),
+    );
+    // queue_set ведущего паузу не снимает.
+    assert.throws(() => agent(f.h, 'queue_set', { paused: false }), /Подтвердить и запустить/);
+    assert.equal(state().paused, true);
+    // Подтверждение человека (снятие паузы оператором) снимает и удержание.
+    f.h.pause(false);
+    assert.equal(state().paused, false);
+    assert.ok(!state().waits?.some((w) => w.kind === 'base-check'));
+  } finally {
+    await lead.stop();
+    f.cleanup();
+  }
+});
+
+/** Одобрение независимого ревью контракта (как `review-contract` в режиме агента). */
+const reviewed = (root: string, id: string) => ({
+  actor: 'agent' as const,
+  authorRuntime: 'codex' as const,
+  reviewerRuntime: 'claude' as const,
+  artifact: join(root, 'decisions', id),
+  digest: 'review-' + id,
+});
+
+test('Документ контракта в одобренной ревью редакции: base-update его не удерживает, рядом с файлом настройки удерживает только файл, остановка «база отстала» оператора не называет', async () => {
+  const doc = 'docs/contracts/api.md';
+  const text = '# API v1\n\nGET /items returns the list of items.\n';
+  const setup = async () => {
+    const f = await gitFixture();
+    f.store.change('fixture.reset', (s) => {
+      s.tasks = [];
+      s.boards = [];
+      s.runs = [];
+    });
+    const b = f.h.createBoard('Reviewed board', '', 'main');
+    f.h.addTask(b.id, input());
+    f.h.approve(b.id);
+    f.h.contract('API v1', text, reviewed(f.root, 'review-1'), undefined, doc);
+    return f;
+  };
+  // (a) только одобренный документ: удержания нет, проверку ведёт цикл.
+  {
+    const f = await setup();
+    try {
+      await f.commit({ [doc]: text });
+      const result = (await baseUpdateOperation(f.h, f.root, { by: 'host' })) as {
+        baseHeld?: unknown;
+        next: string;
+      };
+      assert.equal(result.baseHeld, undefined);
+      assert.match(result.next, /Запущенный workflow доски проверит её gates/);
+      assert.equal(f.events('base.check.held').length, 0);
+      assert.ok(!f.detail().startsWith(BASE_HELD_DETAIL), f.detail());
+    } finally {
+      f.cleanup();
+    }
+  }
+  // (b) документ и файл настройки: удержан только файл настройки.
+  {
+    const f = await setup();
+    try {
+      await f.commit({ [doc]: text, '.devcontour/x.json': '{}\n' });
+      const result = (await baseUpdateOperation(f.h, f.root, { by: 'host' })) as {
+        baseHeld?: { paths: string[] };
+      };
+      assert.deepEqual(result.baseHeld, { paths: ['main:.devcontour/x.json'] });
+      assert.equal(f.detail(), heldBaseDetail(['main:.devcontour/x.json']));
+      // Ожидание этого переноса сменилось за время разбора (его заменил
+      // более поздний перенос): первое чтение — до разбора, дальше ожидание
+      // другое. Удержание не пишется, пути не возвращаются.
+      const read = f.h.store.read.bind(f.h.store);
+      let calls = 0;
+      f.h.store.read = () => {
+        const st = read();
+        if (calls++ > 0)
+          st.waits = st.waits?.map((w) => ({
+            ...w,
+            at: '2000-01-01T00:00:00.000Z',
+            detail: 'База прогонов перенесена (main): проверьте её гейтами и продолжите очередь',
+          }));
+        return st;
+      };
+      try {
+        assert.deepEqual(await holdSensitiveBaseMove(f.h, f.root), []);
+      } finally {
+        f.h.store.read = read;
+      }
+      assert.equal(f.events('base.check.held').length, 1, 'второго события нет');
+    } finally {
+      f.cleanup();
+    }
+  }
+  // (c) остановка такта: перемотки нет (документ чувствителен), но после
+  // переноса его снимут gates — оператор не назван.
+  {
+    const f = await setup();
+    const scheduler = new Scheduler(f.h, f.root);
+    try {
+      // База — предок рабочей ветки: перемотка возможна, её держит только документ.
+      await git(
+        f.config.repository,
+        'update-ref',
+        'refs/heads/' + f.config.targetBranch,
+        await git(f.config.repository, 'rev-parse', 'HEAD'),
+      );
+      await f.commit({ [doc]: text });
+      await scheduler.init();
+      f.h.pause(false);
+      await assert.rejects(scheduler.tick(), (e: Error) => {
+        assert.ok(e.message.includes(STALE_BASE), e.message);
+        assert.match(e.message, /Перемотка не выполнена автоматически/);
+        assert.match(e.message, /main:docs\/contracts\/api\.md/);
+        assert.doesNotMatch(e.message, /подтверждение оператора/);
+        return true;
+      });
+    } finally {
+      await scheduler.stop();
+      f.cleanup();
+    }
+  }
+});
+
+test('withHeldBaseStop: поручения называют человека, отброшенная пределом остановка очереди возвращается, текст в пределе строки пакета', () => {
+  const long = Array.from(
+    { length: 20 },
+    (_, i) => `main:config/very/long/path/number-${i}/settings.json`,
+  );
+  const f = heldState(heldBaseDetail(long));
+  try {
+    const { pack } = devcontourHandoff(f.h, { boardId: f.boardId });
+    assert.ok(pack.works.length > 0);
+    for (const w of pack.works) {
+      assert.ok(
+        !(w.next.actor === 'controller' && w.next.action === 'wait'),
+        JSON.stringify(w.next),
+      );
+      assert.equal(w.next.command, undefined);
+    }
+    assert.ok(pack.works.some((w) => w.next.actor === 'user' && w.next.action === 'resume-queue'));
+    const stop = pack.stops.find((x) => x.queue)!;
+    assert.ok([...stop.message].length <= 300, String([...stop.message].length));
+    // Остановку отбросил предел размера: она возвращается, счётчик уменьшен.
+    const dropped = {
+      ...pack,
+      stops: pack.stops.filter((x) => !x.queue),
+      truncated: { ...pack.truncated, stops: 1 },
+    };
+    const back = withHeldBaseStop(dropped, f.store.read());
+    assert.equal(back.stops.filter((x) => x.queue).length, 1);
+    assert.equal(back.stops.find((x) => x.queue)!.actor, 'user');
+    assert.equal(back.truncated.stops, 0);
+  } finally {
+    f.cleanup();
   }
 });
