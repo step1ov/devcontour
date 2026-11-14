@@ -32,16 +32,22 @@ export type RepairDecision =
  */
 export const LATE_HEARTBEAT = 'Продление владения не удалось: Устаревшая попытка';
 
-export interface LoopStallEvent {
+export interface LoopGapEvent {
   owner: string;
   from: string;
   to: string;
 }
 
-/** Задержки основного потока серверов (`server.loop-stalled`), последние. */
-export function loopStalls(h: DevContour, limit = 200): LoopStallEvent[] {
-  return h.store.latestEvents(['server.loop-stalled'], limit).flatMap((e) => {
-    const d = e.data as Partial<LoopStallEvent> | null;
+export interface LoopGaps {
+  /** Задержки основного потока (`server.loop-stalled`). */
+  stalls: LoopGapEvent[];
+  /** Сон машины или перевод часов (`server.clock-jump`). */
+  jumps: LoopGapEvent[];
+}
+
+function gapEvents(h: DevContour, type: string, limit: number): LoopGapEvent[] {
+  return h.store.latestEvents([type], limit).flatMap((e) => {
+    const d = e.data as Partial<LoopGapEvent> | null;
     return d &&
       typeof d.owner === 'string' &&
       typeof d.from === 'string' &&
@@ -52,22 +58,40 @@ export function loopStalls(h: DevContour, limit = 200): LoopStallEvent[] {
 }
 
 /**
+ * Разрывы основного потока серверов, последние (`runner/loop-monitor.ts`).
+ * Окно — недавний журнал: решение о восстановлении принимается сразу после
+ * отказа.
+ */
+export function loopGaps(h: DevContour, limit = 200): LoopGaps {
+  return {
+    stalls: gapEvents(h, 'server.loop-stalled', limit),
+    jumps: gapEvents(h, 'server.clock-jump', limit),
+  };
+}
+
+/** Разрыв владельца попытки, внутрь которого пришёлся конец срока аренды. */
+const covers = (gaps: readonly LoopGapEvent[], owner: string, leaseUntil: number) =>
+  gaps.some(
+    (g) => g.owner === owner && Date.parse(g.from) < leaseUntil && Date.parse(g.to) >= leaseUntil,
+  );
+
+/**
  * Попытка истекла, потому что сервер-владелец был жив, но его основной поток
  * не успел продлить аренду: продление опоздало (`LATE_HEARTBEAT`) или сам
  * владелец записал задержку (`server.loop-stalled`), в которую пришёлся
  * конец срока аренды. Это перегрузка хоста, а не сеть, TLS или runtime.
+ * Конец срока внутри сна машины или перевода часов владельца
+ * (`server.clock-jump`) перегрузкой не считается и при опоздавшем продлении.
  */
 export function hostStarved(
   attempt: Pick<AttemptState, 'status' | 'failureKind' | 'error' | 'owner' | 'leaseUntil'>,
-  stalls: readonly LoopStallEvent[],
+  gaps: LoopGaps,
 ): boolean {
   if (attempt.status !== 'expired' || attempt.failureKind !== 'environment') return false;
-  if (attempt.error?.startsWith(LATE_HEARTBEAT)) return true;
-  return stalls.some(
-    (s) =>
-      s.owner === attempt.owner &&
-      Date.parse(s.from) < attempt.leaseUntil &&
-      Date.parse(s.to) >= attempt.leaseUntil,
+  if (covers(gaps.jumps, attempt.owner, attempt.leaseUntil)) return false;
+  return (
+    !!attempt.error?.startsWith(LATE_HEARTBEAT) ||
+    covers(gaps.stalls, attempt.owner, attempt.leaseUntil)
   );
 }
 
@@ -80,7 +104,7 @@ export function repairDecision(
   tasks: Pick<Task, 'id'>[],
   options: { budgetLeft: number; maxAttempts: number },
 ): RepairDecision | undefined {
-  const stalls = loopStalls(h);
+  const gaps = loopGaps(h);
   return executionOf(h).engine.read((view) => {
     // Потеря аренды перегруженным сервером — не «та же причина ещё раз»:
     // отпечаток такой попытки свой. Предел отказов окружения harness
@@ -90,7 +114,7 @@ export function repairDecision(
     const starved = new Set<string>();
     const attempts = (workId?: string) =>
       view.attempts(workId).map((a) => {
-        if (!a.failureFingerprint || !hostStarved(a, stalls)) return a;
+        if (!a.failureFingerprint || !hostStarved(a, gaps)) return a;
         starved.add(a.id);
         return { ...a, failureFingerprint: `${a.failureFingerprint}:host-starved:${a.id}` };
       });

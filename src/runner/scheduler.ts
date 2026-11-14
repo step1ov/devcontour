@@ -25,7 +25,7 @@ import { assertTeamCheckout } from './git-sync.ts';
 import { reserveRepositories } from './ownership.ts';
 import { serveReconfigure } from './reconfigure.ts';
 import { checkoutRootOption, checkoutRoots, workspaceCheckoutRoot } from './checkout-root.ts';
-import { LeaseKeeper, runnerJobs, type LiveAttempt, type LoopStall } from './lease-keeper.ts';
+import { LoopMonitor, type LoopGap } from './loop-monitor.ts';
 
 export { classifyFailure } from 'devcontour-harness';
 
@@ -47,11 +47,10 @@ export class Scheduler {
   private current?: Promise<void>;
   private stopped = false;
   /**
-   * Хранитель аренды сервера (`lease-keeper.ts`): продлевает аренду живых
-   * попыток и роль controller, пока основной поток занят. Только у
-   * планировщика, ведущего очередь интервалом (`start`, сервер).
+   * Монитор задержек основного потока (`loop-monitor.ts`): у планировщика,
+   * ведущего очередь интервалом (`start`, сервер).
    */
-  private keeper?: LeaseKeeper;
+  private monitor?: LoopMonitor;
   /** Планировщик останавливается: новые такты и запуск очереди не принимаются. */
   get stopping() {
     return this.stopped;
@@ -329,7 +328,12 @@ export class Scheduler {
   start() {
     if (this.timer) return;
     this.stopped = false;
-    this.startKeeper();
+    this.monitor ??= new LoopMonitor({
+      leaseMs: this.h.config.leaseMs,
+      onStall: (gap) => this.noteGap('server.loop-stalled', gap),
+      onClockJump: (gap) => this.noteGap('server.clock-jump', gap),
+    });
+    this.monitor.start();
     this.timer = setInterval(() => {
       if (this.stopped || this.current) return;
       void this.tick()
@@ -352,53 +356,30 @@ export class Scheduler {
     }, 750);
     this.timer.unref();
   }
-  /** Живые job исполнителей этого планировщика: текущего и прежних конфигураций. */
-  liveAttempts(): LiveAttempt[] {
-    return [this.built?.runner, ...this.retired].flatMap((r) => (r ? runnerJobs(r) : []));
-  }
-  private startKeeper() {
-    if (this.keeper || this.h.store.file === ':memory:') return;
-    try {
-      this.keeper = new LeaseKeeper({
-        file: this.h.store.file,
-        ...(this.h.config.storage === 'component'
-          ? {
-              locations: repositories(this.h.config).map((r) => ({ id: r.id, path: r.path })),
-            }
-          : {}),
-        owner: this.owner,
-        leaseMs: this.h.config.leaseMs,
-        live: () => this.liveAttempts(),
-        onStall: (stall) => this.noteStall(stall),
-      });
-    } catch {
-      // Без потока остаётся прежнее продление основным потоком.
-      this.keeper = undefined;
-    }
-  }
   /**
-   * Задержка основного потока, при которой аренда могла истечь (не короче
-   * трети срока — поэтому и не чаще): событие `server.loop-stalled` с
-   * владельцем, окном и числом продлений потоком хранителя за это время.
+   * Задержка основного потока, при которой аренда могла истечь
+   * (`server.loop-stalled`), или сон машины и перевод часов
+   * (`server.clock-jump`): владелец, окно по стенным часам и оба разрыва.
+   * Пишется сразу: такт очереди проверяет монитор до recovery и истечения.
    */
-  private noteStall(stall: LoopStall) {
+  private noteGap(type: 'server.loop-stalled' | 'server.clock-jump', gap: LoopGap) {
     if (this.stopped) return;
     try {
       this.h.store.atomic(() =>
         this.h.store.appendEvent(
-          'server.loop-stalled',
+          type,
           {
             owner: this.owner,
-            from: new Date(stall.from).toISOString(),
-            to: new Date(stall.to).toISOString(),
-            ms: stall.ms,
-            renewed: stall.renewed,
+            from: new Date(gap.from).toISOString(),
+            to: new Date(gap.to).toISOString(),
+            monoMs: gap.monoMs,
+            wallMs: gap.wallMs,
           },
           'lease',
         ),
       );
     } catch {
-      /* Хранилище занято или закрыто: задержка останется незаписанной. */
+      /* Хранилище занято или закрыто: разрыв останется незаписанным. */
     }
   }
   /**
@@ -429,8 +410,7 @@ export class Scheduler {
     await this.runner.stop();
     await Promise.all(this.retired.map((r) => r.settled().catch(() => {})));
     this.retired = [];
-    await this.keeper?.stop();
-    this.keeper = undefined;
+    this.monitor?.stop();
     // Роль освобождена — отметка уже не действует; снимается для порядка
     // (не снятую снимет следующий запуск).
     try {
@@ -447,6 +427,9 @@ export class Scheduler {
    */
   tick(): Promise<void> {
     if (this.stopped) return Promise.resolve();
+    // Задержка, после которой такт истечёт попытку, записывается до recovery
+    // и истечения: восстановление видит её причину.
+    this.monitor?.check();
     if (this.current) return this.current.catch(() => {});
     const run = this.tickOnce().finally(() => {
       if (this.current === run) this.current = undefined;
