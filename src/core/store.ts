@@ -793,7 +793,13 @@ export class Store {
    * есть только событие или локальная запись с событием. Путь записи — тот же,
    * что у `change`: central — `main.events`, component — событие компонента.
    */
-  appendEvent(type: string, data: unknown, revision: 'data' | 'lease' = 'data') {
+  appendEvent(
+    type: string,
+    data: unknown,
+    revision: 'data' | 'lease' = 'data',
+    /** Проекции пересчитываются после фиксации; событие о сроках — без них. */
+    project = true,
+  ) {
     if (!this.transaction) throw new Error('Store.appendEvent требует открытой транзакции');
     if (type === 'heartbeat') throw new Error('heartbeat не пишет событие журнала');
     const at = new Date().toISOString();
@@ -811,8 +817,26 @@ export class Store {
     // Событие о сроках владения (роль controller) — как heartbeat: видимые
     // данные не меняются, растёт только счётчик сроков.
     this.bump(revision);
-    this.projectionPending = true;
+    if (project) this.projectionPending = true;
     return Number(inserted.lastInsertRowid);
+  }
+  /**
+   * Событие о сроках владения (задержка сервера, скачок часов) отдельной
+   * транзакцией: без пересчёта проекций, как heartbeat, и без долгого
+   * ожидания занятой базы — дольше `busyMs` событие не ждёт и отбрасывается
+   * (`false`). Пишется в момент, когда сервер и так опаздывает.
+   */
+  tryLeaseEvent(type: string, data: unknown, busyMs = 250): boolean {
+    if (this.transaction) throw new Error('Store.tryLeaseEvent вне транзакции');
+    this.db.exec(`PRAGMA busy_timeout=${Math.max(0, Math.floor(busyMs))};`);
+    try {
+      this.atomic(() => this.appendEvent(type, data, 'lease', false));
+      return true;
+    } catch {
+      return false;
+    } finally {
+      this.db.exec('PRAGMA busy_timeout=20000;');
+    }
   }
   /** Номер последнего события журнала (0 — журнал пуст). */
   lastEventId(): number {

@@ -25,6 +25,7 @@ import { assertTeamCheckout } from './git-sync.ts';
 import { reserveRepositories } from './ownership.ts';
 import { serveReconfigure } from './reconfigure.ts';
 import { checkoutRootOption, checkoutRoots, workspaceCheckoutRoot } from './checkout-root.ts';
+import { LoopMonitor, type LoopGap } from './loop-monitor.ts';
 
 export { classifyFailure } from 'devcontour-harness';
 
@@ -45,6 +46,11 @@ export class Scheduler {
   /** Идущий такт (интервала, HTTP-запуска или drain): `stop` дожидается его. */
   private current?: Promise<void>;
   private stopped = false;
+  /**
+   * Монитор задержек основного потока (`loop-monitor.ts`): у планировщика,
+   * ведущего очередь интервалом (`start`, сервер).
+   */
+  private monitor?: LoopMonitor;
   /** Планировщик останавливается: новые такты и запуск очереди не принимаются. */
   get stopping() {
     return this.stopped;
@@ -322,6 +328,12 @@ export class Scheduler {
   start() {
     if (this.timer) return;
     this.stopped = false;
+    this.monitor ??= new LoopMonitor({
+      leaseMs: this.h.config.leaseMs,
+      onStall: (gap) => this.noteGap('server.loop-stalled', gap),
+      onClockJump: (gap) => this.noteGap('server.clock-jump', gap),
+    });
+    this.monitor.start();
     this.timer = setInterval(() => {
       if (this.stopped || this.current) return;
       void this.tick()
@@ -343,6 +355,28 @@ export class Scheduler {
         });
     }, 750);
     this.timer.unref();
+  }
+  /**
+   * Задержка основного потока, при которой аренда могла истечь
+   * (`server.loop-stalled`), или сон машины и перевод часов
+   * (`server.clock-jump`): владелец, окно по стенным часам и оба разрыва.
+   * Пишется сразу: такт очереди проверяет монитор до recovery и истечения.
+   */
+  private noteGap(type: 'server.loop-stalled' | 'server.clock-jump', gap: LoopGap) {
+    if (this.stopped) return;
+    // Без проекций и без долгого ожидания занятой базы: незаписанный разрыв
+    // оставляет сигнал опоздавшего продления.
+    try {
+      this.h.store.tryLeaseEvent(type, {
+        owner: this.owner,
+        from: new Date(gap.from).toISOString(),
+        to: new Date(gap.to).toISOString(),
+        monoMs: gap.monoMs,
+        wallMs: gap.wallMs,
+      });
+    } catch {
+      /* Хранилище закрыто: разрыв останется незаписанным. */
+    }
   }
   /**
    * Начало штатной остановки: отметка в базе, по которой запуск очереди из
@@ -372,6 +406,7 @@ export class Scheduler {
     await this.runner.stop();
     await Promise.all(this.retired.map((r) => r.settled().catch(() => {})));
     this.retired = [];
+    this.monitor?.stop();
     // Роль освобождена — отметка уже не действует; снимается для порядка
     // (не снятую снимет следующий запуск).
     try {
@@ -388,6 +423,9 @@ export class Scheduler {
    */
   tick(): Promise<void> {
     if (this.stopped) return Promise.resolve();
+    // Задержка, после которой такт истечёт попытку, записывается до recovery
+    // и истечения: восстановление видит её причину.
+    this.monitor?.check();
     if (this.current) return this.current.catch(() => {});
     const run = this.tickOnce().finally(() => {
       if (this.current === run) this.current = undefined;
