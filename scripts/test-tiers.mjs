@@ -178,6 +178,7 @@ export const slowTests = {
     'After a carried base step context packs are pinned at the base',
     'After the base step the operation is stale once the base no longer holds',
     'An artifact pinned differently by two current contracts without open work',
+    'After an operation corrected the done work of a document, a later amendment',
   ],
   'contract-change-siblings': [
     'A sibling document fixed after its operation started does not make the',

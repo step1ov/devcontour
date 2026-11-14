@@ -141,6 +141,15 @@ test('Two amendments and three new documents registered without an operation: on
     assert.match(done.history.find((e) => e.event === 'siblings')?.detail ?? '', /orders\.md/);
     assert.equal(done.continued?.[0].id, b.id);
     assert.equal(done.continued?.[0].status, 'completed', done.continued?.[0].error);
+    // Сосед перенёс базу ровно на проверенный commit B: пакеты B закрепляет
+    // на нём же, вершина базы отдельно не записывается.
+    assert.ok(
+      s
+        .changes()
+        .get(b.id)
+        .history.some((e) => e.event === 'carried'),
+    );
+    assert.equal(s.changes().get(b.id).pinAt, undefined);
     for (const id of [a.id, b.id]) {
       assert.ok(!events(id).includes('failed'), `${id}: без отказов`);
       assert.ok(!events(id).includes('stale'), `${id}: без устаревания`);
@@ -557,6 +566,34 @@ test('An artifact pinned differently by two current contracts without open work 
     assert.equal(result.status, 'failed');
     assert.match(result.error ?? '', /не годные[^:]*: (?:\S+, )*shared\.json\./);
     assert.equal(s.sh('rev-parse', 'devcontour/accepted'), before);
+  } finally {
+    await s.remove();
+  }
+});
+
+test('After an operation corrected the done work of a document, a later amendment registered without an operation is carried', async () => {
+  const { s, start, register, head, base } = await fiveDocuments({ ordersTask: true });
+  try {
+    s.store.change('fixture.done', (st) => {
+      for (const task of st.tasks.filter((x) => x.title === 'Orders')) task.status = 'done';
+    });
+    const done = s.store.read().tasks.find((x) => x.title === 'Orders')!;
+    const a = await start(s.proposal);
+    const b = await start(orders);
+    assert.equal((await s.changes().advance(b.id)).status, 'waiting');
+    assert.equal((await s.changes().advance(a.id)).status, 'completed');
+    assert.equal(s.changes().get(b.id).status, 'completed');
+    assert.deepEqual(s.changes().get(b.id).corrections, [done.id], 'B назвал корректировку');
+    // Следующий этап: поправка заказов — review-contract без операции, и
+    // правка каталога — новой операцией.
+    await writeFile(join(s.repo, ORDERS), '# Orders\n\nPrices come from catalog.md (cents).\n');
+    await writeFile(join(s.repo, 'docs/contracts/catalog.md'), '# Catalog\n\nPrice in cents.\n');
+    s.sh('commit', '-qam', 'next stage');
+    await register(orders);
+    const next = await s.changes().advance((await start(s.proposal)).id);
+    assert.equal(next.status, 'completed', next.error);
+    assert.match(next.history.find((e) => e.event === 'registered')?.detail ?? '', /orders\.md/);
+    assert.equal(base(), head());
   } finally {
     await s.remove();
   }

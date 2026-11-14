@@ -442,7 +442,16 @@ export async function registeredContractLifts(
   paths: string[],
   to: string,
   base: string,
-  options: { held: Set<string>; excluded: Set<string>; packs: boolean },
+  options: {
+    held: Set<string>;
+    excluded: Set<string>;
+    packs: boolean;
+    /**
+     * Редакции, которые зарегистрировала завершённая операция contract-change:
+     * она уже записала корректировки принятых задач всех редакций до неё.
+     */
+    corrected?: Set<string>;
+  },
 ): Promise<RegisteredContractLifts> {
   const lifted = new Map<string, SiblingContractLift>();
   const packed: string[] = [];
@@ -459,12 +468,23 @@ export async function registeredContractLifts(
     const c = reviewedRedaction(h.config, s, repositoryId, source);
     if (!c || options.excluded.has(c.id)) return undefined;
     const done = s.tasks.filter((t) => t.status === 'done');
-    const corrected = contractRedactionsOf(s.contracts, source, repositoryId).some(
-      (r) =>
-        r.id !== c.id &&
-        supersededBy(s.contracts, r.id) &&
-        done.some((t) => t.contracts.includes(r.id)),
+    // Считаются только редакции начиная с последней, которую провела
+    // завершённая операция: принятые задачи прежних она уже назвала в своих
+    // корректировках. Её собственная редакция считается: задачи, принятые
+    // по ней, следующая поправка без операции заменила бы без корректировки.
+    const records = contractRedactionsOf(s.contracts, source, repositoryId);
+    const since = Math.max(
+      records.findLastIndex((r) => options.corrected?.has(r.id)),
+      0,
     );
+    const corrected = records
+      .slice(since)
+      .some(
+        (r) =>
+          r.id !== c.id &&
+          supersededBy(s.contracts, r.id) &&
+          done.some((t) => t.contracts.includes(r.id)),
+      );
     return corrected ? undefined : c;
   };
   // Действующие договоры компонента: последние редакции документов и
