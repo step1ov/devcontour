@@ -4,7 +4,6 @@ import {
   changedPaths,
   gateBasis,
   gateDecisions,
-  HARNESS_VERSION,
   runGatesAt,
   type ChangedPaths,
   type EvidenceRecord,
@@ -13,6 +12,7 @@ import {
 import { baseMovesOf, type DevContour } from '../core/service.ts';
 import { dependsOnRepository, repositories, repository } from '../core/repositories.ts';
 import { executionOf } from '../harness/execution.ts';
+import { CONSUMER_VERSION } from '../harness/host.ts';
 import { git, isAncestor } from './process.ts';
 import { controllerBoundary } from './checks.ts';
 import { checkoutRootOption, workspaceCheckoutRoot } from './checkout-root.ts';
@@ -36,6 +36,11 @@ export interface BaseCheck {
   passed: boolean;
   gates: string[];
   failures: { gate: string; message: string }[];
+  /**
+   * Evidence исполненных gates и — для перенесённых (`carried`) — исходное
+   * evidence проверки-источника: те же `id` и `runId` встречаются в
+   * нескольких записях.
+   */
   evidence: EvidenceRecord[];
   at: string;
   /** Прогонов этой базы под этим договором (нет поля — один). */
@@ -51,6 +56,8 @@ export interface BaseCheck {
    * снимки зависимостей — вход gates. Перенос результата требует тех же SHA.
    */
   providers?: Record<string, string>;
+  /** Версия DevContour, исполнившая проверку: другая версия не переносит её результат. */
+  devcontour?: string;
   /**
    * Gates, результат которых перенесён с прошедшей проверки предка, а не
    * исполнен на этом SHA (D51): gate с `when.paths`, чьих путей и неявных
@@ -93,49 +100,74 @@ interface BasePlan {
   evidence: EvidenceRecord[];
   basis: Record<string, string>;
   providers: Record<string, string>;
+  /** Чувствительные пути контура на диапазоне переноса: ничего не перенесено. */
+  blocked?: string[];
 }
+/** Возраст evidence, дальше которого результат gate не переносится (D51). */
+export const BASE_CARRY_MAX_AGE_MS = 7 * 24 * 60 * 60 * 1000;
+/** Сколько последних прошедших проверок базы просматривается в поисках предка. */
+export const BASE_CARRY_ANCHORS = 50;
+/** Базы поставщиков записи и текущие — одни и те же (нет поля — нет поставщиков). */
+const sameProviders = (r: Pick<BaseCheck, 'providers'>, providers: Record<string, string>) =>
+  JSON.stringify(Object.entries(r.providers ?? {}).sort()) ===
+  JSON.stringify(Object.entries(providers).sort());
 /**
  * План проверки базы `sha` компонента (D51). Результат gate переносится с
  * последней прошедшей проверки базы-предка, только когда harness сам не
  * исполнил бы его в фазе задачи (`gateDecisions` — то же правило, что у
- * попыток, F22): у gate есть `when.paths`; его основание (`gateBasis`) и
- * договор компонента те же; его evidence — PASS на SHA-предке; полный diff
- * от этого SHA до базы не задевает ни его путей, ни неявных входов
- * (защищённые пути, каталог harness, манифесты и lockfiles, пути из команды);
- * он не предпосылка исполняемого gate. Gate без `when`, неизвестный или
- * пустой diff, иное основание — исполнение. Базы компонентов-поставщиков
- * (`providers`) должны совпадать с записанными при той проверке: diff
- * поставщика правило путей не видит. Без прошедшего предка — весь профиль,
- * как прежде.
+ * попыток, F22): у gate есть `when.paths`; его основание (`gateBasis`),
+ * договор компонента и версия DevContour те же; его evidence — PASS на
+ * SHA-предке, не старше `BASE_CARRY_MAX_AGE_MS`, и после той проверки gate не
+ * проваливался на проверке базы; полный diff от этого SHA до базы не задевает
+ * ни его путей, ни неявных входов harness (защищённые пути, каталог harness,
+ * манифесты и lockfiles, пути из команды); он не предпосылка исполняемого
+ * gate. Базы компонентов-поставщиков (`providers`) — те же, что при той
+ * проверке: diff поставщика правило путей не видит. Diff, задевший
+ * чувствительный путь контура (документы и артефакты контрактов, файлы
+ * context packs, генерируемые пути, файл конфигурации, данные контура —
+ * `sensitiveBaseEntries`), не переносит ничего: такой перенос мог снять
+ * человек без gates, и условные gates исполняются все. Без прошедшего
+ * предка — весь профиль, как прежде.
  */
 async function basePlan(
   h: DevContour,
-  policy: ReturnType<typeof executionOf>['engine']['policy'],
+  context: {
+    policy: ReturnType<typeof executionOf>['engine']['policy'];
+    /** Версия движка — та же, что в основании gates попыток. */
+    harness: string;
+    dataRoot: string;
+  },
   repositoryId: string,
   sha: string,
   policyDigest: string,
   providers: Record<string, string>,
 ): Promise<BasePlan> {
+  const { policy } = context;
   const repo = repository(h.config, repositoryId);
   const all = repo.gates.map((g) => g.id);
   const policyRepo = policy.repositories.find((r) => r.id === repositoryId);
   if (!policyRepo) return { run: all, carried: [], evidence: [], basis: {}, providers };
   const basis = Object.fromEntries(
-    policyRepo.gates.map((g) => [g.id, gateBasis(policy, policyRepo, g, HARNESS_VERSION)]),
+    policyRepo.gates.map((g) => [g.id, gateBasis(policy, policyRepo, g, context.harness)]),
   );
   const full: BasePlan = { run: all, carried: [], evidence: [], basis, providers };
   if (!policyRepo.gates.some((g) => g.when)) return full;
-  // Последняя прошедшая проверка базы-предка под тем же договором и с теми
-  // же базами поставщиков.
-  const sameProviders = (r: BaseCheck) =>
-    JSON.stringify(Object.entries(r.providers ?? {}).sort()) ===
-    JSON.stringify(Object.entries(providers).sort());
-  const records = Object.values(h.store.localRecords<BaseCheck>(BASE_CHECK, repositoryId))
+  const history = Object.values(h.store.localRecords<BaseCheck>(BASE_CHECK, repositoryId)).sort(
+    (a, b) => b.at.localeCompare(a.at),
+  );
+  // Последняя прошедшая проверка базы-предка под тем же договором, версией
+  // DevContour и базами поставщиков; просмотр ограничен, как у harness.
+  const records = history
     .filter(
       (r) =>
-        r.passed && r.sha !== sha && r.policyDigest === policyDigest && r.basis && sameProviders(r),
+        r.passed &&
+        r.sha !== sha &&
+        r.policyDigest === policyDigest &&
+        r.basis &&
+        r.devcontour === CONSUMER_VERSION &&
+        sameProviders(r, providers),
     )
-    .sort((a, b) => b.at.localeCompare(a.at));
+    .slice(0, BASE_CARRY_ANCHORS);
   let anchor: BaseCheck | undefined;
   for (const r of records)
     if (await isAncestor(repo.path, r.sha, sha)) {
@@ -143,17 +175,31 @@ async function basePlan(
       break;
     }
   if (!anchor) return full;
+  const source = anchor;
+  // Провал gate на проверке базы после источника (под тем же договором) —
+  // свежее наблюдение, которое перенос не перекрывает: например, сбой среды.
+  const failedSince = new Set(
+    history
+      .filter((r) => r.at > source.at && r.policyDigest === policyDigest)
+      .flatMap((r) => r.failures.map((f) => f.gate)),
+  );
+  const now = Date.now();
   const diffs = new Map<string, Promise<ChangedPaths>>();
   const changed = new Map<string, ChangedPaths>();
   for (const g of policyRepo.gates) {
-    if (!g.when || anchor.basis?.[g.id] !== basis[g.id]) continue;
-    const own = anchor.evidence.filter((e) => e.gate === g.id);
-    // Только исполненный PASS gate (не потребителя) на одном SHA:
-    // неприменимость не переносится.
+    if (!g.when || source.basis?.[g.id] !== basis[g.id] || failedSince.has(g.id)) continue;
+    const own = source.evidence.filter((e) => e.gate === g.id);
+    // Только исполненный PASS gate (не потребителя) на одном SHA, не старше
+    // предела: неприменимость не переносится.
     if (
       !own.length ||
       own.some(
-        (e) => e.kind !== 'test' || e.consumer !== undefined || !e.passed || e.sha !== own[0].sha,
+        (e) =>
+          e.kind !== 'test' ||
+          e.consumer !== undefined ||
+          !e.passed ||
+          e.sha !== own[0].sha ||
+          !(now - Date.parse(e.createdAt) <= BASE_CARRY_MAX_AGE_MS),
       )
     )
       continue;
@@ -162,6 +208,15 @@ async function basePlan(
     if (!diffs.has(at)) diffs.set(at, changedPaths(repo.path, [{ from: at, to: sha }]));
     changed.set(g.id, await diffs.get(at)!);
   }
+  if (!changed.size) return full;
+  // Чувствительные пути контура на диапазоне от SHA исполнения: harness их
+  // неявными входами не считает, а перенос через них мог пройти без gates.
+  const state = h.store.read();
+  const blocked: string[] = [];
+  for (const at of diffs.keys())
+    for (const e of await sensitiveBaseEntries(h, context.dataRoot, state, repositoryId, at, sha))
+      blocked.push(e.path);
+  if (blocked.length) return { ...full, blocked: [...new Set(blocked)].slice(0, 20) };
   const decisions = gateDecisions({
     repo: policyRepo,
     scope: policyRepo.gates,
@@ -174,7 +229,7 @@ async function basePlan(
       carried.push({
         gate: d.gate.id,
         from: changed.get(d.gate.id)!.ranges[0].from,
-        anchor: anchor.sha,
+        anchor: source.sha,
         applicability: d.record,
       });
   if (!carried.length) return full;
@@ -182,7 +237,7 @@ async function basePlan(
   return {
     run: all.filter((id) => !ids.has(id)),
     carried,
-    evidence: anchor.evidence.filter((e) => ids.has(e.gate)),
+    evidence: source.evidence.filter((e) => ids.has(e.gate)),
     basis,
     providers,
   };
@@ -200,8 +255,9 @@ export type CheckGuard = (options?: { closing?: boolean }) => void;
  * новую базу проверяют gates до выдачи (D42). В режиме оператора это решение
  * человека, и ожидание снимает он. В режиме агента согласования ведёт контур,
  * и ручной `queue --start` был лишним шагом: цикл ведущего проверяет базу сам
- * тем же исполнением, что integration задач (`runGatesAt`), — весь профиль
- * каждого компонента на SHA его базы прогонов. Все прошли — ожидание снято и
+ * тем же исполнением, что integration задач (`runGatesAt`), — профиль
+ * каждого компонента на SHA его базы прогонов, кроме условных gates, чей
+ * результат переносится с проверки предка (D51). Все прошли — ожидание снято и
  * очередь продолжена; провал — ожидание остаётся и называет gates.
  *
  * Автоматически снимается только перенос, который могла бы сделать и
@@ -291,24 +347,32 @@ export async function checkBase(
     );
   const { engine } = executionOf(h);
   const failed: string[] = [];
+  // Перенесённые результаты, на которые опирается снятие (`base.checked`).
+  const carriedBy: { repositoryId: string; sha: string; gates: string[] }[] = [];
   for (const base of bases) {
     const repo = repository(h.config, base.repositoryId);
     const gates = repo.gates.map((g) => g.id);
     if (!gates.length) continue;
     const policyDigest = h.policyDigest(base.repositoryId);
+    // Базы поставщиков (`dependsOn`, транзитивно) из того же снимка, что и
+    // базы решения: снимки зависимостей — вход gates компонента.
+    const dependencies = bases.filter((b) =>
+      dependsOnRepository(h.config, base.repositoryId, b.repositoryId),
+    );
+    const providers = Object.fromEntries(dependencies.map((b) => [b.repositoryId, b.sha]));
     const previous = h.store.localRecord<BaseCheck>(BASE_CHECK, base.repositoryId, base.sha);
-    let record = previous?.policyDigest === policyDigest ? previous : undefined;
+    // Исход той же базы засчитывается при тех же базах поставщиков: сдвиг
+    // поставщика — тоже перенос (запись без поля — без поставщиков).
+    let record =
+      previous?.policyDigest === policyDigest && sameProviders(previous, providers)
+        ? previous
+        : undefined;
     while (!record || (!record.passed && (record.tries ?? 1) <= BASE_CHECK_RETRIES)) {
       const tries = (record?.tries ?? 0) + 1;
       const runId = 'BK-' + randomUUID();
-      const providers = Object.fromEntries(
-        bases
-          .filter((b) => dependsOnRepository(h.config, base.repositoryId, b.repositoryId))
-          .map((b) => [b.repositoryId, b.sha]),
-      );
       const plan = await basePlan(
         h,
-        engine.policy,
+        { policy: engine.policy, harness: engine.version, dataRoot: roots.data },
         base.repositoryId,
         base.sha,
         policyDigest,
@@ -332,11 +396,14 @@ export async function checkBase(
         ...(plan.carried.length
           ? { carried: plan.carried.map((c) => c.gate), anchor: plan.carried[0].anchor }
           : {}),
+        // Перенос не применён: диапазон задел чувствительные пути контура.
+        ...(plan.blocked ? { carryBlocked: plan.blocked } : {}),
         ...(tries > 1 ? { retry: tries - 1 } : {}),
       });
       let result: Pick<Awaited<ReturnType<typeof runGatesAt>>, 'gates' | 'failures' | 'evidence'>;
       try {
-        // Всё перенесено — исполнять нечего.
+        // Всё перенесено — исполнять нечего. Сейчас недостижимо: harness
+        // требует test gate без `when`; ветка — защита от смены этого правила.
         result = !plan.run.length
           ? { gates: [], failures: [], evidence: [] }
           : await runGatesAt(
@@ -386,6 +453,18 @@ export async function checkBase(
         }
         throw error;
       }
+      // Поставщик сдвинулся за время gates: снимки могли быть уже с новой
+      // базы, и запись не называет, с какой. Она остаётся исходом этого SHA
+      // (решение увидит сдвиг), но источником переноса не служит, а метка
+      // `@moved` не даёт засчитать её и при возврате поставщика на прежний SHA.
+      const providersHeld = dependencies.every((b) => {
+        const r = repository(h.config, b.repositoryId);
+        try {
+          return targetSha(r.path, r.targetBranch) === b.sha;
+        } catch {
+          return false;
+        }
+      });
       const saved: BaseCheck = {
         repositoryId: base.repositoryId,
         sha: base.sha,
@@ -397,8 +476,13 @@ export async function checkBase(
         evidence: [...result.evidence, ...plan.evidence],
         at: new Date().toISOString(),
         tries,
-        basis: plan.basis,
-        ...(Object.keys(plan.providers).length ? { providers: plan.providers } : {}),
+        ...(providersHeld
+          ? {
+              basis: plan.basis,
+              devcontour: CONSUMER_VERSION,
+              ...(Object.keys(plan.providers).length ? { providers: plan.providers } : {}),
+            }
+          : { providers: { ...plan.providers, '@moved': 'during-check' } }),
         ...(plan.carried.length ? { carried: plan.carried } : {}),
       };
       try {
@@ -451,6 +535,12 @@ export async function checkBase(
       record = saved;
     }
     for (const f of record.failures) failed.push(`${base.repositoryId}/${f.gate}`);
+    if (record.carried?.length)
+      carriedBy.push({
+        repositoryId: base.repositoryId,
+        sha: base.sha,
+        gates: record.carried.map((c) => c.gate),
+      });
   }
   // Решение — в одной транзакции со сверкой: ожидание и его диапазон те же,
   // базы не сдвинулись с проверенных SHA.
@@ -475,6 +565,8 @@ export async function checkBase(
     if (failed.length) return 'failed';
     h.store.appendEvent('base.checked', {
       bases,
+      // Gates, чей результат перенесён с проверки предка, а не исполнен (D51).
+      ...(carriedBy.length ? { carried: carriedBy } : {}),
       // Кто снял чувствительный перенос и на каком доказательстве: ревью
       // документа и blob одобренного текста, равный blob на базе.
       ...(reviewed.length ? { liftedBy: 'agent', reviewedContracts: reviewed } : {}),
