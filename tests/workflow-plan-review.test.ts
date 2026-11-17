@@ -325,6 +325,8 @@ test('F54: во втором раунде отказ считает открыт
       reviewPlan(f.h, f.root, board.id, 'codex', round(false)),
       /Открытых находок: 3, из них новых в этом раунде: 0;/,
     );
+    // Ответ второго раунда принят как корректный: сводка без замечаний к схеме.
+    assert.equal(f.store.read().contractAttempts!.at(-1)!.summary, 'Пробелы не закрыты');
   } finally {
     f.cleanup();
   }
