@@ -18,6 +18,7 @@ import { serve } from '../src/server/http.ts';
 import { Scheduler } from '../src/runner/scheduler.ts';
 import { fixture, input } from './helpers.ts';
 import { CATALOG_DIGEST, SNAPSHOT_VERSION } from './catalog-snapshot.ts';
+import { cliArgs } from './cli-command.ts';
 
 // Снято на HEAD 59e5000 (alpha.10, прежний код) и совпадает с baseline ab35a6a:
 //   node --import tsx -e "import('./src/application/agent.ts').then(a=>process.stdout.write(JSON.stringify(a.capabilities())))"
@@ -57,7 +58,7 @@ test('AC18: каталог DevContour байтово прежний — catalogD
     await app.close();
     f.cleanup();
   }
-  const cli = spawnSync(process.execPath, ['--import', 'tsx', 'src/cli.ts', 'capabilities'], {
+  const cli = spawnSync(process.execPath, [...cliArgs(), 'capabilities'], {
     cwd: resolve('.'),
     encoding: 'utf8',
   });

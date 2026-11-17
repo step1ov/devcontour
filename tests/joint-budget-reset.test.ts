@@ -4,6 +4,7 @@ import { command } from '../src/runner/process.ts';
 import { WorkspaceRunner } from '../src/runner/workspace.ts';
 import { agentOperations } from '../src/application/agent.ts';
 import { jointDemos, jointFixture } from './joint-fixture.ts';
+import { cliCommand } from './cli-command.ts';
 
 after(() => jointDemos.close());
 
@@ -65,10 +66,7 @@ test('Сброс бюджета оператором снимает провер
     const cli = (...extra: string[]) =>
       command(
         [
-          'node',
-          '--import',
-          'tsx',
-          'src/cli.ts',
+          ...cliCommand(),
           'changeset-budget-reset',
           '--changeset',
           f.change.id,

@@ -18,6 +18,7 @@ import { executionOf } from '../src/harness/execution.ts';
 import { inputManifestOf, inputSourceId } from 'devcontour-harness';
 import { taskOwner } from '../src/core/sync-state.ts';
 import { command } from '../src/runner/process.ts';
+import { cliCommand } from './cli-command.ts';
 
 after(() => inputDemos.close());
 
@@ -325,7 +326,7 @@ test('CLI input-context --messages passes the selected discussion messages to th
     );
     const cli = (...extra: string[]) =>
       command(
-        ['node', '--import', 'tsx', 'src/cli.ts', 'input-context', '--request', requestId]
+        [...cliCommand(), 'input-context', '--request', requestId]
           .concat(extra)
           .concat(['--data', f.root]),
         process.cwd(),

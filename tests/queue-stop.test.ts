@@ -17,6 +17,7 @@ import { realpath } from 'node:fs/promises';
 import { devcontourHooks } from '../src/harness/hooks.ts';
 import { git, command } from '../src/runner/process.ts';
 import { queueStopView, type QueueStopView } from '../src/core/work-status.ts';
+import { cliCommand } from './cli-command.ts';
 
 const STALE =
   'TaskFailure: База прогонов отстала от рабочей ветки: main — devcontour/accepted без 1 коммитов. Выполните devcontour base-update, иначе исполнитель получит дерево без подготовленной работы.';
@@ -353,7 +354,7 @@ test('CLI queue без флага печатает причину и подск�
     const c = config({ repository: repo });
     await writeFile(join(data, 'config.json'), JSON.stringify(c));
     const h = new DevContour(new Store(join(data, 'state.sqlite')), c);
-    const cli = ['node', '--import', 'tsx', 'src/cli.ts', 'queue', '--data', data];
+    const cli = [...cliCommand(), 'queue', '--data', data];
     try {
       h.pause(false);
       h.store.change('scheduler.error', (s) => {

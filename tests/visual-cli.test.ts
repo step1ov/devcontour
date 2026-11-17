@@ -8,6 +8,7 @@ import { crc32, deflateSync } from 'node:zlib';
 import { junitSummary } from 'devcontour-harness';
 import { decodePng } from '../src/runner/png.ts';
 import { evaluateVisualRun } from '../src/runner/visual.ts';
+import { cliArgs } from './cli-command.ts';
 
 const chunk = (type: string, data: Buffer) => {
   const head = Buffer.alloc(8);
@@ -92,7 +93,7 @@ test('PNG: RGB и RGBA со всеми фильтрами строк декод�
 });
 
 const cli = (...args: string[]) =>
-  spawnSync(process.execPath, ['--import', 'tsx', 'src/cli.ts', 'visual', ...args], {
+  spawnSync(process.execPath, [...cliArgs(), 'visual', ...args], {
     encoding: 'utf8',
     timeout: 60_000,
   });

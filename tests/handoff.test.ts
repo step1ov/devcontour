@@ -42,6 +42,7 @@ import {
   type DevContourHandoff,
 } from '../src/application/handoff.ts';
 import { command } from '../src/runner/process.ts';
+import { cliCommand } from './cli-command.ts';
 
 const INTENT = 'Okapi intention: finish the payment board before the release';
 
@@ -1515,10 +1516,7 @@ test('session-handoff: CLI читает базу только для чтени�
     }
     const before = dbFingerprint(join(data, 'state.sqlite'));
     const cli = (...args: string[]) =>
-      command(
-        ['node', '--import', 'tsx', 'src/cli.ts', 'session-handoff', ...args, '--data', data],
-        process.cwd(),
-      );
+      command([...cliCommand(), 'session-handoff', ...args, '--data', data], process.cwd());
     // Каталог данных без права записи: writer базу открыть не смог бы.
     const files = (await readdir(data)).map((n) => join(data, n));
     for (const file of files) await chmod(file, 0o444);

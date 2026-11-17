@@ -9,6 +9,7 @@ import { executionOf } from '../src/harness/execution.ts';
 import { Store } from '../src/core/store.ts';
 import { git, command } from '../src/runner/process.ts';
 import { startQueue } from '../src/runner/queue-start.ts';
+import { cliCommand } from './cli-command.ts';
 
 async function workspace() {
   const root = await mkdtemp(join(tmpdir(), 'devcontour-queue-start-'));
@@ -54,7 +55,7 @@ test('queue --start при работающем сервере, который �
   try {
     serving.pause(true);
     stop = server(serving, true);
-    const cli = ['node', '--import', 'tsx', 'src/cli.ts'];
+    const cli = cliCommand();
     const started = await command([...cli, 'queue', '--start', '--data', w.data], process.cwd());
     assert.notEqual(started.code, 0, 'очередь осталась на паузе — команда не успешна');
     const result = JSON.parse(started.stdout) as {
@@ -114,7 +115,7 @@ test('queue --start из другого процесса, пока сервер 
   const w = await workspace();
   const serving = w.open();
   const other = w.open();
-  const cliArgs = ['node', '--import', 'tsx', 'src/cli.ts', 'queue', '--start', '--data', w.data];
+  const startArgs = [...cliCommand(), 'queue', '--start', '--data', w.data];
   try {
     // Сервер ведёт очередь и начал штатную остановку: пауза остановки стоит.
     serving.leader('server');
@@ -123,7 +124,7 @@ test('queue --start из другого процесса, пока сервер 
     serving.pause(true, 'shutdown');
 
     // Отдельный процесс CLI: отказ, пауза остановки осталась.
-    const refused = await command(cliArgs, process.cwd());
+    const refused = await command(startArgs, process.cwd());
     assert.notEqual(refused.code, 0);
     assert.match(refused.stdout + refused.stderr, new RegExp(SERVER_STOPPING));
     assert.equal(serving.store.read().paused, true);
@@ -137,7 +138,7 @@ test('queue --start из другого процесса, пока сервер 
       d.leader = { ...d.leader!, leaseUntil: Date.now() - 1 };
     });
     assert.equal(serverStopping(other.store, other.store.read().leader), false);
-    const afterCrash = await command(cliArgs, process.cwd());
+    const afterCrash = await command(startArgs, process.cwd());
     assert.equal(afterCrash.code, 0, afterCrash.stderr);
     assert.equal(other.store.read().paused, false);
 

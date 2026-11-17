@@ -13,7 +13,7 @@ import {
   realpathSync,
 } from 'node:fs';
 import { tmpdir } from 'node:os';
-import { join, resolve } from 'node:path';
+import { join } from 'node:path';
 import { chooseWorkspaceMode, selectedWorkspaceMode } from '../src/runner/workspace-mode.ts';
 import { startWorkspace, preparationStore } from '../src/runner/start.ts';
 import { Preparation } from '../src/core/preparation.ts';
@@ -31,6 +31,7 @@ import { acceptBoard } from '../src/runner/agent-control.ts';
 import { Workspace } from '../src/core/workspace.ts';
 import { WorkspaceRunner } from '../src/runner/workspace.ts';
 import { attachJournal } from '../src/runner/journal.ts';
+import { cliArgs } from './cli-command.ts';
 
 const git = (root: string, ...args: string[]) =>
   execFileSync('git', ['-C', root, ...args], {
@@ -76,7 +77,7 @@ test('Workspace placement is explicit before first launch, persisted on restart 
   try {
     const result = spawnSync(
       process.execPath,
-      ['--import', 'tsx', resolve('src/cli.ts'), 'start', '--workspace', repo, '--port', '0'],
+      [...cliArgs(), 'start', '--workspace', repo, '--port', '0'],
       { encoding: 'utf8' },
     );
     assert.notEqual(result.status, 0);

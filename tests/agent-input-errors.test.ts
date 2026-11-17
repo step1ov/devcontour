@@ -8,6 +8,7 @@ import { AgentService } from '../src/application/agent.ts';
 import { DomainError } from '../src/core/model.ts';
 import { command } from '../src/runner/process.ts';
 import { z, ZodError } from 'zod';
+import { cliCommand } from './cli-command.ts';
 
 const invalidPlan = {
   operation: 'plan_import',
@@ -98,7 +99,7 @@ test('agent --file с неверным plan_import печатает поля, а
     await writeFile(join(data, 'config.json'), JSON.stringify(config({ repository: repo })));
     const request = join(root, 'request.json');
     await writeFile(request, JSON.stringify(invalidPlan));
-    const cli = ['node', '--import', 'tsx', 'src/cli.ts'];
+    const cli = cliCommand();
     const result = await command(
       [...cli, 'agent', '--file', request, '--data', data],
       process.cwd(),

@@ -3,15 +3,15 @@ import assert from 'node:assert/strict';
 import { execFileSync, spawnSync } from 'node:child_process';
 import { mkdirSync, mkdtempSync, realpathSync, rmSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
-import { join, resolve } from 'node:path';
+import { join } from 'node:path';
 import { DatabaseSync } from 'node:sqlite';
 import { Preparation } from '../src/core/preparation.ts';
 import { Store } from '../src/core/store.ts';
 import { preparationStore, startWorkspace } from '../src/runner/start.ts';
 import { approveStage, architecture, product } from './preparation-fixture.ts';
 import { withTestHome } from './helpers.ts';
+import { cliArgs } from './cli-command.ts';
 
-const cli = resolve('src/cli.ts');
 const env = {
   ...process.env,
   GIT_AUTHOR_NAME: 'Quick Test',
@@ -116,14 +116,14 @@ test('agent preparation_* и setup --change --plan работают, пока с
       const started = Date.now();
       const agent = spawnSync(
         process.execPath,
-        ['--import', 'tsx', cli, 'agent', '--file', request, '--workspace', root],
+        [...cliArgs(), 'agent', '--file', request, '--workspace', root],
         { encoding: 'utf8', env: process.env },
       );
       assert.equal(agent.status, 0, agent.stderr);
       assert.ok(Date.now() - started < 15000, 'команда не ждёт блокировку базы');
       const plan = spawnSync(
         process.execPath,
-        ['--import', 'tsx', cli, 'setup', '--change', changeId, '--workspace', root, '--plan'],
+        [...cliArgs(), 'setup', '--change', changeId, '--workspace', root, '--plan'],
         { encoding: 'utf8', env: process.env },
       );
       assert.equal(plan.status, 0, plan.stderr);

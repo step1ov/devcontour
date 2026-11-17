@@ -17,7 +17,7 @@ import {
   writeFileSync,
 } from 'node:fs';
 import { tmpdir } from 'node:os';
-import { join, resolve } from 'node:path';
+import { join } from 'node:path';
 import { Preparation, validatePreparation } from '../src/core/preparation.ts';
 import { preparationStore, startWorkspace } from '../src/runner/start.ts';
 import { chooseWorkspaceMode } from '../src/runner/workspace-mode.ts';
@@ -34,8 +34,8 @@ import {
 import { loadConfig } from '../src/runner/config.ts';
 import { approvePreparation, architecture, approveStage, product } from './preparation-fixture.ts';
 import { withTestHome } from './helpers.ts';
+import { cliArgs } from './cli-command.ts';
 
-const cli = resolve('src/cli.ts');
 const env = {
   ...process.env,
   GIT_AUTHOR_NAME: 'Quick Test',
@@ -434,7 +434,7 @@ test('F1: после приёма поручения quick-facts не выдаё
       const cliFacts = () => {
         const run = spawnSync(
           process.execPath,
-          ['--import', 'tsx', cli, 'quick-facts', '--repository', root, '--workspace', root],
+          [...cliArgs(), 'quick-facts', '--repository', root, '--workspace', root],
           { encoding: 'utf8', env: process.env },
         );
         assert.equal(run.status, 0, run.stderr);
@@ -567,7 +567,7 @@ test('D01-C: setup --change отклоняется до согласований
       chmodSync(join(root, '.devcontour-local', 'state.sqlite'), 0o444);
       const cliFacts = spawnSync(
         process.execPath,
-        ['--import', 'tsx', cli, 'quick-facts', '--repository', root, '--workspace', root],
+        [...cliArgs(), 'quick-facts', '--repository', root, '--workspace', root],
         { encoding: 'utf8', env: process.env },
       );
       assert.equal(cliFacts.status, 0, cliFacts.stderr);
@@ -610,7 +610,7 @@ test('D01-C: setup --change отклоняется до согласований
       const setup = (...extra: string[]) =>
         spawnSync(
           process.execPath,
-          ['--import', 'tsx', cli, 'setup', '--change', changeId, '--workspace', root, ...extra],
+          [...cliArgs(), 'setup', '--change', changeId, '--workspace', root, ...extra],
           { encoding: 'utf8', env: process.env },
         );
       const early = setup();
@@ -748,18 +748,7 @@ test('D01-C: setup --change проверяет согласования назв
       const run = () =>
         spawnSync(
           process.execPath,
-          [
-            '--import',
-            'tsx',
-            cli,
-            'setup',
-            '--change',
-            quick,
-            '--proposal',
-            digest,
-            '--workspace',
-            root,
-          ],
+          [...cliArgs(), 'setup', '--change', quick, '--proposal', digest, '--workspace', root],
           { encoding: 'utf8', env: process.env },
         );
       const refused = run();
@@ -914,18 +903,7 @@ test('D01-C: setup --change — неактивное изменение и но�
       const run = () =>
         spawnSync(
           process.execPath,
-          [
-            '--import',
-            'tsx',
-            cli,
-            'setup',
-            '--change',
-            quick,
-            '--proposal',
-            digest,
-            '--workspace',
-            root,
-          ],
+          [...cliArgs(), 'setup', '--change', quick, '--proposal', digest, '--workspace', root],
           { encoding: 'utf8', env: process.env },
         );
       // Согласовано, но активно другое изменение.

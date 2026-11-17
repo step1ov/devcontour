@@ -30,6 +30,7 @@ import { harnessVersion } from '../src/harness/index.ts';
 import { dataDoctor, doctor, doctorState, engineCheck } from '../src/runner/doctor.ts';
 import { config, fixture, input } from './helpers.ts';
 import { repositorySchema } from '../src/core/model.ts';
+import { cliArgs } from './cli-command.ts';
 
 const hash = (file: string) => createHash('sha256').update(readFileSync(file)).digest('hex');
 
@@ -327,7 +328,7 @@ test('doctor --scope data (CLI) не печатает предупреждени
     writeFileSync(join(f.root, 'config.json'), JSON.stringify(config()));
     const r = spawnSync(
       process.execPath,
-      ['--import', 'tsx', 'src/cli.ts', 'doctor', '--scope', 'data', '--data', f.root],
+      [...cliArgs(), 'doctor', '--scope', 'data', '--data', f.root],
       { encoding: 'utf8' },
     );
     assert.equal(r.status, 0, r.stderr);
@@ -353,11 +354,9 @@ test('Полный doctor (CLI) читает базу только для чте
       [],
     );
     const hashed = hash(f.file);
-    const r = spawnSync(
-      process.execPath,
-      ['--import', 'tsx', 'src/cli.ts', 'doctor', '--data', f.root],
-      { encoding: 'utf8' },
-    );
+    const r = spawnSync(process.execPath, [...cliArgs(), 'doctor', '--data', f.root], {
+      encoding: 'utf8',
+    });
     const result = JSON.parse(r.stdout) as { checks: { id: string; status: string }[] };
     assert.equal(
       result.checks.find((c) => c.id === 'engine')?.status,

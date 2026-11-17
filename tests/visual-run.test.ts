@@ -29,6 +29,7 @@ import {
 } from '../src/runner/visual-broker.ts';
 import { hitAt, visualRun } from '../src/runner/visual-run.ts';
 import { config } from './helpers.ts';
+import { cliArgs } from './cli-command.ts';
 
 // --- PNG без зависимостей: фильтр 0, RGB -------------------------------------
 const chunk = (type: string, data: Buffer) => {
@@ -645,22 +646,12 @@ test('Конфигурация: gate визуальной приёмки с arti
 test('CLI visual run: без ресурсов gate — JUnit с ошибкой окружения и код 75; broker — честный отказ', () => {
   const cwd = workspace();
   const cli = (...args: string[]) =>
-    spawnSync(
-      process.execPath,
-      [
-        '--import',
-        import.meta.resolve('tsx'),
-        join(import.meta.dirname, '..', 'src', 'cli.ts'),
-        'visual',
-        ...args,
-      ],
-      {
-        cwd,
-        encoding: 'utf8',
-        timeout: 60_000,
-        env: { ...process.env, DEVCONTOUR_RESOURCES_JSON: '' },
-      },
-    );
+    spawnSync(process.execPath, [...cliArgs(), 'visual', ...args], {
+      cwd,
+      encoding: 'utf8',
+      timeout: 60_000,
+      env: { ...process.env, DEVCONTOUR_RESOURCES_JSON: '' },
+    });
   const result = cli('run', '--spec', 'contracts/ui.json');
   assert.equal(result.status, 75, result.stderr);
   const xml = readFileSync(join(cwd, '.reports', 'visual.xml'), 'utf8');

@@ -31,6 +31,7 @@ import { LEAD_QUIET_MS } from '../src/runner/quick.ts';
 import { command } from '../src/runner/process.ts';
 import { preparationFixture } from './attention-fixture.ts';
 import { config, fixture } from './helpers.ts';
+import { cliCommand } from './cli-command.ts';
 
 const minutes = (n: number) => n * 60_000;
 
@@ -159,11 +160,7 @@ test('CLI session-handoff отмечает обращение ведущего; 
       h.store.close();
     }
     const store = { file: join(data, 'state.sqlite') };
-    const cli = () =>
-      command(
-        ['node', '--import', 'tsx', 'src/cli.ts', 'session-handoff', '--data', data],
-        process.cwd(),
-      );
+    const cli = () => command([...cliCommand(), 'session-handoff', '--data', data], process.cwd());
     assert.equal(leadActivityMark(store), null);
     // Байты базы и файлов её журнала до и после пакета.
     const database = () =>

@@ -3,7 +3,7 @@ import assert from 'node:assert/strict';
 import { execFileSync } from 'node:child_process';
 import { mkdirSync, mkdtempSync, rmSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
-import { join, resolve } from 'node:path';
+import { join } from 'node:path';
 import { config } from './helpers.ts';
 import {
   budgetChecks,
@@ -17,6 +17,7 @@ import { Store } from '../src/core/store.ts';
 import type { Config } from '../src/core/model.ts';
 import { loadConfig } from '../src/runner/config.ts';
 import { command } from '../src/runner/process.ts';
+import { cliCommand } from './cli-command.ts';
 
 const now = Date.parse('2026-11-01T00:00:00Z');
 const price = (model: string, effectiveAt = '2026-10-01T00:00:00Z') => ({
@@ -415,10 +416,7 @@ test('doctor CLI reads the applied keys the server recorded and names config-app
     await scheduler.tick();
     const doctorCli = async (edit: Record<string, unknown>) => {
       writeFileSync(file, JSON.stringify({ ...base, ...edit }));
-      const result = await command(
-        ['node', '--import', 'tsx', resolve('src/cli.ts'), 'doctor', '--data', data],
-        process.cwd(),
-      );
+      const result = await command([...cliCommand(), 'doctor', '--data', data], process.cwd());
       const checks = byId(
         (JSON.parse(result.stdout) as { checks: { id: string; status: string; detail: string }[] })
           .checks,

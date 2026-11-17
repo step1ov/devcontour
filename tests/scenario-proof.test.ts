@@ -6,6 +6,7 @@ import { specDigest } from '../src/core/service.ts';
 import { command } from '../src/runner/process.ts';
 import { SCENARIO_PROOF, type ScenarioProof } from '../src/runner/scenario-proof.ts';
 import { fixture, map, releaseScenario, sceneProof } from './product-fixture.ts';
+import { cliCommand } from './cli-command.ts';
 
 const reason = 'The accepted policy test already checks this client behaviour';
 type Fixture = Awaited<ReturnType<typeof fixture>>;
@@ -31,10 +32,7 @@ const taskOf = (f: Fixture, repositoryId: string) =>
 const cliProve = (f: Fixture, taskId: string) =>
   command(
     [
-      process.execPath,
-      '--import',
-      'tsx',
-      'src/cli.ts',
+      ...cliCommand(),
       'scenario-proof',
       '--task',
       taskId,

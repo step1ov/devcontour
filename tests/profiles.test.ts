@@ -25,6 +25,7 @@ import { Store } from '../src/core/store.ts';
 import { Scheduler } from '../src/runner/scheduler.ts';
 import { adapters, type AgentRequest } from '../src/runner/adapters.ts';
 import { input } from './helpers.ts';
+import { cliCommand } from './cli-command.ts';
 
 const testGate = {
   id: 'tests',
@@ -89,10 +90,7 @@ test('Local profiles compose stack/checks/environment read-only and keep legacy 
     );
     const shown = await command(
       [
-        process.execPath,
-        '--import',
-        'tsx',
-        'src/cli.ts',
+        ...cliCommand(),
         'profile-show',
         '--repository',
         f.repo,

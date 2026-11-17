@@ -25,6 +25,7 @@ import { holdSensitiveBaseMove } from '../src/runner/base-check.ts';
 import { AgentService } from '../src/application/agent.ts';
 import { queueStopOf } from '../src/application/queue-stop.ts';
 import { HELD_BASE_ACTION } from '../src/core/work-status.ts';
+import { cliCommand } from './cli-command.ts';
 
 const demos = demoPool(testDemo);
 after(() => demos.close());
@@ -727,7 +728,7 @@ test('queue --start --by host не снимает удержанный пере�
     setup.store.close();
   }
   try {
-    const cli = ['node', '--import', 'tsx', 'src/cli.ts', 'queue', '--start'];
+    const cli = [...cliCommand(), 'queue', '--start'];
     const asLead = await command([...cli, '--by', 'host', '--data', root], process.cwd());
     assert.notEqual(asLead.code, 0, asLead.stdout);
     assert.match(asLead.stdout + asLead.stderr, /Подтвердить и запустить/);

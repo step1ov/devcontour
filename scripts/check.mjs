@@ -41,6 +41,11 @@ const release = [
 ];
 // The step that streams unprefixed when it runs beside others.
 const live = 'test';
+// Steps that start the CLI from lib/ instead of src/ through tsx
+// (tests/cli-command.ts): build:lib ran in an earlier stage of the release
+// check, and the built CLI starts about 0.17 s sooner on each of the suite's
+// hundreds of CLI runs. check:fast does not build, so its tests keep tsx.
+const builtCli = new Set(['test']);
 const fast = [[['lint'], ['typecheck']], [['test:affected']]];
 
 const args = process.argv.slice(2);
@@ -132,6 +137,7 @@ function step(name, rest, mode) {
     const child = processes.spawn(command, argv, {
       cwd: new URL('../', import.meta.url),
       stdio: mode === 'inherit' ? 'inherit' : ['ignore', 'pipe', 'pipe'],
+      ...(builtCli.has(name) ? { env: { ...process.env, DEVCONTOUR_TEST_CLI: 'lib' } } : {}),
     });
     if (!child) return resolve(false);
     // A held-back section keeps stdout and stderr chunks in arrival order.

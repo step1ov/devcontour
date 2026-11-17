@@ -36,6 +36,7 @@ import type { AgentRequest } from '../src/runner/adapters.ts';
 import { AgentService, capabilities } from '../src/application/agent.ts';
 import { serve } from '../src/server/http.ts';
 import { Scheduler } from '../src/runner/scheduler.ts';
+import { cliCommand } from './cli-command.ts';
 
 const TITLE = 'Zebra private title';
 const RESET_REASON = 'Okapi reset reason after diagnosis';
@@ -191,8 +192,7 @@ function headline(report: ValueReport, id: string) {
 const configOf = async (data: string) =>
   configSchema.parse(JSON.parse(await readFile(join(data, 'config.json'), 'utf8')));
 
-const cli = (...args: string[]) =>
-  command(['node', '--import', 'tsx', 'src/cli.ts', 'report', ...args], process.cwd());
+const cli = (...args: string[]) => command([...cliCommand(), 'report', ...args], process.cwd());
 
 /** Удаление только созданного здесь временного каталога. */
 async function removeFixture(root: string) {
