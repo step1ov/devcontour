@@ -88,6 +88,15 @@ export const leadLiftsPause = (
   state: Pick<DevContourState, 'paused' | 'pauseReason' | 'pausedAt' | 'pauseActor' | 'waits'>,
 ) => pausedByLead(state) && !state.waits?.some((w) => w.kind === 'base-check');
 
+/**
+ * Действие при ожидании проверки базы в режиме агента без идущего задания
+ * доски: базу проверяет цикл workflow, а не ведущий. Снятие паузы ведущим
+ * (`queue_set`, `queue --start --by host`) сняло бы ожидание без gates —
+ * `pause` отказывает. Ручной маршрут — запуск оператора после проверки.
+ */
+export const BASE_WAIT_ACTION =
+  'Базу проверит workflow доски: зарегистрируйте доску через workflow_start (идущее задание проверит её само) — его цикл исполнит gates на новой базе и продолжит выдачу. Ведущий агент ожидание сам не снимает: queue_set и queue --start --by host откажут; на ручном маршруте — devcontour queue --start оператора после проверки базы gates';
+
 /** Действие при удержанном переносе базы: подтверждает оператор в «Внимании». */
 export const HELD_BASE_ACTION =
   'Перенос подтверждает оператор: «Подтвердить и запустить» в «Внимании» панели (на ручном маршруте — devcontour queue --start оператора); ведущий агент это ожидание и паузу сам не снимает';
@@ -179,17 +188,26 @@ export function queueStopView(
     if (wait) {
       const checkFailed = wait.startsWith('Проверка базы не пройдена');
       const held = !!heldBaseOf(state);
+      // В режиме агента ожидание проверяет цикл задания доски, а не
+      // ведущий: «проверьте базу и queue --start» читалось бы как разрешение
+      // снять ожидание без gates (такое снятие ведущим `pause` отклоняет).
+      const byWorkflow = reason === 'base-check' && agent;
       return [
         wait,
         held
           ? HELD_BASE_ACTION
-          : reason === 'base-check' && agent && options.workflowActive
-            ? checkFailed
-              ? 'Исправьте базу и выполните devcontour base-update (ведущий агент — с --by host) — цикл ведущего проверит её снова'
-              : 'Цикл ведущего проверит базу gates и продолжит выдачу сам'
-            : 'Проверьте базу gates, затем выполните ' +
-              start +
-              (reason === 'operator' ? ` — он снимет и ${pauser}, и ожидание` : ''),
+          : byWorkflow && checkFailed
+            ? 'Исправьте базу и выполните devcontour base-update (ведущий агент — с --by host) — ' +
+              (options.workflowActive
+                ? 'цикл ведущего проверит её снова'
+                : 'workflow доски (workflow_start) проверит её снова')
+            : byWorkflow
+              ? options.workflowActive
+                ? 'Цикл ведущего проверит базу gates и продолжит выдачу сам'
+                : BASE_WAIT_ACTION
+              : 'Проверьте базу gates, затем выполните ' +
+                start +
+                (reason === 'operator' ? ` — он снимет и ${pauser}, и ожидание` : ''),
         false,
       ];
     }

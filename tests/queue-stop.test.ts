@@ -87,7 +87,8 @@ test('Остановка очереди одинакова во всех отв�
     assert.equal(baseCheck.reason, 'base-check');
     assert.equal(baseCheck.failed, undefined);
     assert.match(baseCheck.stopReason ?? '', /^База прогонов перенесена \(main\)/);
-    assert.equal(baseCheck.action, 'Проверьте базу gates, затем выполните ' + START);
+    // Режим агента без задания доски: базу проверит workflow, не ведущий.
+    assert.match(baseCheck.action ?? '', /^Базу проверит workflow доски: .*workflow_start/);
     assert.ok(baseCheck.since, 'время остановки известно');
 
     // Пауза человека не выдаёт прежний сбой за причину.
@@ -539,6 +540,60 @@ test('Удержанный перенос базы: действие — под�
       assert.match(view.action ?? '', /«Подтвердить и запустить» в «Внимании»/);
       assert.doesNotMatch(view.action ?? '', /^Проверьте базу gates, затем выполните/);
     }
+  } finally {
+    f.cleanup();
+  }
+});
+
+test('Ожидание проверки базы в режиме агента: подсказка — workflow доски, а снять его ведущий не может', async () => {
+  const f = fixture();
+  try {
+    const { BASE_WAIT_ACTION } = await import('../src/core/work-status.ts');
+    const { queueStopOf } = await import('../src/application/queue-stop.ts');
+    const agent = new AgentService(f.h, f.root);
+    const waiting = () => {
+      const s = f.h.store.read();
+      return s.paused && s.waits?.some((w) => w.kind === 'base-check');
+    };
+    // Перенос на остановленной очереди (сбой такта), как после base-update.
+    f.h.pause(false);
+    f.h.store.change('fixture', (s) => {
+      s.paused = true;
+      return {};
+    });
+    f.h.baseUpdated([{ repositoryId: 'main', from: 'a', to: 'b' }]);
+    assert.equal(f.h.store.read().pauseReason, 'base-check');
+    // Задания доски нет: базу проверит workflow, а не «queue --start» ведущего.
+    const view = queueStopOf(f.h);
+    assert.equal(view.action, BASE_WAIT_ACTION);
+    assert.doesNotMatch(view.action ?? '', /^Проверьте базу gates, затем выполните/);
+
+    // Снятие паузы ведущим сняло бы ожидание без gates — отказ.
+    await assert.rejects(
+      agent.run({ operation: 'queue_set', input: { paused: false } }),
+      /^Error: Очередь не продолжена: выдача ждёт проверки перенесённой базы gates.*workflow_start/,
+    );
+    assert.ok(waiting(), 'ожидание осталось');
+
+    // Пауза ведущего поверх ожидания: снимается пауза, ожидание остаётся.
+    await agent.run({ operation: 'queue_set', input: { paused: true } });
+    assert.equal(f.h.store.read().pauseReason, 'operator');
+    const lifted = (await agent.run({ operation: 'queue_set', input: { paused: false } })) as {
+      queue: QueueStopView;
+    };
+    assert.equal(lifted.queue.reason, 'base-check');
+    assert.ok(waiting(), 'ожидание осталось');
+
+    // Режим оператора: отказ называет запуск оператора; сам запуск человеком
+    // после проверки базы — штатный маршрут.
+    f.h.config.approvalMode = 'operator';
+    assert.throws(
+      () => f.h.pause(false, 'operator', 'lead'),
+      /ожидание снимает оператор: devcontour queue --start/,
+    );
+    f.h.pause(false);
+    assert.equal(f.h.store.read().paused, false);
+    assert.equal(f.h.store.read().waits, undefined);
   } finally {
     f.cleanup();
   }

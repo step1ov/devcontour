@@ -219,7 +219,8 @@ test('Экран этапа называет последнюю причину �
     const waiting = await read();
     assert.equal(waiting?.reason, 'base-check');
     assert.doesNotMatch(waiting?.stopReason ?? '', /base-update|отстала/);
-    assert.equal(waiting?.action, 'Проверьте базу gates, затем выполните devcontour queue --start');
+    // Режим агента без задания доски: базу проверит workflow, не ведущий.
+    assert.match(waiting?.action ?? '', /^Базу проверит workflow доски: .*workflow_start/);
     assert.equal(f.h.store.events()[0]?.type, 'base.updated');
     f.h.pause(false);
     f.h.store.change('scheduler.error', (s) => {
