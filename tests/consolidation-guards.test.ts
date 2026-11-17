@@ -108,15 +108,15 @@ test('F49 #6: the empty-heading exemption is per occurrence, not per heading tex
   assert.deepEqual(mappingGaps(old, next, 'A → A\nB → B'), ['«Notes»']);
 });
 
-test('F49 #7: one line that names every rule of the document is not a mapping', () => {
+test('F49 #7: one line over a whole flat document passes only while its target still defines every rule', () => {
   const old = '# Spec\n\nREQ-1. A.\n\nREQ-2. B.\n\nREQ-3. C.\n\nREQ-4. D long text here.\n';
   const next = '# Spec\n\nREQ-1. A.\n\nREQ-2. B.\n\nREQ-3. C.\n\nREQ-4. D.\n';
-  assert.deepEqual(mappingGaps(old, next, 'Spec, REQ-1, REQ-2, REQ-3, REQ-4 → Spec'), [
-    'REQ-1',
-    'REQ-2',
-    'REQ-3',
-    'REQ-4',
-    '«Spec»',
+  const bulk = 'Spec, REQ-1, REQ-2, REQ-3, REQ-4 → Spec';
+  assert.deepEqual(mappingGaps(old, next, bulk), []);
+  // Свёрнутый в упоминания документ той же строкой не проходит.
+  assert.deepEqual(mappingGaps(old, '# Spec\n\nREQ-1. A. REQ-2 REQ-3 REQ-4\n', bulk), [
+    'REQ-2 (в новом тексте не определено)',
+    'REQ-3 (в новом тексте не определено)',
+    'REQ-4 (в новом тексте не определено)',
   ]);
-  assert.deepEqual(mappingGaps(old, next, 'Spec, REQ-1, REQ-2 → Spec\nREQ-3, REQ-4 → Spec'), []);
 });

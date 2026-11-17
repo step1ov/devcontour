@@ -252,14 +252,14 @@ test('F20 R3-L1/L2: one bulk line is not a mapping, identity lines are, and Mark
     ),
     ['«Prices»', '«Listing»'],
   );
-  // Все правила документа в одной строке — не отображение.
+  // Все правила в одной строке: цель Listing определяет REQ-2 и REQ-3, но не REQ-1.
   assert.deepEqual(
     mappingGaps(
       AMENDED,
       CONSOLIDATED,
       'Catalog → Catalog\nPrices → Prices\nListing → Listing\nREQ-1, REQ-2, REQ-3 → Listing',
     ),
-    ['REQ-1', 'REQ-2', 'REQ-3'],
+    ['REQ-1'],
   );
   // Два ID на одну цель: раздел Listing определяет REQ-2 и REQ-3, но не REQ-1.
   assert.deepEqual(

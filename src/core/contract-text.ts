@@ -150,9 +150,12 @@ function leadIds(start: string) {
  *   таблицы, цитаты или элемента HTML (`<li>`, `<td>`, `<p>`, `<dt>`), — ID
  *   или список ID с разделителем следом (`REQ-1. …`, `- REQ-1, REQ-2: …`,
  *   `| Orders | REQ-3: … |`, `| REQ-4 |`) или в обёртке (`**REQ-5** …`,
- *   `(REQ-6) …`, `[REQ-7] …`). Ячейка таблицы — запись строки: ID в её
- *   начале с разделителем или во всю ячейку называет правило строки, а
- *   ячейка-перечень вроде `REQ-5 (TC-01), REQ-6` — ссылки;
+ *   `(REQ-6) …`, `[REQ-7] …`). Ячейка таблицы (Markdown или `<td>`) —
+ *   запись строки: ID в её начале с разделителем или во всю ячейку называет
+ *   правило строки, а ячейка-перечень вроде `REQ-5 (TC-01), REQ-6` —
+ *   ссылки. Строка, которая связывает ID, правила не определяет: две ячейки
+ *   начинаются с ID (матрица `| TC-01 | REQ-1 |`) или другая ячейка называет
+ *   правило, определённое вне таблиц (журнал `| DEC-040 | REQ-1 changed |`);
  * - 1 — метка в тексте: ID с точкой и словом следом (`…: REQ-3. The listing`)
  *   или полужирная метка с разделителем (`**REQ-7**: …`).
  *
@@ -174,6 +177,7 @@ export function definitions(text: string) {
     new RegExp(`(?:\\*\\*|__)(${RULE_LIST})(?:\\*\\*|__)\\s*[:.—–]`, 'gu'),
     new RegExp(`(?:\\*\\*|__)(${RULE_LIST})[.:](?:\\*\\*|__)`, 'gu'),
   ];
+  const rows: string[][] = [];
   let fence: string | undefined;
   let previous = '';
   for (const line of text.split('\n')) {
@@ -205,20 +209,35 @@ export function definitions(text: string) {
     const item = /^\s*(?:[-*+]|\d+[.)])\s+(?:\[[ xX]\]\s+)?(.*)$/.exec(bare)?.[1];
     const starts: string[] = [];
     if (/^\s*\|/.test(bare))
-      starts.push(
-        ...bare
+      rows.push(
+        bare
           .trim()
           .replace(/^\||\|$/g, '')
           .split(/(?<!\\)\|/),
       );
     else if (item !== undefined) starts.push(item);
     else if (!previous.trim()) starts.push(bare);
-    for (const m of bare.matchAll(/<(?:li|td|th|p|dt|dd)\b[^>]*>/gi))
-      starts.push(bare.slice(m.index + m[0].length));
-    for (const start of starts) define(leadIds(start.replace(/^(?:\s*<[a-z][^>]*>)+/i, '')), 2);
+    // Элементы HTML: текст элемента до следующего тега; ячейки — запись строки.
+    const cells = [...bare.matchAll(/<t[dh]\b[^>]*>([^<]*)/gi)].map((m) => m[1]);
+    if (cells.length) rows.push(cells);
+    for (const m of bare.matchAll(/<(?:li|p|dt|dd)\b[^>]*>([^<]*)/gi)) starts.push(m[1]);
+    for (const start of starts) define(leadIds(start), 2);
     for (const pattern of inline)
       for (const m of line.matchAll(pattern)) define(ruleTokens(m[1]), 1);
     previous = bare;
+  }
+  // Строка таблицы, которая связывает ID, правила не определяет: две ячейки
+  // начинаются с ID (матрица `| TC-01 | REQ-1 |`) или другая ячейка называет
+  // правило, определённое вне таблиц (журнал `| DEC-040 | REQ-1 changed |`).
+  const elsewhere = new Set(out.keys());
+  for (const row of rows) {
+    const ids = row.map(leadIds);
+    if (ids.filter((x) => x.length).length > 1) continue;
+    ids.forEach((own, i) => {
+      if (!own.length) return;
+      const others = ruleTokens(row.filter((_, j) => j !== i).join(' '));
+      if (!others.some((id) => elsewhere.has(id))) define(own, 2);
+    });
   }
   return out;
 }

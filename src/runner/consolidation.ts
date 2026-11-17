@@ -125,7 +125,7 @@ const names = (side: string, h: ReturnType<typeof headingName>) =>
  * без стрелок, ссылка в никуда, одна строка на несколько заголовков или на
  * все правила и совпадение по части слова отображением не считаются.
  */
-export function mappingGaps(previous: string, next: string, summary: string) {
+export function mappingCheck(previous: string, next: string, summary: string) {
   const newIds = new Set(ruleTokens(next));
   const defined = definitions(previous);
   const oldIds = ruleTokens(previous);
@@ -162,6 +162,8 @@ export function mappingGaps(previous: string, next: string, summary: string) {
       : parts.filter((p) => p.ids.has(id));
   };
   const covered = { ids: new Set<string>(), heads: new Set<string>() };
+  const merges: { id: string; into: string }[] = [];
+  const demoted: string[] = [];
   const pairs = summary.split('\n').flatMap((raw) => {
     const line = plain(raw);
     const arrows = line.match(/→|->/gu)?.length ?? 0;
@@ -173,9 +175,18 @@ export function mappingGaps(previous: string, next: string, summary: string) {
     const [, left, right] = m;
     const heads = oldHeads.filter((h) => names(left, h));
     if (heads.length > 1) continue;
-    // Одна строка на все правила документа — не отображение.
     const named = new Set(ruleTokens(left));
-    if (rules.length > 1 && rules.every((id) => named.has(id))) continue;
+    // `ID → reference`: ID помечен в старом тексте, но правилом документа не
+    // был (запись журнала, сценарий теста, решение) и стоит в новом тексте
+    // дословно. Строку ревьюер подтверждает одобрением; попытка её называет.
+    if (/^\s*(?:reference|ссылка)(?!\p{L})/iu.test(right)) {
+      for (const id of named)
+        if (defined.has(id) && newIds.has(id) && !covered.ids.has(id)) {
+          covered.ids.add(id);
+          demoted.push(id);
+        }
+      continue;
+    }
     const targets = [
       ...new Set([
         ...ruleTokens(right)
@@ -189,16 +200,21 @@ export function mappingGaps(previous: string, next: string, summary: string) {
       ]),
     ];
     if (!targets.length) continue;
-    // Слияние называется явно: «merged into REQ-1» или «слито в REQ-1», и
-    // REQ-1 определён в новом тексте; его раздел держит слитый ID.
-    const into = /(?:merged into|слито в)\s+([^\s,;()]+)/iu.exec(right)?.[1];
-    const merged = ruleTokens(into ?? '')
-      .filter((id) => newDefined.has(id))
-      .flatMap(strongest);
+    // Слияние называется явно в начале правой части: «merged into REQ-1» или
+    // «слито в REQ-1», и REQ-1 определён в новом тексте; его раздел держит
+    // слитый ID.
+    const into = ruleTokens(
+      /^\s*(?:merged into|слито в)\s+([^\s,;()]+)/iu.exec(right)?.[1] ?? '',
+    ).find((id) => newDefined.has(id));
+    const merged = into ? strongest(into) : [];
     // ID отображён, если цель его определяет (не просто упоминает) или он
     // слит в определённый ID.
-    const holds = (id: string) =>
-      targets.some((t) => t.defines.has(id)) || merged.some((t) => t.ids.has(id));
+    const holds = (id: string) => {
+      if (targets.some((t) => t.defines.has(id))) return true;
+      if (!merged.some((t) => t.ids.has(id))) return false;
+      if (!merges.some((x) => x.id === id)) merges.push({ id, into: into! });
+      return true;
+    };
     for (const h of heads) covered.heads.add(h.text);
     // Раздел, названный меткой (`ORD-04`), — как его ID.
     for (const h of oldHeads)
@@ -209,7 +225,7 @@ export function mappingGaps(previous: string, next: string, summary: string) {
       }
     for (const id of named) if (holds(id)) covered.ids.add(id);
   }
-  return [
+  const gaps = [
     ...new Set([
       ...rules
         .filter((id) => !covered.ids.has(id))
@@ -218,6 +234,12 @@ export function mappingGaps(previous: string, next: string, summary: string) {
       ...oldHeads.filter((h) => !covered.heads.has(h.text)).map((h) => `«${h.text}»`),
     ]),
   ];
+  return { gaps, merged: merges, demoted };
+}
+
+/** Пропуски отображения (см. `mappingCheck`). */
+export function mappingGaps(previous: string, next: string, summary: string) {
+  return mappingCheck(previous, next, summary).gaps;
 }
 
 /** «пропуск», «пропуска», «пропусков» по числу. */
@@ -450,7 +472,20 @@ export async function reviewConsolidation(
   const attempt = (h.store.read().contractAttempts ?? []).find(
     (a) => a.artifact === approval.artifact,
   );
-  const gaps = mappingGaps(plan.current.content, plan.content, attempt?.summary ?? '');
+  const { gaps, merged, demoted } = mappingCheck(
+    plan.current.content,
+    plan.content,
+    attempt?.summary ?? '',
+  );
+  // Слияния и ID, отображённые ссылкой, держатся только на ревьюере: попытка
+  // называет их, чтобы ведущий видел «REQ-2 слито в REQ-1».
+  if (merged.length || demoted.length)
+    h.store.change('contract.review', (s) => {
+      const a = s.contractAttempts?.find((x) => x.artifact === approval.artifact);
+      if (!a) return;
+      if (merged.length) a.merged = merged;
+      if (demoted.length) a.demoted = demoted;
+    });
   if (gaps.length) {
     // Одобрение смысла с неполным отображением — не отказ по смыслу: раунд
     // записывается исходом `incomplete-mapping` с полным списком пропусков,

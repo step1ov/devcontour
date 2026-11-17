@@ -797,6 +797,13 @@ export interface ContractAttempt {
    */
   outcome?: 'incomplete-mapping';
   gaps?: string[];
+  /**
+   * Сверка отображения консолидации: правила, слитые в другие
+   * (`merged into`), и помеченные ID, отображённые ссылкой (`→ reference`).
+   * Их держит только суждение ревьюера.
+   */
+  merged?: { id: string; into: string }[];
+  demoted?: string[];
   artifact: string;
   authorRuntime: string;
   reviewerRuntime: string;
