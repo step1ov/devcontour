@@ -60,6 +60,7 @@ import {
   type Contract,
   type ContractArtifact,
   type Task,
+  type TaskStatus,
   type TaskInput,
   type Board,
   type DevContourState,
@@ -596,6 +597,7 @@ function activeRevision(s: DevContourState, id: string) {
  * То, что ревьюер видел о зависимости вне предложения: постановка, статус,
  * гейты и принятый SHA. Гейты в specDigest не входят — они часть политики, —
  * но ревьюер их видел, и их смена меняет то, на что опирается план.
+ * Формулу читают закрепления прежних версий: не меняйте её.
  */
 export const dependencyDigest = (t: Task) =>
   digest({ spec: specDigest(t), status: t.status, gates: t.gates, resultSha: t.resultSha });
@@ -607,6 +609,30 @@ export const contextDigest = (t: Task) =>
     resultSha: t.resultSha,
     cancelled: t.status === 'cancelled',
   });
+/** Статусы задачи, ещё идущей к результату. */
+const UNFINISHED: readonly TaskStatus[] = [
+  'draft',
+  'ready',
+  'running',
+  'verifying',
+  'reviewing',
+  'integrating',
+];
+/**
+ * Закреплённое ревью плана состояние внешней зависимости всё ещё верно (F56):
+ * совпадает с нынешним, или зависимость была незавершённой и с тех пор лишь
+ * продвинулась (другой незавершённый статус) или завершилась (`done`) по той
+ * же постановке и гейтам. Утверждение строилось на её будущем результате.
+ * Провал, отмена, а также задача, закреплённая проваленной или завершённой,
+ * сверяются точно. У незавершённой задачи принятого SHA нет: он ставится
+ * вместе с `done`, а reopen задачу с результатом не возвращает.
+ */
+const dependencyHolds = (pinned: string, t: Task) =>
+  dependencyDigest(t) === pinned ||
+  ((t.status === 'done' || UNFINISHED.includes(t.status)) &&
+    UNFINISHED.some(
+      (status) => dependencyDigest({ ...t, status, resultSha: undefined }) === pinned,
+    ));
 /**
  * Задача принятой ревизии неизменяема: следующий этап и корректировка несут
  * её как принятую работу. Вернуть её в работу (reopen, retry) значило бы
@@ -1738,7 +1764,7 @@ export class DevContour {
         (expected.revision !== r.number ||
           (expected.reason !== undefined && expected.reason !== r.reason) ||
           Object.entries(expected.dependencies ?? {}).some(
-            ([id, pinned]) => dependencyDigest(task(s, id)) !== pinned,
+            ([id, pinned]) => !dependencyHolds(pinned, task(s, id)),
           ) ||
           Object.entries(expected.context ?? {}).some(
             ([id, pinned]) => contextDigest(task(s, id)) !== pinned,
