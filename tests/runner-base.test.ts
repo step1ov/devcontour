@@ -931,6 +931,13 @@ test('Такт снимает свою остановку «база прого�
     const legacy = f.store.read();
     assert.equal(legacy.paused, true, 'без записанных вершин выдачи нет');
     assert.equal(legacy.pauseReason, 'base-check', 'остановка прежней версии — не тупик');
+    // Диапазон неизвестен: перенос удержан до подтверждения оператора, а не
+    // снимается одними gates (D42).
+    assert.match(
+      legacy.waits?.find((w) => w.kind === 'base-check')?.detail ?? '',
+      /меняет приёмку или настройку контура \(main:\(диапазон переноса неизвестен\)\)/,
+    );
+    assert.equal(legacy.baseMoves?.bases[0]?.unknown, true);
     assert.deepEqual(
       (
         f.store.events().find((e) => e.type === 'scheduler.stale-base.target-moved')?.data as {
@@ -957,18 +964,31 @@ test('Такт снимает свою остановку «база прого�
     await stop();
     const errorsBefore = f.store.events().filter((e) => e.type === 'scheduler.error').length;
     const real = scheduler.baseState.bind(scheduler);
-    scheduler.baseState = () => Promise.reject(new Error('ref удалён'));
+    // Текст сбоя несёт значение секрета окружения: в журнал — под маской.
+    const environment = f.h.config.environment;
+    process.env.DC_PROBE_SECRET = 'probe-secret-value-7f3a';
+    f.h.config.environment = {
+      inherit: environment?.inherit ?? [],
+      values: environment?.values ?? {},
+      secrets: { ...environment?.secrets, PROBE_TOKEN: 'DC_PROBE_SECRET' },
+    };
+    scheduler.baseState = () => Promise.reject(new Error('ref удалён probe-secret-value-7f3a'));
     try {
       await scheduler.tick();
       await scheduler.tick();
     } finally {
       scheduler.baseState = real;
+      f.h.config.environment = environment;
+      delete process.env.DC_PROBE_SECRET;
     }
     const failedProbes = f.store
       .events()
       .filter((e) => e.type === 'scheduler.stale-base.probe-failed')
       .map((e) => e.data as { pausedAt: string; error: string });
-    assert.deepEqual(failedProbes, [{ pausedAt: f.store.read().pausedAt!, error: 'ref удалён' }]);
+    assert.equal(failedProbes.length, 1);
+    assert.equal(failedProbes[0].pausedAt, f.store.read().pausedAt);
+    assert.match(failedProbes[0].error, /^ref удалён /);
+    assert.doesNotMatch(failedProbes[0].error, /probe-secret-value-7f3a/);
     assert.equal(
       f.store.events().filter((e) => e.type === 'scheduler.error').length,
       errorsBefore,

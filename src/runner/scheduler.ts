@@ -11,6 +11,7 @@ import { join } from 'node:path';
 import { HarnessError, Runner, fencedRefMove } from 'devcontour-harness';
 import { DevContour, waitBaseCheck } from '../core/service.ts';
 import { readBases, settleStaleBaseStop } from './stale-base.ts';
+import { handoffRedactor } from '../application/handoff.ts';
 import { repository, repositories } from '../core/repositories.ts';
 import { validateWorkflow } from '../core/workflow.ts';
 import { TaskFailure } from '../core/failure.ts';
@@ -327,7 +328,12 @@ export class Scheduler {
         this.h.store.atomic(() =>
           this.h.store.appendEvent('scheduler.stale-base.probe-failed', {
             pausedAt: since,
-            error: error instanceof Error ? error.message : String(error),
+            // Текст git может нести значения окружения: та же маска, что у
+            // пакета ведущего и центра внимания.
+            error: handoffRedactor(
+              this.h.config,
+              executionOf(this.h).engine.policy,
+            )(error instanceof Error ? error.message : String(error)),
           }),
         );
     }
