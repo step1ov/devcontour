@@ -14,6 +14,7 @@ import { workspaceCheckoutRoot } from '../src/runner/checkout-root.ts';
 import { contractImpact } from '../src/runner/contract-impact.ts';
 import { digest, specDigest, supersededBy } from '../src/core/service.ts';
 import type { AgentAdapter, AgentRequest } from '../src/runner/adapters.ts';
+import type { Task } from '../src/core/model.ts';
 
 /**
  * Fixture-ревьюер. С blocking отклоняет план находкой; contradictory — ответ
@@ -516,38 +517,56 @@ test('Смена только гейтов показанной зависимо
   }
 });
 
-// F56: зависимость, лишь дошедшая до done по прежней постановке, утверждение
-// не отменяет; провал или отмена зависимости — отменяет.
-for (const [end, holds] of [
-  ['done', true],
-  ['failed', false],
-  ['cancelled', false],
-] as const)
-  test(`Внешняя зависимость стала ${end} во время ревью — утверждение ${holds ? 'остаётся' : 'отменяется'} (F56)`, async () => {
+// F56: внешняя зависимость, лишь продвинувшаяся или дошедшая до done по
+// прежней постановке, утверждение не отменяет; провал, отмена, смена гейтов
+// и завершение задачи, закреплённой проваленной, — отменяют.
+type DependencyChange = (t: Task) => void;
+const finished: DependencyChange = (t) => {
+  t.status = 'done';
+  t.resultSha = 'a'.repeat(40);
+};
+for (const [name, before, during, holds] of [
+  ['дошла до done', undefined, finished, true],
+  ['перешла в running', undefined, (t) => void (t.status = 'running'), true],
+  ['провалилась', undefined, (t) => void (t.status = 'failed'), false],
+  ['отменена', undefined, (t) => void (t.status = 'cancelled'), false],
+  [
+    'дошла до done со сменой гейтов',
+    undefined,
+    (t) => {
+      finished(t);
+      t.gates = ['other'];
+    },
+    false,
+  ],
+  ['была failed и дошла до done', (t) => void (t.status = 'failed'), finished, false],
+] as [string, DependencyChange | undefined, DependencyChange, boolean][])
+  test(`Внешняя зависимость ${name} во время ревью — утверждение ${holds ? 'остаётся' : 'отменяется'} (F56)`, async () => {
     const f = fixture();
     try {
       f.h.config.mode = 'local';
+      // Зависимость — задача другой доски, названная по ID (как в пилоте).
+      f.h.importPlan({
+        title: 'Schema',
+        description: 'Цель',
+        tasks: [{ ...input('Schema fix'), key: 'a', dependsOn: [], contracts: [] }],
+      });
+      const [schema] = f.store.read().tasks;
       const { boardId } = f.h.importPlan({
         title: 'Release',
         description: 'Цель',
-        tasks: [
-          { ...input('Schema fix'), key: 'a', dependsOn: [], contracts: [] },
-          { ...input('Engine work'), key: 'b', dependsOn: ['a'], contracts: [] },
-        ],
+        tasks: [{ ...input('Engine work'), key: 'b', dependsOn: [schema.id], contracts: [] }],
       });
-      const [schema, engine] = f.store.read().tasks;
+      const engine = f.store.read().tasks.find((t) => t.title === 'Engine work')!;
+      const change = (label: string, fn: DependencyChange) =>
+        f.store.change(label, (s) => fn(s.tasks.find((x) => x.id === schema.id)!));
+      if (before) change('test.dependency-before', before);
       const review = reviewPlan(
         f.h,
         f.root,
         boardId,
         'codex',
-        runtimes(() =>
-          f.store.change('test.dependency-finished', (s) => {
-            const t = s.tasks.find((x) => x.id === schema.id)!;
-            t.status = end;
-            if (end === 'done') t.resultSha = 'a'.repeat(40);
-          }),
-        ),
+        runtimes(() => change('test.dependency-during', during)),
         () => {},
         [engine.id],
       );

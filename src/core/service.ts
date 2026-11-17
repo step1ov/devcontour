@@ -60,6 +60,7 @@ import {
   type Contract,
   type ContractArtifact,
   type Task,
+  type TaskStatus,
   type TaskInput,
   type Board,
   type DevContourState,
@@ -596,42 +597,42 @@ function activeRevision(s: DevContourState, id: string) {
  * То, что ревьюер видел о зависимости вне предложения: постановка, статус,
  * гейты и принятый SHA. Гейты в specDigest не входят — они часть политики, —
  * но ревьюер их видел, и их смена меняет то, на что опирается план.
+ * Формулу читают закрепления прежних версий: не меняйте её.
  */
-/**
- * Исход внешней зависимости, на который опирается ревью плана: ход ещё не
- * завершённой задачи (draft → ready → … → integrating) смысла плана не
- * меняет, провал и отмена — меняют (F56).
- */
-const outcome = (t: Task) =>
-  t.status === 'done' || t.status === 'failed' || t.status === 'cancelled' ? t.status : 'pending';
-/**
- * Смысловые данные внешней зависимости, показанной ревью плана.
- * `asPending` — та же задача до завершения: так сверка узнаёт, что
- * зависимость лишь дошла до `done` по прежней постановке (см. `pinnedHolds`).
- */
-export const dependencyDigest = (t: Task, asPending = false) =>
-  digest({
-    spec: specDigest(t),
-    outcome: asPending ? 'pending' : outcome(t),
-    gates: t.gates,
-    resultSha: asPending ? undefined : t.resultSha,
-  });
+export const dependencyDigest = (t: Task) =>
+  digest({ spec: specDigest(t), status: t.status, gates: t.gates, resultSha: t.resultSha });
 /** Смысловые данные задачи, показанной ревью плана как контекст. */
-export const contextDigest = (t: Task, asPending = false) =>
+export const contextDigest = (t: Task) =>
   digest({
     spec: specDigest(t),
     gates: t.gates,
-    resultSha: asPending ? undefined : t.resultSha,
+    resultSha: t.resultSha,
     cancelled: t.status === 'cancelled',
   });
+/** Статусы задачи, ещё идущей к результату. */
+const UNFINISHED: readonly TaskStatus[] = [
+  'draft',
+  'ready',
+  'running',
+  'verifying',
+  'reviewing',
+  'integrating',
+];
 /**
- * Закреплённое ревью плана состояние задачи всё ещё верно (F56): совпадает
- * с нынешним или задача с тех пор только завершилась (`done`) по той же
- * постановке и гейтам. Утверждение строилось на её будущем результате;
- * выбрасывать оплаченное ревью из-за ожидаемого завершения незачем.
+ * Закреплённое ревью плана состояние внешней зависимости всё ещё верно (F56):
+ * совпадает с нынешним, или зависимость была незавершённой и с тех пор лишь
+ * продвинулась (другой незавершённый статус) или завершилась (`done`) по той
+ * же постановке и гейтам. Утверждение строилось на её будущем результате.
+ * Провал, отмена, а также задача, закреплённая проваленной или завершённой,
+ * сверяются точно. У незавершённой задачи принятого SHA нет: он ставится
+ * вместе с `done`, а reopen задачу с результатом не возвращает.
  */
-const pinnedHolds = (pinned: string, t: Task, of: (t: Task, asPending?: boolean) => string) =>
-  of(t) === pinned || (t.status === 'done' && of(t, true) === pinned);
+const dependencyHolds = (pinned: string, t: Task) =>
+  dependencyDigest(t) === pinned ||
+  ((t.status === 'done' || UNFINISHED.includes(t.status)) &&
+    UNFINISHED.some(
+      (status) => dependencyDigest({ ...t, status, resultSha: undefined }) === pinned,
+    ));
 /**
  * Задача принятой ревизии неизменяема: следующий этап и корректировка несут
  * её как принятую работу. Вернуть её в работу (reopen, retry) значило бы
@@ -1763,10 +1764,10 @@ export class DevContour {
         (expected.revision !== r.number ||
           (expected.reason !== undefined && expected.reason !== r.reason) ||
           Object.entries(expected.dependencies ?? {}).some(
-            ([id, pinned]) => !pinnedHolds(pinned, task(s, id), dependencyDigest),
+            ([id, pinned]) => !dependencyHolds(pinned, task(s, id)),
           ) ||
           Object.entries(expected.context ?? {}).some(
-            ([id, pinned]) => !pinnedHolds(pinned, task(s, id), contextDigest),
+            ([id, pinned]) => contextDigest(task(s, id)) !== pinned,
           ) ||
           Object.entries(expected.policies ?? {}).some(
             ([id, pinned]) => this.policyDigest(id) !== pinned,
