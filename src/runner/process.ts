@@ -322,19 +322,9 @@ export async function git(cwd: string, ...args: string[]) {
 }
 
 /**
- * Вывод команды или null, если она не выполнилась. Не блокирует event loop.
- * Локаль фиксирована (`osToolEnv`): вывод разбирается.
+ * Вывод системной утилиты или причина, по которой его нет. Не блокирует
+ * event loop. Локаль фиксирована (`osToolEnv`): вывод разбирается.
  */
-function output(
-  command: string,
-  args: string[],
-  timeout: number,
-  /** Код выхода, при котором вывод остаётся верным (lsof: часть процессов уже завершилась). */
-  partial?: number,
-): Promise<string | null> {
-  return outcome(command, args, timeout, partial).then((r) => ('error' in r ? null : r.stdout));
-}
-/** Вывод системной утилиты или причина, по которой его нет. */
 function outcome(
   command: string,
   args: string[],
@@ -374,18 +364,28 @@ async function marked(mark: string): Promise<number[]> {
     });
   }
   // macOS: -E добавляет окружение к команде для процессов своего пользователя.
-  const listed = await outcome('ps', ['-Eww', '-ax', '-o', 'pid=,command='], 10000);
+  const listed = await processInventory.tool('ps', ['-Eww', '-ax', '-o', 'pid=,command='], 10000);
   if ('error' in listed) throw new Error(listed.error);
   return listed.stdout.split('\n').flatMap((line) => {
     const m = /^\s*(\d+)\s+(.*)$/.exec(line);
     return m && m[2].includes(needle) && Number(m[1]) !== process.pid ? [Number(m[1])] : [];
   });
 }
-/** Живые процессы: PID, родитель, время старта. */
-async function processTable(): Promise<{ pid: number; ppid: number; start: string }[]> {
-  const stdout = await output('ps', ['-axo', 'pid=,ppid=,lstart='], 10000);
-  if (stdout === null) return [];
-  return stdout.split('\n').flatMap((line) => {
+/**
+ * Живые процессы: PID, родитель, время старта. `strict` — для остановки
+ * потомков: неполученная таблица там не «процессов нет», а отказ перечня
+ * (`sweep` повторяет его и сдаётся с `ReapFailure`). Опрос во время команды
+ * пустую таблицу переживает.
+ */
+async function processTable(
+  strict = false,
+): Promise<{ pid: number; ppid: number; start: string }[]> {
+  const listed = await processInventory.tool('ps', ['-axo', 'pid=,ppid=,lstart='], 10000);
+  if ('error' in listed) {
+    if (strict) throw new Error(listed.error);
+    return [];
+  }
+  return listed.stdout.split('\n').flatMap((line) => {
     const m = /^\s*(\d+)\s+(\d+)\s+(.+)$/.exec(line);
     return m ? [{ pid: Number(m[1]), ppid: Number(m[2]), start: m[3].trim() }] : [];
   });
@@ -452,15 +452,17 @@ async function inside(
   // сотни миллисекунд на каждую команду. Код 1 — часть из них уже завершилась.
   const candidates = [...started.keys()].filter((pid) => pid !== process.pid && fresh(pid));
   if (!candidates.length) return [];
-  const stdout = await output(
+  // Отказ lsof — неполученный перечень, а не «в каталогах никого нет».
+  const listed = await processInventory.tool(
     'lsof',
     ['-a', '-d', 'cwd', '-Fpn', '-u', String(process.getuid?.()), '-p', candidates.join(',')],
     15000,
     1,
   );
+  if ('error' in listed) throw new Error(listed.error);
   const pids: number[] = [];
   let pid = 0;
-  for (const line of (stdout ?? '').split('\n')) {
+  for (const line of listed.stdout.split('\n')) {
     if (line.startsWith('p')) pid = Number(line.slice(1));
     else if (
       line.startsWith('n') &&
@@ -472,12 +474,15 @@ async function inside(
   }
   return pids;
 }
-/** Остановить всех потомков команды; вернуть тех, кто пережил попытки. */
 /**
  * Перечень процессов для остановки потомков; объект — чтобы тест мог
  * подменить его отказ.
  */
-export const processInventory = { marked };
+export const processInventory = {
+  marked,
+  /** Запуск системной утилиты перечня (`ps`, `lsof`). */
+  tool: outcome,
+};
 /** Сколько раз перечень может не получиться за одну остановку, прежде чем она сдаётся. */
 const INVENTORY_TRIES = 3;
 /**
@@ -495,7 +500,7 @@ async function sweep(
   let failures = 0;
   for (let attempt = 0; attempt < 20; attempt++) {
     try {
-      const rows = await processTable();
+      const rows = await processTable(true);
       const table = new Map(rows.map((r) => [r.pid, r.start]));
       left = [
         ...new Set([
