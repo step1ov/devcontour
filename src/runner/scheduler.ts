@@ -10,6 +10,7 @@ import { randomUUID } from 'node:crypto';
 import { join } from 'node:path';
 import { HarnessError, Runner, fencedRefMove } from 'devcontour-harness';
 import { DevContour, waitBaseCheck } from '../core/service.ts';
+import type { DevContourState } from '../core/model.ts';
 import { repository, repositories } from '../core/repositories.ts';
 import { validateWorkflow } from '../core/workflow.ts';
 import { TaskFailure } from '../core/failure.ts';
@@ -295,6 +296,47 @@ export class Scheduler {
     });
     return none;
   }
+  /**
+   * Остановка «база прогонов отстала» (`assertBaseCurrent`) — техническая:
+   * её ставит сам такт на идущей очереди, записывая сбой (`scheduler.error`)
+   * и паузу без причины. Когда причина ушла — рабочая ветка снова не впереди
+   * базы (коммит убрали с ветки, базу перенесли иначе), — такт снимает свою
+   * остановку сам и в том же такте снова сверяет базу перед выдачей. Раньше
+   * пауза висела с уже ложной причиной: задание доски на стадии задач её не
+   * снимает, а пакет ведущего обещал «снимет следующий run», и выдача стояла,
+   * пока ведущий не догадывался снять её `queue_set`.
+   *
+   * Снимается только такая пауза: без причины, без классов отказа и
+   * ожиданий, и первый сбой такта после неё — отставание базы. Пауза
+   * человека или ведущего, ожидание проверки базы, отказ runtime и прочие
+   * сбои такта не трогаются. Запись — CAS по времени паузы.
+   */
+  private async releaseStaleBaseStop() {
+    const stop = (
+      s: Pick<DevContourState, 'paused' | 'pauseReason' | 'pausedAt' | 'pauseFailures' | 'waits'>,
+    ) =>
+      s.paused && !s.pauseReason && !s.pauseFailures?.length && !s.waits?.length
+        ? s.pausedAt
+        : undefined;
+    const since = stop(this.h.store.view());
+    if (!since) return;
+    // Сбой, поставивший паузу, записан той же транзакцией, что её время.
+    const from = Date.parse(since) - 1000;
+    const cause = this.h.store
+      .latestEvents(['scheduler.error'], 20)
+      .filter((e) => Date.parse(e.at) >= from)
+      .at(-1);
+    const error = (cause?.data as { error?: string } | undefined)?.error ?? '';
+    if (!error.includes(STALE_BASE)) return;
+    if ((await this.baseDrift()).length) return;
+    this.h.store.change('scheduler.stale-base.cleared', (s) => {
+      if (stop(s) !== since) return { cleared: false };
+      s.paused = false;
+      delete s.pausedAt;
+      delete s.pauseActor;
+      return { cleared: true, pausedAt: since };
+    });
+  }
   private async assertBaseCurrent(
     { sensitive, held }: { sensitive: string[]; held: string[] } = { sensitive: [], held: [] },
   ) {
@@ -457,6 +499,7 @@ export class Scheduler {
     // снова встаёт на base-check — выдача на неподтверждённой базе исключена
     // здесь, а не только у каждого, кто снимает паузу.
     this.h.restoreBaseHold();
+    await this.releaseStaleBaseStop();
     const runner = this.runner;
     if (!this.h.store.view().paused && runner.active < this.h.config.concurrency) {
       // Сверка базы — git на каждом такте; без расхождения повторно не читается.

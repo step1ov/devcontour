@@ -777,3 +777,78 @@ test('Предел времени — на фазу: долгая реализа
     await f.cleanup();
   }
 });
+
+test('Такт снимает свою остановку «база прогонов отстала», когда причина ушла, и не трогает иные паузы', async () => {
+  const f = await runtimeFixture();
+  const repo = repositories(f.config)[0];
+  const target = `refs/heads/${repo.targetBranch}`;
+  const start = await git(repo.path, 'rev-parse', 'HEAD');
+  const idle = {
+    ...adapters,
+    demo: {
+      ...adapters.demo,
+      execute: () => Promise.reject(new BlockedError('исполнитель не нужен этой проверке')),
+    },
+  };
+  const scheduler = new Scheduler(f.h, f.root, idle);
+  let branch = '';
+  try {
+    await git(repo.path, 'update-ref', target, start);
+    await scheduler.init();
+    f.h.pause(false);
+    // Подготовка на рабочей ветке при detached HEAD: перемотки нет, такт
+    // останавливает очередь так же, как интервал сервера (`start`).
+    branch = await git(repo.path, 'symbolic-ref', '--short', 'HEAD');
+    await writeFile(join(repo.path, 'PREPARED.md'), '# prepared\n');
+    await git(repo.path, 'add', 'PREPARED.md');
+    await git(
+      repo.path,
+      '-c',
+      'core.hooksPath=/dev/null',
+      'commit',
+      '--no-gpg-sign',
+      '-m',
+      'prepared',
+    );
+    await git(repo.path, 'checkout', '-q', '--detach', 'HEAD');
+    const failure = await scheduler.tick().then(
+      () => assert.fail('отставшая база останавливает такт'),
+      (e: unknown) => String(e),
+    );
+    assert.match(failure, /База прогонов отстала/);
+    f.store.change('scheduler.error', (s) => {
+      if (!s.paused) s.pausedAt = new Date().toISOString();
+      s.paused = true;
+      return { error: failure };
+    });
+    // Причина ещё есть: пауза остаётся.
+    await scheduler.tick();
+    assert.equal(f.store.read().paused, true, 'база всё ещё отстала');
+
+    // Причина ушла: коммит убран с рабочей линии, она снова равна базе.
+    await git(repo.path, 'checkout', '-q', '--detach', start);
+    await scheduler.tick();
+    const lifted = f.store.read();
+    assert.equal(lifted.paused, false, 'такт снял свою остановку');
+    assert.equal(lifted.pausedAt, undefined);
+    assert.ok(f.store.events().some((e) => e.type === 'scheduler.stale-base.cleared'));
+
+    // Пауза человека после такой же остановки — его решение: не снимается.
+    f.store.change('scheduler.error', (s) => {
+      s.pausedAt = new Date().toISOString();
+      s.paused = true;
+      return { error: failure };
+    });
+    f.h.pause(true);
+    await scheduler.tick();
+    assert.equal(f.store.read().paused, true, 'пауза человека остаётся');
+    assert.equal(f.store.read().pauseReason, 'operator');
+  } finally {
+    await scheduler.stop();
+    if (branch) {
+      await git(repo.path, 'checkout', '-q', branch);
+      await git(repo.path, 'reset', '-q', '--hard', start);
+    }
+    await f.cleanup();
+  }
+});
