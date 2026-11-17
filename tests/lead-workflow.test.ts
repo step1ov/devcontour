@@ -350,7 +350,7 @@ test('В режиме агента workflow доски сам проверяет
     assert.equal(state.paused, true, 'провал gate базы держит очередь');
     assert.equal(state.pauseReason, 'base-check');
     assert.match(detail(), /main\/base-gate/);
-    assert.match(detail(), /новый base-update/);
+    assert.match(detail(), /попросите пользователя запустить очередь в панели/);
     assert.doesNotMatch(detail(), /queue --start/);
     // Провал повторён автоматически один раз, и оба прогона записаны.
     assert.deepEqual(
