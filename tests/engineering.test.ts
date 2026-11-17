@@ -21,6 +21,7 @@ import { Store } from '../src/core/store.ts';
 import { updateBase } from '../src/runner/base-update.ts';
 import { Scheduler } from '../src/runner/scheduler.ts';
 import { adapters, type AgentRequest } from '../src/runner/adapters.ts';
+import { cliCommand } from './cli-command.ts';
 
 const finding = {
   kind: 'debt' as const,
@@ -582,7 +583,7 @@ test('CLI context-lock pins committed instructions, context-show resolves task s
     const b = h.createBoard('SDK consumer');
     const t = h.addTask(b.id, input());
     store.close();
-    const cli = ['node', '--import', 'tsx', 'src/cli.ts'];
+    const cli = cliCommand();
     const locked = await command([...cli, 'context-lock', '--data', data], process.cwd());
     assert.equal(locked.code, 0, locked.stderr);
     assert.match(JSON.parse(locked.stdout).packs[0].digest, /^[a-f0-9]{64}$/);

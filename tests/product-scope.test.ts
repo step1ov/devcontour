@@ -8,6 +8,7 @@ import { command } from '../src/runner/process.ts';
 import { AgentService } from '../src/application/agent.ts';
 import { gateTestcases } from '../src/application/testcases.ts';
 import { fixture, localDefinition, map, releaseScenario } from './product-fixture.ts';
+import { cliCommand } from './cli-command.ts';
 
 test('A release scenario reworded or removed after acceptance needs the user to accept the release; the lead cannot', async () => {
   const second = 'Модератор видит причину блокировки в журнале.';
@@ -235,18 +236,7 @@ test('A release scenario reworded or removed after acceptance needs the user to 
     assert.deepEqual(f.view().unconfirmedScenarios, cliExpected);
     const cliAccept = (...extra: string[]) =>
       command(
-        [
-          process.execPath,
-          '--import',
-          'tsx',
-          'src/cli.ts',
-          'changeset-accept',
-          '--changeset',
-          viaCli.id,
-          ...extra,
-          '--data',
-          f.root,
-        ],
+        [...cliCommand(), 'changeset-accept', '--changeset', viaCli.id, ...extra, '--data', f.root],
         process.cwd(),
         { timeoutMs: 20000 },
       );

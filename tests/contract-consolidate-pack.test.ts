@@ -1,7 +1,7 @@
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
 import { writeFile } from 'node:fs/promises';
-import { join, resolve } from 'node:path';
+import { join } from 'node:path';
 import { command } from '../src/runner/process.ts';
 import { type ContractChange } from '../src/runner/contract-change.ts';
 import { pinContext } from '../src/runner/context.ts';
@@ -10,6 +10,7 @@ import { devcontourContextSource } from '../src/harness/host.ts';
 import { executionOf } from '../src/harness/execution.ts';
 import { reapprove } from './helpers.ts';
 import { CONSOLIDATED, consolidationStage } from './consolidation-fixture.ts';
+import { cliCommand } from './cli-command.ts';
 
 type Stage = Awaited<ReturnType<typeof consolidationStage>>;
 
@@ -69,17 +70,7 @@ test('H1: after a consolidation the context pack holds the new text and a task b
     assert.ok(JSON.stringify(snapshot).includes('REQ-3. Sorted by name.'));
     // CLI context-show — тот же путь (currentContracts) в отдельном процессе.
     const run = await command(
-      [
-        process.execPath,
-        '--import',
-        import.meta.resolve('tsx'),
-        resolve('src/cli.ts'),
-        'context-show',
-        '--task',
-        s.api.id,
-        '--data',
-        s.root,
-      ],
+      [...cliCommand(), 'context-show', '--task', s.api.id, '--data', s.root],
       process.cwd(),
       {
         timeoutMs: 120000,

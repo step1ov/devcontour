@@ -1,13 +1,14 @@
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
 import { existsSync, writeFileSync } from 'node:fs';
-import { join, resolve } from 'node:path';
+import { join } from 'node:path';
 import { PassThrough } from 'node:stream';
 import { Client } from '@modelcontextprotocol/client';
 import { StdioClientTransport } from '@modelcontextprotocol/client/stdio';
 import { AgentService, capabilities } from '../src/application/agent.ts';
 import { serveMcp } from '../src/server/mcp.ts';
 import { fixture, input } from './helpers.ts';
+import { cliArgs } from './cli-command.ts';
 const data = (result: { structuredContent?: unknown }) =>
   result.structuredContent as Record<string, unknown>;
 
@@ -33,7 +34,7 @@ async function connect(f: ReturnType<typeof fixture>) {
   const client = new Client({ name: 'devcontour-fixture', version: '1.0.0' });
   const transport = new StdioClientTransport({
     command: process.execPath,
-    args: ['--import', import.meta.resolve('tsx'), resolve('src/cli.ts'), 'mcp', '--data', f.root],
+    args: [...cliArgs(), 'mcp', '--data', f.root],
     cwd: f.root,
     stderr: 'pipe',
   });

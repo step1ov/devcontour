@@ -13,6 +13,7 @@ import { AgentService } from '../src/application/agent.ts';
 import { syncGit } from '../src/runner/git-sync.ts';
 import { recordsFromState, stateFromRecords } from '../src/core/sync-state.ts';
 import { fixture, map } from './product-fixture.ts';
+import { cliCommand } from './cli-command.ts';
 
 test('Product map separates monorepo channels and cross-repository features; rejects incomplete or unsafe declarations', async () => {
   const f = await fixture();
@@ -52,18 +53,7 @@ test('Product map separates monorepo channels and cross-repository features; rej
       /расходятся/,
     );
     const cli = await command(
-      [
-        process.execPath,
-        '--import',
-        'tsx',
-        'src/cli.ts',
-        'product-view',
-        '--release',
-        'mvp',
-        '--require-accepted',
-        '--data',
-        f.root,
-      ],
+      [...cliCommand(), 'product-view', '--release', 'mvp', '--require-accepted', '--data', f.root],
       process.cwd(),
       { timeoutMs: 20000 },
     );

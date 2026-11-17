@@ -1,7 +1,7 @@
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
 import { writeFile } from 'node:fs/promises';
-import { join, resolve } from 'node:path';
+import { join } from 'node:path';
 import { Client, InMemoryTransport } from '@modelcontextprotocol/client';
 import { AgentService, capabilities } from '../src/application/agent.ts';
 import { createMcpServer } from '../src/server/mcp.ts';
@@ -12,6 +12,7 @@ import { submitCase } from '../src/runner/checks.ts';
 import { analyzeRecovery } from '../src/runner/recovery.ts';
 import type { AgentAdapter } from '../src/runner/adapters.ts';
 import { check, checkProject, fixture, knap, rejection, removeRoot } from './check-fixture.ts';
+import { cliCommand } from './cli-command.ts';
 
 const zero = (v: number) => JSON.stringify({ items: [{ w: 0, v }], cap: 0 });
 type F = Awaited<ReturnType<typeof fixture>>;
@@ -82,17 +83,7 @@ test('AC33: Agent API, CLI, HTTP and MCP share version checks, refusals and side
       const file = join(p.root, `request-${operation}.json`);
       await writeFile(file, JSON.stringify({ operation, input }));
       const r = await command(
-        [
-          process.execPath,
-          '--import',
-          import.meta.resolve('tsx'),
-          resolve('src/cli.ts'),
-          'agent',
-          '--file',
-          file,
-          '--data',
-          p.root,
-        ],
+        [...cliCommand(), 'agent', '--file', file, '--data', p.root],
         process.cwd(),
         {
           timeoutMs: 120000,

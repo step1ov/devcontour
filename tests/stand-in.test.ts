@@ -13,6 +13,7 @@ import { tmpdir } from 'node:os';
 import { DevContour } from '../src/core/service.ts';
 import { Store } from '../src/core/store.ts';
 import { command } from '../src/runner/process.ts';
+import { cliCommand } from './cli-command.ts';
 
 // Решения ведущего за владельца: запись ведущим, очередь подтверждения у
 // владельца, подтверждение и отмена только владельцем, отмена — работа ведущего.
@@ -406,7 +407,7 @@ test('F21: CLI — список ждущих решений, подтвержд�
       h.store.close();
     }
     const cli = (...args: string[]) =>
-      command(['node', '--import', 'tsx', 'src/cli.ts', ...args, '--data', data], process.cwd());
+      command([...cliCommand(), ...args, '--data', data], process.cwd());
     const listed = await cli('decisions');
     assert.equal(listed.code, 0, listed.stderr);
     const rows = JSON.parse(listed.stdout) as {

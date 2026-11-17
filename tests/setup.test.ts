@@ -15,6 +15,7 @@ import { join, resolve } from 'node:path';
 import { setupProject } from '../src/runner/setup.ts';
 import { loadConfig } from '../src/runner/config.ts';
 import { command, git } from '../src/runner/process.ts';
+import { cliCommand } from './cli-command.ts';
 
 async function product() {
   const root = await realpath(await mkdtemp(join(tmpdir(), 'devcontour-setup-')));
@@ -153,10 +154,7 @@ test('CLI setup supports explicit legacy data without bootstrapping a demo', asy
   try {
     const result = await command(
       [
-        process.execPath,
-        '--import',
-        'tsx',
-        'src/cli.ts',
+        ...cliCommand(),
         'setup',
         '--repository',
         root,

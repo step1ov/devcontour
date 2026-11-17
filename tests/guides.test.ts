@@ -29,6 +29,7 @@ import { setupProject } from '../src/runner/setup.ts';
 import { loadConfig } from '../src/runner/config.ts';
 import { emptyState, type Config } from '../src/core/model.ts';
 import { command, git } from '../src/runner/process.ts';
+import { cliCommand } from './cli-command.ts';
 
 const START = 'docs/devcontour-start.md';
 const INTENT = 'docs/devcontour-intent.md';
@@ -378,7 +379,7 @@ test('Setup writes marked copies; doctor reports drift as degraded; the CLI refr
   await writeFile(file, JSON.stringify(raw, null, 2) + '\n');
 
   const cli = await command(
-    [process.execPath, '--import', 'tsx', 'src/cli.ts', 'guides-refresh', '--data', setup.data],
+    [...cliCommand(), 'guides-refresh', '--data', setup.data],
     resolve('.'),
   );
   assert.equal(cli.code, 0, cli.stderr);

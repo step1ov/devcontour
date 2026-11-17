@@ -2,7 +2,7 @@ import { test } from 'node:test';
 import assert from 'node:assert/strict';
 import { execFileSync } from 'node:child_process';
 import { writeFile } from 'node:fs/promises';
-import { join, resolve } from 'node:path';
+import { join } from 'node:path';
 import { checksWarnings } from '../src/runner/agent-control.ts';
 import {
   ContractChanges,
@@ -16,6 +16,7 @@ import { readyTasks } from '../src/core/graph.ts';
 import { command } from '../src/runner/process.ts';
 import { reviewers, stage } from './contract-change-fixture.ts';
 import { withQuotedGitPaths } from './helpers.ts';
+import { cliCommand } from './cli-command.ts';
 
 test('A contract change runs as one command: review, rebind, plan review, base and release', async () => {
   const s = await stage();
@@ -213,17 +214,7 @@ test('contract-change exits non-zero when the operation fails, and still prints 
     // Задачу держит другая операция: шаг hold отказывает без вызова модели.
     s.h.hold([s.api.id], 'CC-other', 'другая операция');
     const run = await command(
-      [
-        process.execPath,
-        '--import',
-        import.meta.resolve('tsx'),
-        resolve('src/cli.ts'),
-        'contract-change',
-        '--id',
-        started.operation.id,
-        '--data',
-        s.root,
-      ],
+      [...cliCommand(), 'contract-change', '--id', started.operation.id, '--data', s.root],
       process.cwd(),
       {
         timeoutMs: 120000,
@@ -238,10 +229,7 @@ test('contract-change exits non-zero when the operation fails, and still prints 
     // --file без значения — понятный отказ, а не чтение каталога.
     const missing = await command(
       [
-        process.execPath,
-        '--import',
-        import.meta.resolve('tsx'),
-        resolve('src/cli.ts'),
+        ...cliCommand(),
         'contract-change',
         '--id',
         started.operation.id,

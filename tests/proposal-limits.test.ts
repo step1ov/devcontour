@@ -10,7 +10,7 @@ import assert from 'node:assert/strict';
 import { createHash } from 'node:crypto';
 import { mkdir, mkdtemp, readFile, rm, writeFile } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
-import { join, resolve } from 'node:path';
+import { join } from 'node:path';
 import { DomainError, GATE_SCOPE_LIMIT, taskInput } from '../src/core/model.ts';
 import { config, fixture, input, statePrevious } from './helpers.ts';
 import { DevContour } from '../src/core/service.ts';
@@ -28,6 +28,7 @@ import { contractImpact } from '../src/runner/contract-impact.ts';
 import { assertArtifactsInBase, pinArtifacts } from '../src/runner/contract-artifacts.ts';
 import { agentInputs } from '../src/application/agent.ts';
 import { command, git } from '../src/runner/process.ts';
+import { cliCommand } from './cli-command.ts';
 
 const artifacts = (n: number) =>
   Array.from({ length: n }, (_, i) => ({
@@ -131,19 +132,7 @@ test('contract-impact (CLI) называет превышение предело
     const file = join(root, 'proposal.json');
     await writeFile(file, JSON.stringify(proposal));
 
-    const cli = (...args: string[]) =>
-      command(
-        [
-          process.execPath,
-          '--import',
-          import.meta.resolve('tsx'),
-          resolve('src/cli.ts'),
-          ...args,
-          '--data',
-          root,
-        ],
-        root,
-      );
+    const cli = (...args: string[]) => command([...cliCommand(), ...args, '--data', root], root);
     const impact = await cli('contract-impact', '--file', file);
     assert.equal(impact.code, 0, impact.stderr);
     assert.equal(impact.stderr, '', 'предупреждение SQLite не печатается');
@@ -206,17 +195,7 @@ test('contract-impact и закрепление спрашивают Git пос�
       );
       await writeFile(log, '');
       const r = await command(
-        [
-          process.execPath,
-          '--import',
-          import.meta.resolve('tsx'),
-          resolve('src/cli.ts'),
-          'contract-impact',
-          '--file',
-          file,
-          '--data',
-          root,
-        ],
+        [...cliCommand(), 'contract-impact', '--file', file, '--data', root],
         root,
         { env: { ...process.env, PATH: `${bin}:${process.env.PATH}` } },
       );

@@ -4,7 +4,7 @@ import { test } from 'node:test';
 import assert from 'node:assert/strict';
 import { spawnSync } from 'node:child_process';
 import { mkdirSync, statSync, truncateSync, writeFileSync } from 'node:fs';
-import { delimiter, join, resolve } from 'node:path';
+import { delimiter, join } from 'node:path';
 import { Client, InMemoryTransport } from '@modelcontextprotocol/client';
 import { AgentService } from '../src/application/agent.ts';
 import { DomainError, taskIngest, taskInput, TASK_LIMITS } from '../src/core/model.ts';
@@ -19,6 +19,7 @@ import { Scheduler } from '../src/runner/scheduler.ts';
 import { serve } from '../src/server/http.ts';
 import { createMcpServer } from '../src/server/mcp.ts';
 import { fixture, input } from './helpers.ts';
+import { cliArgs } from './cli-command.ts';
 
 const ids = (count: number, prefix = 'r') =>
   Array.from({ length: count }, (_, i) => `${prefix}${i}`);
@@ -286,16 +287,7 @@ test('CLI: --file сверх предела — понятный отказ бе
     truncateSync(file, agentFileBytes + 1);
     const run = spawnSync(
       process.execPath,
-      [
-        '--import',
-        import.meta.resolve('tsx'),
-        resolve('src/cli.ts'),
-        'import-plan',
-        '--data',
-        f.root,
-        '--file',
-        file,
-      ],
+      [...cliArgs(), 'import-plan', '--data', f.root, '--file', file],
       { cwd: f.root, encoding: 'utf8' },
     );
     assert.notEqual(run.status, 0);
