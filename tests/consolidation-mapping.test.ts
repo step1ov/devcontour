@@ -200,3 +200,79 @@ test('F49: the controller returns every gap, not the first 30, and records an ap
     await s.remove();
   }
 });
+
+/**
+ * Составные ID (F49): `ORD-RET-01`, ссылки `FR-LOG-01`, `PRG-R09` — правило с
+ * таким ID не должно выпасть незамеченным.
+ */
+const MULTI_OLD = [
+  '# Orders',
+  '',
+  '## 1. Returns',
+  '',
+  '- ORD-RET-01: a return is accepted within 14 days (FR-LOG-01).',
+  '- ORD-RET-02: a refund goes to the original card.',
+  '- ORD-RET-03: a damaged item is refunded in full.',
+  '',
+  'Amendment (stage 2): ORD-RET-02 now also allows store credit (PRG-R09).',
+  '',
+  '## 2. Exchanges',
+  '',
+  '- ORD-EX-01: an exchange keeps the original price.',
+  '',
+].join('\n');
+const MULTI_NEW = [
+  '# Orders',
+  '',
+  '## 1. Returns',
+  '',
+  '- ORD-RET-01: a return is accepted within 14 days (FR-LOG-01).',
+  '- ORD-RET-02: a refund goes to the card or to store credit (PRG-R09).',
+  '- ORD-RET-03: a damaged item is refunded in full.',
+  '',
+  '## 2. Exchanges',
+  '',
+  '- ORD-EX-01: an exchange keeps the original price.',
+  '',
+].join('\n');
+const MULTI_MAPPING = [
+  '«1. Returns», ORD-RET-01, ORD-RET-02, ORD-RET-03 → «1. Returns» (amendment folded into ORD-RET-02)',
+  '«2. Exchanges», ORD-EX-01 → «2. Exchanges»',
+].join('\n');
+
+test('F49: multi-segment rule ids are rules; grouped lines map them; multi-segment references kept verbatim need no line', () => {
+  assert.deepEqual([...definitions(MULTI_OLD).keys()].sort(), [
+    'ORD-EX-01',
+    'ORD-RET-01',
+    'ORD-RET-02',
+    'ORD-RET-03',
+  ]);
+  assert.deepEqual(mappingGaps(MULTI_OLD, MULTI_NEW, MULTI_MAPPING), []);
+  // Строка без ORD-RET-03 — пропуск.
+  assert.deepEqual(
+    mappingGaps(MULTI_OLD, MULTI_NEW, MULTI_MAPPING.replace(', ORD-RET-03 →', ' →')),
+    ['ORD-RET-03'],
+  );
+  // Пропавшая составная ссылка — пропуск.
+  assert.deepEqual(mappingGaps(MULTI_OLD, MULTI_NEW.replace(' (PRG-R09)', ''), MULTI_MAPPING), [
+    'PRG-R09',
+  ]);
+});
+
+test('F49: the pre-check refuses a consolidation that drops a multi-segment rule and lists ids and references', async () => {
+  const s = await consolidationStage();
+  try {
+    await s.commitDoc(MULTI_OLD);
+    await reviewContract(s.h, s.root, s.proposal, 'codex', reviewers(s.calls, s.prompts));
+    const plan = async () =>
+      consolidationPlan(s.h, parseProposal(s.proposal), s.sh('rev-parse', 'HEAD'));
+    await s.commitDoc(MULTI_NEW.replace('- ORD-RET-03: a damaged item is refunded in full.\n', ''));
+    await assert.rejects(plan(), /нет ORD-RET-03/);
+    await s.commitDoc(MULTI_NEW);
+    const ok = await plan();
+    assert.deepEqual(ok.ids, ['ORD-EX-01', 'ORD-RET-01', 'ORD-RET-02', 'ORD-RET-03']);
+    assert.deepEqual(ok.references, ['FR-LOG-01', 'PRG-R09']);
+  } finally {
+    await s.remove();
+  }
+});

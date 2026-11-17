@@ -29,14 +29,35 @@ const NOT_RULES = new Set([
   'base',
 ]);
 
-export function idTokens(text: string) {
-  return [
+const tokens = (text: string, pattern: RegExp) =>
+  [
     ...new Set(
-      (text.match(ID_TOKEN) ?? []).filter(
+      (text.match(pattern) ?? []).filter(
         (t) => !NOT_RULES.has(t.slice(0, t.indexOf('-')).toLowerCase()),
       ),
     ),
   ].sort();
+
+export function idTokens(text: string) {
+  return tokens(text, ID_TOKEN);
+}
+
+/**
+ * Тело ID правила для консолидации: составной ID в верхнем регистре
+ * (`ORD-RET-01`, `FR-LOG-01`, `PRG-R09` — сегменты букв, последний — до трёх
+ * прописных и номер) или ID-токен `ID_TOKEN` (`REQ-12`, `ТР-4`, `req-1.2`).
+ */
+const RULE_BODY =
+  '\\p{Lu}{2,}(?:-\\p{Lu}[\\p{Lu}\\p{N}]*)*-\\p{Lu}{0,3}\\d+(?:\\.\\d+)*|\\p{L}{2,}-\\d+(?:\\.\\d+)*';
+const RULE_TOKEN = new RegExp(`(?<![\\p{L}\\p{N}_-])(?:${RULE_BODY})`, 'gu');
+
+/**
+ * ID правил для консолидации: `idTokens` и составные ID. Консолидация не
+ * должна незаметно уронить правило `ORD-RET-03`. Импорт Git sync и прочие
+ * пользователи `idTokens` прежние: принятые записи не пересуживаются.
+ */
+export function ruleTokens(text: string) {
+  return tokens(text, RULE_TOKEN);
 }
 
 /** Разметка Markdown, которая не меняет слово: `**REQ-1**`, `` `REQ-1` ``. */
@@ -48,7 +69,7 @@ const SECTION_NUMBER = /^\d+(?:\.\d+)*\.?\s+/;
  * `ORD-RET-01`, `REQ-4.2`. По ней ревьюер называет раздел, не повторяя
  * его заголовок целиком.
  */
-const LABEL = /^\p{L}{2,}(?:-\p{L}[\p{L}\p{N}]*)*-\d+(?:\.\d+)*/u;
+const LABEL = new RegExp(`^(?:${RULE_BODY})`, 'u');
 
 /** Метка заголовка (`ORD-04` у «ORD-04. Оплата заказа») или undefined. */
 export function headingLabel(heading: string) {
@@ -105,13 +126,13 @@ export function sections(text: string) {
  * других документов или этого же («по ORD-05»).
  */
 export function definitions(text: string) {
-  const known = new Set(idTokens(text));
+  const known = new Set(ruleTokens(text));
   const out = new Map<string, number>();
   const define = (id: string | undefined, strength: number) => {
     if (id && known.has(id) && (out.get(id) ?? 0) < strength) out.set(id, strength);
   };
   const lead = (line: string) =>
-    new RegExp(`^(${ID_TOKEN.source})\\s*(?:[.:)|—–]|-\\s|$)`, 'u').exec(
+    new RegExp(`^(${RULE_BODY})\\s*(?:[.:)|—–]|-\\s|$)`, 'u').exec(
       line.replace(MARKUP, '').trim(),
     )?.[1];
   let fence: string | undefined;
@@ -139,7 +160,7 @@ export function definitions(text: string) {
     const start = item ?? row ?? (previous.trim() ? undefined : bare);
     if (start !== undefined) define(lead(start), 2);
     for (const m of line.matchAll(
-      new RegExp(`(${ID_TOKEN.source})[\`*_]*\\.[\`*_]*\\s+(?=\\p{Lu})`, 'gu'),
+      new RegExp(`(?<![\\p{L}\\p{N}_-])(${RULE_BODY})[\`*_]*\\.[\`*_]*\\s+(?=\\p{Lu})`, 'gu'),
     ))
       define(m[1], 1);
     previous = bare;
@@ -225,13 +246,15 @@ export function textChecks(
   next: string,
   file: string,
   siblings: readonly { source?: string; title: string; content: string }[],
+  /** Токенизатор ID: Git sync — `idTokens`, регистрация консолидации — `ruleTokens`. */
+  ids: (text: string) => string[] = idTokens,
 ) {
-  const kept = new Set(idTokens(next));
+  const kept = new Set(ids(next));
   const before = anchors(previous);
   const after = anchors(next);
   return {
     longer: next.length >= previous.length,
-    lost: idTokens(previous).filter((id) => !kept.has(id)),
+    lost: ids(previous).filter((id) => !kept.has(id)),
     broken: siblings.flatMap((c) =>
       referencedAnchors(c.content, file)
         .filter((a) => before.has(a) && !after.has(a))

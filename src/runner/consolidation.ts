@@ -23,7 +23,7 @@ import {
   definitions,
   headingLabel,
   headings,
-  idTokens,
+  ruleTokens,
   sections,
   slug,
   textChecks,
@@ -35,6 +35,7 @@ export {
   headings,
   idTokens,
   referencedAnchors,
+  ruleTokens,
   sections,
   slug,
 } from '../core/contract-text.ts';
@@ -119,9 +120,9 @@ const names = (side: string, h: ReturnType<typeof headingName>) =>
  * заголовков и совпадение по части слова отображением не считаются.
  */
 export function mappingGaps(previous: string, next: string, summary: string) {
-  const newIds = new Set(idTokens(next));
+  const newIds = new Set(ruleTokens(next));
   const defined = definitions(previous);
-  const oldIds = idTokens(previous);
+  const oldIds = ruleTokens(previous);
   const rules = oldIds.filter((id) => defined.has(id));
   // Заголовок без собственного текста (только подразделы), оставшийся в новом
   // тексте, ничего не несёт: отображать в нём нечего.
@@ -136,7 +137,7 @@ export function mappingGaps(previous: string, next: string, summary: string) {
     .filter((h) => h.text && !(empty.has(h.text) && kept.has(h.text)));
   const parts = sections(next).map((s) => ({
     ...s,
-    ids: new Set(idTokens(s.text)),
+    ids: new Set(ruleTokens(s.text)),
     defines: definitions(s.text),
     name: s.heading === undefined ? undefined : headingName(s.heading),
   }));
@@ -162,7 +163,7 @@ export function mappingGaps(previous: string, next: string, summary: string) {
     const heads = oldHeads.filter((h) => names(left, h));
     if (heads.length > 1) continue;
     const targets = new Set([
-      ...idTokens(right)
+      ...ruleTokens(right)
         .filter((id) => newIds.has(id))
         .flatMap(strongest),
       ...parts.filter(
@@ -177,7 +178,7 @@ export function mappingGaps(previous: string, next: string, summary: string) {
     for (const h of oldHeads)
       if (h.label && whole(left, h.label) && [...targets].some((t) => whole(t.text, h.label!)))
         covered.heads.add(h.text);
-    for (const id of idTokens(left))
+    for (const id of ruleTokens(left))
       if ([...targets].some((t) => t.ids.has(id))) covered.ids.add(id);
   }
   return [
@@ -294,7 +295,7 @@ export async function consolidationPlan(
   const siblings = s.contracts.filter(
     (c) => c.source !== file && !newerRedaction(s.contracts, c.id) && typeof c.content === 'string',
   );
-  const checks = textChecks(current.content, content, file, siblings);
+  const checks = textChecks(current.content, content, file, siblings, ruleTokens);
   if (checks.longer)
     throw new DomainError(
       `Консолидация сокращает документ: новый текст — ${content.length} знаков, действующий — ${current.content.length}. Дополнение правил — обычный contract-change`,
@@ -311,7 +312,7 @@ export async function consolidationPlan(
       400,
     );
   const defined = definitions(current.content);
-  const all = idTokens(current.content);
+  const all = ruleTokens(current.content);
   const ids = all.filter((id) => defined.has(id));
   return {
     current,
