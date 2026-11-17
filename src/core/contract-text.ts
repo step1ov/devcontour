@@ -153,9 +153,10 @@ function leadIds(start: string) {
  *   `(REQ-6) …`, `[REQ-7] …`). Ячейка таблицы (Markdown или `<td>`) —
  *   запись строки: ID в её начале с разделителем или во всю ячейку называет
  *   правило строки, а ячейка-перечень вроде `REQ-5 (TC-01), REQ-6` —
- *   ссылки. Строка, которая связывает ID, правила не определяет: две ячейки
- *   начинаются с ID (матрица `| TC-01 | REQ-1 |`) или другая ячейка называет
- *   правило, определённое вне таблиц (журнал `| DEC-040 | REQ-1 changed |`);
+ *   ссылки. Ключ строки — первая ячейка, которая начинается с ID; строка из
+ *   одних ID (матрица `| TC-01 | REQ-1 |`) — связь и правил не определяет.
+ *   Журнал с текстом (`| DEC-040 | REQ-1 changed |`) определяет DEC-040: его
+ *   сворачивают строкой `DEC-040 → merged into REQ-1`;
  * - 1 — метка в тексте: ID с точкой и словом следом (`…: REQ-3. The listing`)
  *   или полужирная метка с разделителем (`**REQ-7**: …`).
  *
@@ -167,17 +168,35 @@ function leadIds(start: string) {
  * задают правило, отображает как правило.
  */
 export function definitions(text: string) {
+  return new Map([...definitionSites(text)].map(([id, site]) => [id, site.strength]));
+}
+
+/** Ячейка из одних ID: `TC-01`, `REQ-1, REQ-2`, `(DEC-040)`. */
+const ID_CELL = new RegExp(`^[\\s(\\[*_\`]*(?:${RULE_LIST})[\\s)\\]*_\`.,;]*$`, 'u');
+
+/**
+ * Определения документа (`definitions`) с местом: сила и текст блоков, где ID
+ * определён (заголовок, начало блока, строка таблицы, строка с меткой).
+ */
+export function definitionSites(text: string) {
   const known = new Set(ruleTokens(text));
-  const out = new Map<string, number>();
-  const define = (ids: string[], strength: number) => {
-    for (const id of ids) if (known.has(id) && (out.get(id) ?? 0) < strength) out.set(id, strength);
+  const out = new Map<string, { strength: number; blocks: string[] }>();
+  const define = (ids: string[], strength: number, block: string) => {
+    for (const id of ids) {
+      if (!known.has(id)) continue;
+      const site = out.get(id);
+      if (!site) out.set(id, { strength, blocks: [block] });
+      else {
+        site.strength = Math.max(site.strength, strength);
+        site.blocks.push(block);
+      }
+    }
   };
   const inline = [
     new RegExp(`${BEFORE}(${RULE_LIST})[\`*_]*\\.[\`*_]*\\s+(?=\\p{L})`, 'gu'),
     new RegExp(`(?:\\*\\*|__)(${RULE_LIST})(?:\\*\\*|__)\\s*[:.—–]`, 'gu'),
     new RegExp(`(?:\\*\\*|__)(${RULE_LIST})[.:](?:\\*\\*|__)`, 'gu'),
   ];
-  const rows: string[][] = [];
   let fence: string | undefined;
   let previous = '';
   for (const line of text.split('\n')) {
@@ -192,22 +211,27 @@ export function definitions(text: string) {
     const heading = /^\s{0,3}#{1,6}\s+(.*?)\s*#*\s*$/.exec(line)?.[1];
     if (heading !== undefined) {
       const label = headingLabel(heading);
-      if (label) define([label], 3);
+      if (label) define([label], 3, heading);
       const plain = heading
         .replace(/\{#[^}]*\}\s*$/, '')
         .replace(MARKUP, '')
         .trim()
         .replace(SECTION_NUMBER, '');
       const named = new RegExp(`^\\p{L}+\\s+(${RULE_LIST})`, 'u').exec(plain);
-      if (named && SEPARATOR.test(plain.slice(named[0].length))) define(ruleTokens(named[1]), 3);
+      if (named && SEPARATOR.test(plain.slice(named[0].length)))
+        define(ruleTokens(named[1]), 3, heading);
       previous = '';
       continue;
     }
     // Начало блока: после пустой строки или заголовка, пункт списка (и
-    // задача), ячейка таблицы, элемент HTML; маркеры цитаты не считаются.
-    const bare = line.replace(/^\s*(?:>\s?)+/, '');
+    // задача), строка таблицы, элемент HTML; маркеры цитаты и строчная
+    // разметка HTML (`<strong>`) не считаются.
+    const bare = line
+      .replace(/^\s*(?:>\s?)+/, '')
+      .replace(/<\/?(?:strong|b|em|i|code|span|a)\b[^>]*>/gi, '');
     const item = /^\s*(?:[-*+]|\d+[.)])\s+(?:\[[ xX]\]\s+)?(.*)$/.exec(bare)?.[1];
     const starts: string[] = [];
+    const rows: string[][] = [];
     if (/^\s*\|/.test(bare))
       rows.push(
         bare
@@ -217,27 +241,24 @@ export function definitions(text: string) {
       );
     else if (item !== undefined) starts.push(item);
     else if (!previous.trim()) starts.push(bare);
-    // Элементы HTML: текст элемента до следующего тега; ячейки — запись строки.
+    // Элементы HTML: текст элемента до следующего тега; ячейки — строка таблицы.
     const cells = [...bare.matchAll(/<t[dh]\b[^>]*>([^<]*)/gi)].map((m) => m[1]);
     if (cells.length) rows.push(cells);
     for (const m of bare.matchAll(/<(?:li|p|dt|dd)\b[^>]*>([^<]*)/gi)) starts.push(m[1]);
-    for (const start of starts) define(leadIds(start), 2);
+    for (const start of starts) define(leadIds(start), 2, start);
+    // Строка таблицы: связь ID (матрица `| TC-01 | REQ-1 |`), если каждая
+    // непустая ячейка — одни ID, и тогда правил она не определяет; иначе её
+    // ключ — первая ячейка, которая начинается с ID (`| REQ-5 | … | DEC-040 |`
+    // определяет только REQ-5).
+    for (const row of rows) {
+      const filled = row.map((c) => c.trim()).filter(Boolean);
+      if (filled.length && filled.every((c) => ID_CELL.test(c))) continue;
+      const key = row.map(leadIds).find((ids) => ids.length);
+      if (key) define(key, 2, row.join(' | '));
+    }
     for (const pattern of inline)
-      for (const m of line.matchAll(pattern)) define(ruleTokens(m[1]), 1);
+      for (const m of line.matchAll(pattern)) define(ruleTokens(m[1]), 1, line);
     previous = bare;
-  }
-  // Строка таблицы, которая связывает ID, правила не определяет: две ячейки
-  // начинаются с ID (матрица `| TC-01 | REQ-1 |`) или другая ячейка называет
-  // правило, определённое вне таблиц (журнал `| DEC-040 | REQ-1 changed |`).
-  const elsewhere = new Set(out.keys());
-  for (const row of rows) {
-    const ids = row.map(leadIds);
-    if (ids.filter((x) => x.length).length > 1) continue;
-    ids.forEach((own, i) => {
-      if (!own.length) return;
-      const others = ruleTokens(row.filter((_, j) => j !== i).join(' '));
-      if (!others.some((id) => elsewhere.has(id))) define(own, 2);
-    });
   }
   return out;
 }

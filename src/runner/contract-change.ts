@@ -216,6 +216,16 @@ const active = (op: ContractChange) =>
 /** Представление операции наружу; `continued` — соседи, продолженные вслед за ней. */
 export type ContractChangeView = Omit<ContractChange, 'token' | 'leaseUntil'> & {
   next: Step | null;
+  /**
+   * Консолидация: ID, которые ревью этой операции отобразило слиянием
+   * (`merged into`) или ссылкой (`→ reference`), — их держит только суждение
+   * ревьюера, и ведущий видит их здесь.
+   */
+  mapping?: {
+    review: string;
+    merged?: { id: string; into: string }[];
+    demoted?: string[];
+  }[];
   continued?: ContractChangeView[];
 };
 
@@ -269,7 +279,18 @@ export class ContractChanges {
     const { token, leaseUntil, ...rest } = op;
     void token;
     void leaseUntil;
-    return { ...rest, next: stepsOf(op)[op.step] ?? null };
+    const mapping = this.reviewsOf(op)
+      .filter((a) => a.merged?.length || a.demoted?.length)
+      .map((a) => ({
+        review: a.id,
+        ...(a.merged?.length ? { merged: a.merged } : {}),
+        ...(a.demoted?.length ? { demoted: a.demoted } : {}),
+      }));
+    return {
+      ...rest,
+      next: stepsOf(op)[op.step] ?? null,
+      ...(mapping.length ? { mapping } : {}),
+    };
   }
 
   /** Начать операцию или вернуть уже идущую по тому же предложению. */

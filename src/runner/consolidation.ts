@@ -20,6 +20,7 @@ import {
 } from './agent-control.ts';
 import { pinArtifacts } from './contract-artifacts.ts';
 import {
+  definitionSites,
   definitions,
   headingLabel,
   headings,
@@ -161,6 +162,19 @@ export function mappingCheck(previous: string, next: string, summary: string) {
       ? parts.filter((_, i) => own[i] === best)
       : parts.filter((p) => p.ids.has(id));
   };
+  const sites = definitionSites(previous);
+  const flat = prose(next);
+  const survives = (id: string) => {
+    const site = sites.get(id);
+    return (
+      !!site &&
+      site.strength < 3 &&
+      site.blocks.some((b) => {
+        const own = prose(b);
+        return !!own && flat.includes(own);
+      })
+    );
+  };
   const covered = { ids: new Set<string>(), heads: new Set<string>() };
   const merges: { id: string; into: string }[] = [];
   const demoted: string[] = [];
@@ -179,9 +193,11 @@ export function mappingCheck(previous: string, next: string, summary: string) {
     // `ID → reference`: ID помечен в старом тексте, но правилом документа не
     // был (запись журнала, сценарий теста, решение) и стоит в новом тексте
     // дословно. Строку ревьюер подтверждает одобрением; попытка её называет.
+    // Только для определения не заголовком, чей текст остался в новом
+    // тексте (сменилась разметка): исчезнувшее правило ссылкой не станет.
     if (/^\s*(?:reference|ссылка)(?!\p{L})/iu.test(right)) {
       for (const id of named)
-        if (defined.has(id) && newIds.has(id) && !covered.ids.has(id)) {
+        if (defined.has(id) && newIds.has(id) && !covered.ids.has(id) && survives(id)) {
           covered.ids.add(id);
           demoted.push(id);
         }
@@ -215,7 +231,12 @@ export function mappingCheck(previous: string, next: string, summary: string) {
       if (!merges.some((x) => x.id === id)) merges.push({ id, into: into! });
       return true;
     };
-    for (const h of heads) covered.heads.add(h.text);
+    // Заголовок с меткой правила (`## REQ-2. …`) отображён, только если его
+    // правило отображено этой строкой.
+    for (const h of heads) {
+      const id = h.label ? ruleTokens(h.label)[0] : undefined;
+      if (!id || holds(id)) covered.heads.add(h.text);
+    }
     // Раздел, названный меткой (`ORD-04`), — как его ID.
     for (const h of oldHeads)
       if (h.label && whole(left, h.label)) {
@@ -240,6 +261,17 @@ export function mappingCheck(previous: string, next: string, summary: string) {
 /** Пропуски отображения (см. `mappingCheck`). */
 export function mappingGaps(previous: string, next: string, summary: string) {
   return mappingCheck(previous, next, summary).gaps;
+}
+
+/** Текст без ID, разметки и пунктуации, в нижнем регистре: сравнение блоков. */
+function prose(text: string) {
+  let out = ` ${text} `;
+  for (const id of ruleTokens(text)) out = out.split(id).join(' ');
+  return out
+    .replace(/[\p{P}\p{S}]/gu, ' ')
+    .replace(/\s+/g, ' ')
+    .trim()
+    .toLowerCase();
 }
 
 /** «пропуск», «пропуска», «пропусков» по числу. */

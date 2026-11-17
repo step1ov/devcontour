@@ -4,28 +4,26 @@ import { definitions, mappingGaps, reviewConsolidation } from '../src/runner/con
 import { consolidationStage, reviewers } from './consolidation-fixture.ts';
 
 /**
- * Журналы и матрицы в консолидации (F49, ревью 2): строка таблицы, которая
- * связывает ID (решение → правило, тест → правило), правила не определяет;
- * ID, помеченный в старом тексте, но не правило документа, отображается
- * строкой `ID → reference`; слияние пишется в начале правой части и видно в
+ * Журналы и матрицы в консолидации (F49, ревью 2–3): строка таблицы из одних
+ * ID правил не определяет; запись журнала сворачивается слиянием в правило,
+ * которое она меняла; слияние пишется в начале правой части и видно в
  * попытке; строка со всеми правилами — обычная строка.
  */
 
 const RULES = '# S\n\n## Rules\n\nREQ-1. Totals are positive.\n\nREQ-2. Refunds within 30 days.\n';
 
-test('F49 R1: dropping a decision journal table and a test matrix needs no line for their ids', () => {
+test('F49 R1: dropping a test matrix of ids alone needs no line for its ids', () => {
   const old =
     RULES +
-    '\n## Amendments\n\n| Decision | Change |\n|---|---|\n| DEC-040 | REQ-1 changed to five |\n| DEC-041 | Added REQ-2 |\n' +
     '\n## Traceability\n\n| Test | Rule |\n|---|---|\n| TC-01 | REQ-1 |\n| TC-02 | REQ-2 |\n';
   const next =
-    '# S\n\n## Rules\n\nREQ-1. Totals are positive (DEC-040, TC-01).\n\nREQ-2. Refunds within 30 days (DEC-041, TC-02).\n';
+    '# S\n\n## Rules\n\nREQ-1. Totals are positive (TC-01).\n\nREQ-2. Refunds within 30 days (TC-02).\n';
   assert.deepEqual([...definitions(old).keys()].sort(), ['REQ-1', 'REQ-2']);
   assert.deepEqual(
     mappingGaps(
       old,
       next,
-      'Rules, REQ-1, REQ-2 → Rules\nAmendments → Rules (journal folded, decisions cited inline)\nTraceability → Rules (tests cited inline)',
+      'Rules, REQ-1, REQ-2 → Rules\nTraceability → Rules (tests cited inline)',
     ),
     [],
   );
@@ -47,22 +45,17 @@ test('F49 R1: a real rule row is still a definition and cannot become a mention'
   );
 });
 
-test('F49 R1: an id the old text labels but that is not a rule is mapped "→ reference" and stays in the text', () => {
+test('F49 R1: a dropped decision list is folded with "merged into"; "→ reference" does not clear it', () => {
   const old = RULES + '\n## Decisions\n\n- DEC-004, DEC-005: chosen storage.\n';
   const next =
     '# S\n\n## Rules\n\nREQ-1. Totals are positive.\n\nREQ-2. Refunds within 30 days (DEC-004, DEC-005).\n';
   const base = 'Rules, REQ-1, REQ-2 → Rules\nDecisions → Rules (decisions cited inline)';
-  assert.deepEqual(mappingGaps(old, next, base), [
-    'DEC-004 (в новом тексте не определено)',
-    'DEC-005 (в новом тексте не определено)',
-  ]);
-  assert.deepEqual(mappingGaps(old, next, base + '\nDEC-004, DEC-005 → reference (journal)'), []);
-  assert.deepEqual(mappingGaps(old, next, base + '\nDEC-004, DEC-005 → ссылка'), []);
-  // Пометка ссылкой не прячет пропавший токен.
-  assert.deepEqual(
-    mappingGaps(old, next.replace(', DEC-005', ''), base + '\nDEC-004, DEC-005 → reference'),
-    ['DEC-005 (в новом тексте не определено)'],
-  );
+  const gone = ['DEC-004 (в новом тексте не определено)', 'DEC-005 (в новом тексте не определено)'];
+  assert.deepEqual(mappingGaps(old, next, base), gone);
+  // Запись исчезла: ссылкой её не снять.
+  assert.deepEqual(mappingGaps(old, next, base + '\nDEC-004, DEC-005 → reference'), gone);
+  assert.deepEqual(mappingGaps(old, next, base + '\nDEC-004, DEC-005 → merged into REQ-2'), []);
+  assert.deepEqual(mappingGaps(old, next, base + '\nDEC-004, DEC-005 → слито в REQ-2'), []);
 });
 
 test('F49 R2: the merge phrase counts only at the start of the right side', () => {
