@@ -10,8 +10,7 @@ import { randomUUID } from 'node:crypto';
 import { join } from 'node:path';
 import { HarnessError, Runner, fencedRefMove } from 'devcontour-harness';
 import { DevContour, waitBaseCheck } from '../core/service.ts';
-import type { DevContourState } from '../core/model.ts';
-import { holdSensitiveBaseMove } from './base-check.ts';
+import { readBases, settleStaleBaseStop } from './stale-base.ts';
 import { repository, repositories } from '../core/repositories.ts';
 import { validateWorkflow } from '../core/workflow.ts';
 import { TaskFailure } from '../core/failure.ts';
@@ -171,22 +170,11 @@ export class Scheduler {
    * дерево без того, что ему поручено выполнить.
    */
   async baseDrift() {
-    const drift: { repositoryId: string; branch: string; behind: number; ahead: number }[] = [];
-    for (const repo of repositories(this.h.config)) {
-      const target = this.targetFor(repo.id);
-      const head = await git(repo.path, 'rev-parse', 'HEAD');
-      const tip = await git(repo.path, 'rev-parse', target);
-      if (head === tip) continue;
-      const behind = Number(await git(repo.path, 'rev-list', '--count', `${target}..HEAD`));
-      if (!behind) continue;
-      drift.push({
-        repositoryId: repo.id,
-        branch: repo.targetBranch,
-        behind,
-        ahead: Number(await git(repo.path, 'rev-list', '--count', `HEAD..${target}`)),
-      });
-    }
-    return drift;
+    return (await this.baseState()).drift;
+  }
+  /** Вершины баз прогонов и отставание по ним — один снимок (`readBases`). */
+  baseState() {
+    return readBases(this.h);
   }
   /**
    * Перемотать отставшую базу прогонов, когда это чистый fast-forward одних
@@ -308,29 +296,20 @@ export class Scheduler {
    * Остановка «база прогонов отстала» (`assertBaseCurrent`) — техническая:
    * её ставит сам такт на идущей очереди, записывая сбой (`scheduler.error`
    * с вершинами баз прогонов в `targets`) и паузу без причины. Пока она
-   * стоит, такт (не чаще `staleBaseProbeMs`) сверяет базу:
+   * стоит, такт не чаще `staleBaseProbeMs` сверяет базу общим правилом
+   * `settleStaleBaseStop` (то же у шага `base` операции изменения
+   * контракта): базы на записанных вершинах — остановка снята; база сдвинута
+   * мимо `base-update` или вершина не записана — ожидание `base-check` с
+   * удержанием чувствительных путей, а не выдача.
    *
-   * - отставания нет, и базы прогонов на тех же вершинах, что при остановке,
-   *   — значит, коммиты ушли с рабочей ветки: такт снимает свою остановку
-   *   (`scheduler.stale-base.cleared`) и в том же такте снова сверяет базу
-   *   перед выдачей;
-   * - отставания нет, но база сдвинута мимо `base-update` (git напрямую) —
-   *   это перенос базы, а не повод выдавать: очередь встаёт на ожидание
-   *   `base-check` с диапазоном от записанной вершины
-   *   (`scheduler.stale-base.target-moved`), удержание чувствительных путей
-   *   записывается сразу (`holdSensitiveBaseMove`), дальше — gates базы и
-   *   правило удержания (D42), как после `base-update`;
-   * - остановка прежней версии без `targets` не снимается.
-   *
-   * Только пауза `staleBaseStop` (без причины, классов отказа и ожиданий;
-   * последний сбой такта после неё — отставание базы); запись — CAS по
-   * времени паузы. Сбой сверки (git) в журнал сбоев не пишется и выдачу не
-   * трогает: следующая сверка повторит её.
+   * Сбой сверки (git, ref удалён, разбор удержания) в журнал сбоев такта не
+   * пишется и остальной такт не прерывает: следующая сверка повторит её. Его
+   * причина пишется одним событием `scheduler.stale-base.probe-failed` на
+   * остановку — панель и пакет ведущего могут её назвать.
    */
   private async releaseStaleBaseStop() {
     const view = this.h.store.view();
-    const errors = this.h.store.latestEvents(['scheduler.error'], 50);
-    if (!staleBaseStop(view, errors)) {
+    if (!staleBaseStop(view, this.h.store.latestEvents(['scheduler.error'], 50))) {
       this.staleBaseProbe = undefined;
       return;
     }
@@ -338,48 +317,20 @@ export class Scheduler {
     const probe = this.staleBaseProbe;
     if (probe?.since === since && Date.now() - probe.at < this.staleBaseProbeMs) return;
     this.staleBaseProbe = { since, at: Date.now() };
-    // Сбой, который `staleBaseStop` назвал причиной (последний после паузы).
-    const from = Date.parse(since) - 1000;
-    const cause = errors.find((e) => Date.parse(e.at) >= from);
-    const targets = (cause?.data as { targets?: Record<string, string> } | undefined)?.targets;
-    if (!targets) return;
-    if ((await this.baseDrift()).length) return;
-    const moved: { repositoryId: string; from: string; to: string }[] = [];
-    for (const repo of repositories(this.h.config)) {
-      const to = await git(repo.path, 'rev-parse', this.targetFor(repo.id));
-      const recorded = targets[repo.id];
-      if (!recorded) return;
-      if (recorded !== to) moved.push({ repositoryId: repo.id, from: recorded, to });
+    try {
+      await settleStaleBaseStop(this.h, this.root, { by: 'tick', read: () => this.baseState() });
+    } catch (error) {
+      const noted = this.h.store
+        .latestEvents(['scheduler.stale-base.probe-failed'], 1)
+        .some((e) => (e.data as { pausedAt?: string } | undefined)?.pausedAt === since);
+      if (!noted)
+        this.h.store.atomic(() =>
+          this.h.store.appendEvent('scheduler.stale-base.probe-failed', {
+            pausedAt: since,
+            error: error instanceof Error ? error.message : String(error),
+          }),
+        );
     }
-    const same = (s: DevContourState) =>
-      s.paused &&
-      !s.pauseReason &&
-      !s.pauseFailures?.length &&
-      !s.waits?.length &&
-      s.pausedAt === since;
-    if (!moved.length) {
-      this.h.store.change('scheduler.stale-base.cleared', (s) => {
-        // CAS: та же пауза, что прочитана до сверки базы.
-        if (!same(s)) return { cleared: false };
-        s.paused = false;
-        delete s.pausedAt;
-        delete s.pauseActor;
-        return { cleared: true, pausedAt: since };
-      });
-      return;
-    }
-    const recorded = this.h.store.change('scheduler.stale-base.target-moved', (s) => {
-      if (!same(s)) return { recorded: false };
-      s.pauseReason = 'base-check';
-      s.pausedAt = new Date().toISOString();
-      waitBaseCheck(
-        s,
-        moved,
-        `База прогонов перенесена мимо base-update (${moved.map((m) => m.repositoryId).join(', ')}): проверьте её гейтами и продолжите очередь`,
-      );
-      return { recorded: true, pausedAt: since, updated: moved };
-    });
-    if (recorded.recorded) await holdSensitiveBaseMove(this.h, this.root);
   }
   /**
    * Сбой такта интервала: пауза без причины и событие `scheduler.error`.
@@ -402,7 +353,9 @@ export class Scheduler {
   private async assertBaseCurrent(
     { sensitive, held }: { sensitive: string[]; held: string[] } = { sensitive: [], held: [] },
   ) {
-    const drift = await this.baseDrift();
+    // Вершины, которые запишет остановка, — из того же снимка, что нашёл
+    // отставание: сдвиг ref между двумя чтениями записал бы сдвинутую.
+    const { drift, tips: targets } = await this.baseState();
     if (!drift.length) return;
     // Перенос, который gates не подтвердят, после base-update ждёт человека
     // (D42): подсказка называет этот шаг заранее, а не только «выполните
@@ -411,9 +364,6 @@ export class Scheduler {
       held.length && this.h.config.approvalMode === 'agent'
         ? ` После переноса очередь продолжит только подтверждение оператора (${held.slice(0, 20).join(', ')}): «Подтвердить и запустить» в «Внимании» панели; ведущий агент это ожидание сам не снимает — попросите пользователя подтвердить перенос. Без человека — только изменение приёмки через contract-change; документ контракта снимает цикл, если его редакцию одобрило независимое ревью (review-contract).`
         : '';
-    const targets: Record<string, string> = {};
-    for (const repo of repositories(this.h.config))
-      targets[repo.id] = await git(repo.path, 'rev-parse', this.targetFor(repo.id));
     throw Object.assign(
       new TaskFailure(
         'stale-base',

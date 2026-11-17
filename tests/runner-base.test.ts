@@ -861,15 +861,15 @@ test('Такт снимает свою остановку «база прого�
     await reset(prepared);
     await stop();
     await git(repo.path, 'checkout', '-q', '--detach', start);
-    const drift = scheduler.baseDrift.bind(scheduler);
-    scheduler.baseDrift = async () => {
+    const read = scheduler.baseState.bind(scheduler);
+    scheduler.baseState = async () => {
       if (f.store.read().pauseReason !== 'operator') f.h.pause(true);
-      return drift();
+      return read();
     };
     try {
       await scheduler.tick();
     } finally {
-      scheduler.baseDrift = drift;
+      scheduler.baseState = read;
     }
     assert.equal(f.store.read().paused, true, 'пауза во время сверки остаётся');
     assert.equal(f.store.read().pauseReason, 'operator');
@@ -915,6 +915,88 @@ test('Такт снимает свою остановку «база прого�
       /меняет приёмку или настройку контура \(.*\.devcontour\/probe\.md/,
     );
     assert.equal(runs(), before, 'выдачи нет');
+
+    // 7. Остановка прежней версии (без `targets`): не тупик — когда
+    // отставания нет, это ожидание `base-check` на текущей вершине.
+    await reset(start);
+    f.store.change('scheduler.error', (st) => {
+      st.paused = true;
+      st.pausedAt = new Date().toISOString();
+      return {
+        error:
+          'TaskFailure: База прогонов отстала от рабочей ветки: main — main без 1 коммитов. Выполните devcontour base-update, иначе исполнитель получит дерево без подготовленной работы.',
+      };
+    });
+    await scheduler.tick();
+    const legacy = f.store.read();
+    assert.equal(legacy.paused, true, 'без записанных вершин выдачи нет');
+    assert.equal(legacy.pauseReason, 'base-check', 'остановка прежней версии — не тупик');
+    assert.deepEqual(
+      (
+        f.store.events().find((e) => e.type === 'scheduler.stale-base.target-moved')?.data as {
+          unknown?: string[];
+        }
+      ).unknown,
+      [repo.id],
+    );
+
+    // 8. Сверка под остановкой — не чаще staleBaseProbeMs; первая — сразу.
+    await reset(prepared);
+    scheduler.staleBaseProbeMs = 60_000;
+    await stop();
+    await scheduler.tick();
+    await git(repo.path, 'checkout', '-q', '--detach', start);
+    await scheduler.tick();
+    assert.equal(f.store.read().paused, true, 'вторая сверка в пределе ждёт');
+    scheduler.staleBaseProbeMs = 0;
+    await scheduler.tick();
+    assert.equal(f.store.read().paused, false, 'сверка после предела снимает');
+
+    // 9. Сбой сверки — одно событие на остановку, не сбой такта.
+    await reset(prepared);
+    await stop();
+    const errorsBefore = f.store.events().filter((e) => e.type === 'scheduler.error').length;
+    const real = scheduler.baseState.bind(scheduler);
+    scheduler.baseState = () => Promise.reject(new Error('ref удалён'));
+    try {
+      await scheduler.tick();
+      await scheduler.tick();
+    } finally {
+      scheduler.baseState = real;
+    }
+    const failedProbes = f.store
+      .events()
+      .filter((e) => e.type === 'scheduler.stale-base.probe-failed')
+      .map((e) => e.data as { pausedAt: string; error: string });
+    assert.deepEqual(failedProbes, [{ pausedAt: f.store.read().pausedAt!, error: 'ref удалён' }]);
+    assert.equal(
+      f.store.events().filter((e) => e.type === 'scheduler.error').length,
+      errorsBefore,
+      'сбой сверки — не сбой такта',
+    );
+
+    // 10. Вершины остановки — из того же снимка, что нашёл отставание: сдвиг
+    // ref сразу после чтения не записывается как вершина остановки.
+    await reset(prepared);
+    let reads = 0;
+    scheduler.baseState = async () => {
+      const read = await real();
+      // Второе чтение — то, по которому такт ставит остановку.
+      if (++reads === 2) await git(repo.path, 'update-ref', target, prepared);
+      return read;
+    };
+    try {
+      await stop();
+    } finally {
+      scheduler.baseState = real;
+    }
+    const recorded = f.store.events().find((e) => e.type === 'scheduler.error')?.data as {
+      targets?: Record<string, string>;
+    };
+    assert.deepEqual(recorded.targets, { [repo.id]: start });
+    // Ref уже сдвинут: следующая сверка видит перенос, а не уход коммитов.
+    await scheduler.tick();
+    assert.equal(f.store.read().pauseReason, 'base-check');
   } finally {
     await scheduler.stop();
     if (branch) {
