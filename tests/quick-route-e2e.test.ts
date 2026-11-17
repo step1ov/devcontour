@@ -9,7 +9,7 @@
 // чужими именами выдали бы fixture за AI. Поэтому ведущий агент после setup
 // переводит локальную конфигурацию в учебный режим (`mode: "demo"`, runtime
 // `demo`), и панель, попытки и доказательства называют его учебным.
-import { test } from 'node:test';
+import { after, test } from 'node:test';
 import assert from 'node:assert/strict';
 import { execFileSync, spawn, spawnSync } from 'node:child_process';
 import { createHash } from 'node:crypto';
@@ -263,7 +263,7 @@ async function until<T>(
   while (Date.now() < deadline) {
     last = await read();
     if (done(last)) return last;
-    await new Promise((r) => setTimeout(r, 250));
+    await new Promise((r) => setTimeout(r, 100));
   }
   assert.fail(`${what}: не дождались за ${ms} мс; последнее: ${JSON.stringify(last)}`);
 }
@@ -276,6 +276,26 @@ type App = Awaited<ReturnType<typeof startWorkspace>>;
  * Случайная живая привязка роли проваливает тест, а не вызывает модель.
  */
 function guardLiveRuntimes() {
+  const dir = (guardDir ??= guardScripts());
+  const marker = join(dir, 'live-runtime-called');
+  // Отметка прежнего теста не переходит в следующий.
+  rmSync(marker, { force: true });
+  const saved = process.env.PATH;
+  process.env.PATH = dir + delimiter + (saved ?? '');
+  return {
+    called: () => (existsSync(marker) ? readFileSync(marker, 'utf8') : ''),
+    restore() {
+      process.env.PATH = saved;
+    },
+  };
+}
+/**
+ * Сторожевые скрипты — одни на файл: первый запуск нового исполняемого файла
+ * macOS проверяет сотни миллисекунд, и свежие скрипты в каждом тесте
+ * оплачивали бы эту проверку заново. Отметку вызова каждый тест начинает пустой.
+ */
+let guardDir: string | undefined;
+function guardScripts() {
   const dir = temp();
   const marker = join(dir, 'live-runtime-called');
   for (const name of ['claude', 'codex'])
@@ -284,16 +304,11 @@ function guardLiveRuntimes() {
       `#!/bin/sh\nif [ "$1" = "--version" ]; then echo "${name} guard: live runtime forbidden in tests"; exit 0; fi\necho "${name} $*" >> '${marker}'\nexit 97\n`,
       { mode: 0o755 },
     );
-  const saved = process.env.PATH;
-  process.env.PATH = dir + delimiter + (saved ?? '');
-  return {
-    called: () => (existsSync(marker) ? readFileSync(marker, 'utf8') : ''),
-    restore() {
-      process.env.PATH = saved;
-      remove(dir);
-    },
-  };
+  return dir;
 }
+after(() => {
+  if (guardDir) remove(guardDir);
+});
 
 type Binding = { runtime: string; model?: string; effort?: string; reviewer?: Binding };
 const toTraining = (roles: Record<string, Binding> | undefined) => {
@@ -649,18 +664,21 @@ for (const [manager, mode] of [
 
           // m13: чтение маршрута не меняет ни файлов репозитория, ни .git.
           // Сначала фоновая уборка рабочих деревьев попытки заканчивается:
-          // два одинаковых снимка подряд.
+          // в .git/worktrees не осталось записей, и два снимка подряд
+          // одинаковы. Уборка — единственное, что пишет в репозиторий после
+          // исполнения; ждать её по признаку быстрее, чем по паузе.
+          const worktrees = join(root, '.git/worktrees');
           let before = snapshot(root, ['.devcontour-local']);
           await until(
             'покой репозитория',
             async () => {
-              await new Promise((r) => setTimeout(r, 1500));
+              await new Promise((r) => setTimeout(r, 200));
               const next = snapshot(root, ['.devcontour-local']);
               const same = JSON.stringify(next) === JSON.stringify(before);
               before = next;
-              return same;
+              return same && (!existsSync(worktrees) || readdirSync(worktrees).length === 0);
             },
-            (same) => same,
+            (quiet) => quiet,
             60000,
           );
           await quick(app.url, r.changeId);
