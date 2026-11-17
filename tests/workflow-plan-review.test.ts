@@ -204,3 +204,64 @@ test('Отмена задания ведущего прерывает идуще
     f.cleanup();
   }
 });
+
+test('F54: отказ ревью плана с длинной сводкой сохраняет в ошибке задания ссылку на полные находки', async () => {
+  const f = fixture();
+  try {
+    f.h.config.repository = f.root;
+    f.h.config.mode = 'local';
+    f.h.config.approvalMode = 'agent';
+    const board = f.h.createBoard('Long rejection', '', 'main');
+    f.h.addTask(board.id, input());
+    const summary = Array.from({ length: 300 }, (_, i) => `Причина ${i} описана подробно.`).join(
+      ' ',
+    );
+    const findings = Array.from({ length: 5 }, (_, i) => ({
+      severity: 'blocking',
+      message: `Находка ${i}: ` + 'подробность '.repeat(60),
+    }));
+    const verbose = (name: 'codex' | 'claude'): AgentAdapter => ({
+      name,
+      execute: () =>
+        Promise.resolve({
+          data: { approved: false, summary, discoveries: [], findings, previous: [] },
+          log: 'Fixture only; no provider called',
+          command: ['fixture'],
+        }),
+    });
+    const error = await reviewPlan(f.h, f.root, board.id, 'codex', {
+      codex: verbose('codex'),
+      claude: verbose('claude'),
+    }).then(
+      () => assert.fail('ревью должно отклонить'),
+      (e: unknown) => e as Error,
+    );
+    const attempt = f.store.read().contractAttempts!.at(-1)!;
+    assert.ok(summary.length > 1000);
+    assert.ok(error.message.length <= 1000, String(error.message.length));
+    assert.ok(error.message.startsWith('Независимое ревью отклонено: Причина 0'));
+    assert.ok(
+      error.message.endsWith(
+        `Находок: 5; полный текст ревью — review.json в каталоге решения. Артефакты: ${attempt.artifact}`,
+      ),
+      error.message.slice(-300),
+    );
+    // Полный текст — по ссылке: сводка и все находки целиком.
+    assert.equal(attempt.summary, summary);
+    const saved = JSON.parse(await readFile(join(attempt.artifact, 'review.json'), 'utf8')) as {
+      response: { summary: string; findings: unknown[] };
+    };
+    assert.equal(saved.response.summary, summary);
+    assert.equal(saved.response.findings.length, 5);
+    assert.equal(attempt.findings.length, 5);
+    // Через очередь заданий ссылка доходит до ведущего без обрезки.
+    const runner = new LeadRunner(f.h, f.root);
+    const job = runner.workflow.start({ kind: 'board', id: board.id, authorRuntime: 'codex' });
+    runner.workflow.fail(runner.workflow.claim(job.key, 'main')!, error.message);
+    const failed = runner.workflow.list('main').find((j) => j.key === job.key)!;
+    assert.equal(failed.status, 'failed');
+    assert.ok(failed.error!.endsWith(`Артефакты: ${attempt.artifact}`));
+  } finally {
+    f.cleanup();
+  }
+});

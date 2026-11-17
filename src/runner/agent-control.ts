@@ -1,5 +1,6 @@
 import { technicalReview } from 'devcontour-harness';
 import { attemptNumbers } from '../core/attempt-numbers.ts';
+import { clipAtBoundary } from '../core/clip.ts';
 import { reviewExecutionOf, toDomain } from '../harness/execution.ts';
 import { runtimeAdapters } from '../harness/adapters.ts';
 import { carriedTaskIds } from '../core/work-status.ts';
@@ -287,6 +288,8 @@ export function checksWarnings(
 type Author = 'codex' | 'claude';
 type Runtimes = Record<Author, AgentAdapter>;
 
+/** Предел текста отказа ревью: столько хранит ошибка задания очереди. */
+const REJECTION_LIMIT = 1000;
 // Попытки накапливаются: держим последние, чтобы состояние не росло без предела.
 const MAX_CONTRACT_ATTEMPTS = 60;
 function recordContractAttempt(h: DevContour, attempt: ContractAttempt) {
@@ -543,12 +546,19 @@ async function review(
     const feasibility = record.findings.filter(
       (f) => f.status === 'open' && f.severity === 'blocking' && f.rule === FEASIBILITY,
     );
+    // Текст отказа доходит до ведущего через ошибку задания (предел 1000
+    // знаков в очереди): длинная сводка вытесняла ссылку на полные находки
+    // (F54). Ссылка и число находок идут целиком, сокращается сводка.
+    // Окончание «Артефакты: <каталог>» разбирает операция изменения контракта.
+    const pointer = ` Находок: ${opened.length}; полный текст ревью — review.json в каталоге решения. Артефакты: ${artifact}`;
     throw new DomainError(
-      `Независимое ревью отклонено: ${record.summary}.` +
-        (feasibility.length
-          ? ` Обязательства невыполнимы или неизмеримы в заявленном виде: ${feasibility.map((f) => f.message).join('; ')}. Добавьте ограничения области входов и ресурсов, допущения или измените требование.`
-          : '') +
-        ` Артефакты: ${artifact}`,
+      clipAtBoundary(
+        `Независимое ревью отклонено: ${record.summary}.` +
+          (feasibility.length
+            ? ` Обязательства невыполнимы или неизмеримы в заявленном виде: ${feasibility.map((f) => f.message).join('; ')}. Добавьте ограничения области входов и ресурсов, допущения или измените требование.`
+            : ''),
+        Math.max(200, REJECTION_LIMIT - pointer.length),
+      ) + pointer,
     );
   }
   return {

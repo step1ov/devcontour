@@ -209,7 +209,9 @@ test('A revision without checks is warned about before the model call; a rejecte
     assert.ok(attempt, 'ссылка на попытку ревью');
     assert.equal(attempt.summary, summary, 'полный текст доступен по ссылке');
     assert.equal(entry.review!.artifact, attempt.artifact);
-    assert.ok(failed.error!.length <= 1000 && failed.error!.endsWith('…'));
+    // F54: сокращается сводка, ссылка на полный текст доходит целиком.
+    assert.ok(failed.error!.length <= 1000, String(failed.error!.length));
+    assert.ok(failed.error!.endsWith(`Артефакты: ${attempt.artifact}`), failed.error!.slice(-200));
   } finally {
     await s.remove();
   }
