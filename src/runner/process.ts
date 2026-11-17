@@ -9,6 +9,7 @@ import { resolve } from 'node:path';
 import {
   forgetWorktree,
   hostGitArgs,
+  reapFailure,
   rememberWorktree,
   worktreeAddPath,
   worktreeKey,
@@ -51,6 +52,8 @@ export async function command(
      * полон: окружение можно очистить, опрос можно опередить, каталог сменить.
      */
     contain?: boolean | { dirs: string[] };
+    /** Что это за команда — в тексте отказа остановки потомков. */
+    label?: string;
   } = {},
 ): Promise<CommandResult> {
   if (!argv.length) throw new Error('Пустая команда');
@@ -172,12 +175,22 @@ export async function command(
       cleanup();
       if (child.pid && mark)
         for (const [pid, start] of await descendants(child.pid, seen)) seen.set(pid, start);
-      const survivors = mark ? await sweep(mark, seen, dirs, Date.parse(startedAt)) : [];
-      if (survivors.length) {
+      const swept = mark
+        ? await sweep(mark, seen, dirs, Date.parse(startedAt))
+        : { survivors: [] as number[] };
+      // Потомков не удалось остановить или пересчитать: отказ окружения
+      // (`environment`/`process-reap`) с тем же текстом, что у harness.
+      // Результата команды нет — её исход не принимается.
+      if (swept.survivors.length || swept.inventory) {
         reject(
-          new Error(
-            `Не удалось завершить процессы проверки: ${survivors.join(', ')}. Ресурсы не освобождены`,
-          ),
+          reapFailure({
+            label: options.label ?? argv[0].split('/').at(-1) ?? argv[0],
+            pid: child.pid,
+            code,
+            signal,
+            ...swept,
+            ...(options.redact ? { redact: options.redact } : {}),
+          }),
         );
         return;
       }
@@ -319,12 +332,29 @@ function output(
   /** Код выхода, при котором вывод остаётся верным (lsof: часть процессов уже завершилась). */
   partial?: number,
 ): Promise<string | null> {
+  return outcome(command, args, timeout, partial).then((r) => ('error' in r ? null : r.stdout));
+}
+/** Вывод системной утилиты или причина, по которой его нет. */
+function outcome(
+  command: string,
+  args: string[],
+  timeout: number,
+  partial?: number,
+): Promise<{ stdout: string } | { error: string }> {
   return new Promise((resolve) => {
     execFile(
       command,
       args,
       { encoding: 'utf8', timeout, maxBuffer: 64_000_000, env: osToolEnv() },
-      (error, stdout) => resolve(error && (!partial || error.code !== partial) ? null : stdout),
+      (error, stdout) => {
+        if (!error || (partial && error.code === partial)) return resolve({ stdout });
+        const name = command.split('/').at(-1) ?? command;
+        resolve({
+          error: error.killed
+            ? `${name} не ответил за ${Math.round(timeout / 1000)} с`
+            : `${name}: ${typeof error.code === 'number' ? `код выхода ${error.code}` : (error.code ?? error.message)}`,
+        });
+      },
     );
   });
 }
@@ -344,9 +374,9 @@ async function marked(mark: string): Promise<number[]> {
     });
   }
   // macOS: -E добавляет окружение к команде для процессов своего пользователя.
-  const stdout = await output('ps', ['-Eww', '-ax', '-o', 'pid=,command='], 10000);
-  if (stdout === null) throw new Error('Не удалось перечислить процессы проверки');
-  return stdout.split('\n').flatMap((line) => {
+  const listed = await outcome('ps', ['-Eww', '-ax', '-o', 'pid=,command='], 10000);
+  if ('error' in listed) throw new Error(listed.error);
+  return listed.stdout.split('\n').flatMap((line) => {
     const m = /^\s*(\d+)\s+(.*)$/.exec(line);
     return m && m[2].includes(needle) && Number(m[1]) !== process.pid ? [Number(m[1])] : [];
   });
@@ -443,30 +473,55 @@ async function inside(
   return pids;
 }
 /** Остановить всех потомков команды; вернуть тех, кто пережил попытки. */
+/**
+ * Перечень процессов для остановки потомков; объект — чтобы тест мог
+ * подменить его отказ.
+ */
+export const processInventory = { marked };
+/** Сколько раз перечень может не получиться за одну остановку, прежде чем она сдаётся. */
+const INVENTORY_TRIES = 3;
+/**
+ * Остановить всех потомков команды; вернуть тех, кто пережил попытки, и —
+ * если перечень так и не получен — почему. Перечень не получен — не «живых
+ * нет»: команда тогда не считается завершённой. Правило то же, что у harness.
+ */
 async function sweep(
   mark: string,
   seen: Map<number, string>,
   dirs: string[],
   since: number,
-): Promise<number[]> {
+): Promise<{ survivors: number[]; inventory?: string }> {
   let left: number[] = [];
+  let failures = 0;
   for (let attempt = 0; attempt < 20; attempt++) {
     try {
       const rows = await processTable();
       const table = new Map(rows.map((r) => [r.pid, r.start]));
       left = [
         ...new Set([
-          ...(await marked(mark)),
+          ...(await processInventory.marked(mark)),
           // Замеченный опросом потомок — только если это тот же процесс, а
           // не новый, получивший освободившийся PID.
           ...[...seen].filter(([pid, start]) => table.get(pid) === start).map(([pid]) => pid),
           ...(await inside(dirs, since, rows)),
         ]),
       ];
-    } catch {
-      return [-1];
+    } catch (error) {
+      // Под нагрузкой хоста `ps` не укладывается в свой предел: перечень
+      // повторяется, а не объявляется отказом с первого раза. Уже известные
+      // потомки останавливаются и между попытками.
+      const reason = error instanceof Error ? error.message : String(error);
+      if (++failures >= INVENTORY_TRIES) return { survivors: left, inventory: reason };
+      for (const pid of left)
+        try {
+          process.kill(pid, 'SIGKILL');
+        } catch {
+          /* Already gone. */
+        }
+      await new Promise((r) => setTimeout(r, 500 * failures));
+      continue;
     }
-    if (!left.length) return [];
+    if (!left.length) return { survivors: [] };
     for (const pid of left)
       try {
         process.kill(pid, 'SIGKILL');
@@ -475,5 +530,5 @@ async function sweep(
       }
     await new Promise((r) => setTimeout(r, 100));
   }
-  return left;
+  return { survivors: left };
 }
