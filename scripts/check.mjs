@@ -1,6 +1,3 @@
-import { closeSync, openSync, unlinkSync, writeSync } from 'node:fs';
-import { tmpdir } from 'node:os';
-import { join } from 'node:path';
 import { checkProcesses } from './check-processes.mjs';
 import { describeLoad, measureLoad, translatedGit, waitForQuiet } from './machine-load.mjs';
 import { sweepOrphans } from './orphans.mjs';
@@ -16,31 +13,32 @@ import { sweepOrphans } from './orphans.mjs';
 // - check:skill reads lib/ and refuses a build older than src/, so it follows
 //   build:lib; it compares the tracked skill reference *before* build:assets
 //   regenerates it, so a stale reference cannot be hidden by the generator.
-// - smoke-package packs lib/ and dist/ and needs only the build, so it runs
-//   beside the Node suite, which keeps its full concurrency
-//   (DEVCONTOUR_TEST_CONCURRENCY, default 4). test:e2e runs after both: beside
-//   the Node suite (at one file fewer) it was measured to take twice as long,
-//   30 instead of 15 minutes, and its server start and full-workflow tests
-//   timed out, while the slower Node suite cancelled any gain.
+// - The Node suite runs alone, at its full concurrency
+//   (DEVCONTOUR_TEST_CONCURRENCY, default 4).
+// - smoke-package packs lib/ and dist/ and needs only the build, but runs
+//   after the Node suite, not beside it: on macOS beside the suite the freshly
+//   installed package's first `devcontour help` hung for over 90 s at
+//   _dyld_start (measured 2026-11-17) — the executables the suite creates
+//   flood the system's exec assessment queue — while alone it passes.
+// - test:e2e runs last, alone: beside the Node suite (at one file fewer) it
+//   was measured to take twice as long, 30 instead of 15 minutes, and its
+//   server start and full-workflow tests timed out, while the slower Node
+//   suite cancelled any gain.
 // lint, typecheck and the Docker preflight only read the tree (lint ignores
 // lib/ and dist/), so they run beside the build.
 //
-// Output of concurrent steps: the first stage prefixes every line with its
-// step name. Beside the Node suite, which streams unprefixed so its summary
-// lines read as in a run of its own, smoke-package's output is held back and
-// printed as one section when it ends (passed, failed or stopped). While it
-// runs, the same output is written as it arrives to a log file named on its
-// start line, so a hung step can be read while it hangs and its output
-// survives a check killed outright; the log is removed after the section.
+// Output of concurrent steps: in a stage of several chains (the first stage
+// of either check) every line carries its step name. A step alone in its
+// stage inherits the check's stdio, so the Node suite's summary lines read as
+// in a run of its own.
 //
 // Extra arguments go to the last step (test:affected for --fast: --base, --depth).
 const release = [
   [['check:environment'], ['lint'], ['build:lib', 'check:skill', 'build:assets']],
-  [['test'], ['smoke-package']],
+  [['test']],
+  [['smoke-package']],
   [['test:e2e']],
 ];
-// The step that streams unprefixed when it runs beside others.
-const live = 'test';
 // Steps that start the CLI from lib/ instead of src/ through tsx
 // (tests/cli-command.ts): build:lib ran in an earlier stage of the release
 // check, and the built CLI starts about 0.17 s sooner on each of the suite's
@@ -122,9 +120,8 @@ sampler.unref();
 const processes = checkProcesses();
 
 /**
- * mode: 'inherit' (alone in its stage), 'prefix' (every line carries the step
- * name), 'live' (piped through unchanged) or 'section' (held back and printed
- * at once when the step ends).
+ * mode: 'inherit' (alone in its stage) or 'prefix' (beside others: every line
+ * carries the step name).
  */
 function step(name, rest, mode) {
   const [command, base] = commands[name] ?? [npm, ['run', '--silent', name]];
@@ -140,19 +137,6 @@ function step(name, rest, mode) {
       ...(builtCli.has(name) ? { env: { ...process.env, DEVCONTOUR_TEST_CLI: 'lib' } } : {}),
     });
     if (!child) return resolve(false);
-    // A held-back section keeps stdout and stderr chunks in arrival order.
-    const held = [];
-    // Exclusive create: the check removes only a log it created itself.
-    let log;
-    if (mode === 'section') {
-      const path = join(tmpdir(), `devcontour-check-${name}-${process.pid}-${started}.log`);
-      try {
-        log = { path, fd: openSync(path, 'wx') };
-        console.error(`${prefix}  ${name} output is held until it ends; meanwhile: ${path}`);
-      } catch (error) {
-        console.error(`${prefix}  ${name} output is held until it ends (no log: ${error.message})`);
-      }
-    }
     const flushes = [];
     for (const [stream, out] of [
       [child.stdout, process.stdout],
@@ -161,16 +145,6 @@ function step(name, rest, mode) {
       let buffer = '';
       stream?.setEncoding('utf8');
       stream?.on('data', (chunk) => {
-        if (mode === 'section') {
-          held.push([out, chunk]);
-          if (log)
-            try {
-              writeSync(log.fd, chunk);
-            } catch {
-              /* The section still prints the output. */
-            }
-          return;
-        }
         const lines = (buffer + chunk).split('\n');
         buffer = lines.pop();
         for (const line of lines) out.write(prefix + line + '\n');
@@ -206,22 +180,7 @@ function step(name, rest, mode) {
         ? ' (a descendant kept its output open; stopped at the end of the check)'
         : '';
       const result = `${prefix}${ok ? '✔' : '✖'} ${name} ${seconds}s${ok ? '' : ` (${error ?? signal ?? code})`}${leak}`;
-      if (mode === 'section') {
-        // One write to one stream, stdout and stderr chunks in arrival order:
-        // the section cannot be split by the lines of a step that keeps
-        // streaming, nor reordered against them when both streams share a file.
-        const output = held.map(([, chunk]) => chunk).join('');
-        process.stdout.write(
-          `──── ${name} ────\n${output}${output && !output.endsWith('\n') ? '\n' : ''}${result}\n──── end of ${name} ────\n`,
-        );
-        if (log)
-          try {
-            closeSync(log.fd);
-            unlinkSync(log.path);
-          } catch {
-            /* A log left behind is harmless. */
-          }
-      } else console.error(result);
+      console.error(result);
       resolve(ok);
     };
     // A step settles once: on its exit, or on an error that means it never ran
@@ -247,18 +206,10 @@ function step(name, rest, mode) {
 
 const started = Date.now();
 for (const chains of stages) {
-  const parallel = chains.length > 1;
-  const testStage = chains.some((c) => c.includes(live));
+  const mode = chains.length > 1 ? 'prefix' : 'inherit';
   const results = await Promise.all(
     chains.map(async (chain) => {
       for (const name of chain) {
-        const mode = !parallel
-          ? 'inherit'
-          : !testStage
-            ? 'prefix'
-            : name === live
-              ? 'live'
-              : 'section';
         if (!(await step(name, name === last ? extra : [], mode))) {
           processes.stop('SIGTERM');
           return false;
