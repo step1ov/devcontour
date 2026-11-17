@@ -80,8 +80,12 @@ export interface HostTransaction {
 }
 
 interface Frame {
-  /** Документ транзакции: копия для записи создаётся при первом изменении. */
-  draft: Draft;
+  /**
+   * Документ транзакции: копия для записи создаётся при первом изменении.
+   * Во внешней транзакции он открывается при первом обращении: продление
+   * аренды строкой (D53) документ не читает.
+   */
+  readonly draft: Draft;
   drafts: RunEventDraft[];
   legacy?: Record<string, unknown>;
   works: Set<string>;
@@ -187,8 +191,15 @@ export class DevContourExecutionStore implements ExecutionStore {
     let drafts: RunEventDraft[] = [];
     this.store.atomic(() => {
       const before = this.store.lastEventId();
-      this.store.update(kind, (draft) => {
-        const frame: Frame = { draft, drafts: [], works: new Set(), attempts: new Set() };
+      this.store.lazyUpdate(kind, (draft) => {
+        const frame: Frame = {
+          get draft() {
+            return draft();
+          },
+          drafts: [],
+          works: new Set(),
+          attempts: new Set(),
+        };
         this.frame = frame;
         try {
           out = this.settled(run(frame));
@@ -366,6 +377,45 @@ export class DevContourExecutionStore implements ExecutionStore {
         state()
           .runs.filter((r) => !workId || r.taskId === workId)
           .map((r) => attemptOf(state(), r)),
+      // Аренда попытки — строка (D53): без строки — срок документа попытки
+      // прежней версии (без метки) или 0 у попытки с меткой.
+      attemptLease: (id) => {
+        const row = store.attemptLeaseRow(id);
+        if (row)
+          return {
+            id,
+            token: row.token,
+            owner: row.owner,
+            engineVersion: row.engine || undefined,
+            leaseUntil: row.until,
+          };
+        const run = state().runs.find((r) => r.id === id);
+        return run?.status === 'active'
+          ? {
+              id,
+              token: run.token,
+              owner: run.owner,
+              engineVersion: run.engineVersion,
+              leaseUntil: run.leaseUntil,
+            }
+          : undefined;
+      },
+      activeLeases: (at) =>
+        state()
+          .runs.filter((r) => r.status === 'active' && r.leaseUntil > at)
+          .map((r) => ({
+            id: r.id,
+            token: r.token,
+            owner: r.owner,
+            engineVersion: r.engineVersion,
+            leaseUntil: r.leaseUntil,
+          })),
+      dataVersion: () => store.revision(),
+      renewLease: (kind, id, token, owner, engineVersion, until, now) => {
+        inTx();
+        if (kind !== 'attempt') throw new Error('Неизвестный вид аренды: ' + String(kind));
+        return store.renewAttemptLease(id, token, owner, engineVersion ?? '', until, now);
+      },
       verification: (id) => verificationsOf(state()).find((v) => v.id === id),
       verifications: () => verificationsOf(state()),
       local: local as ExecutionView['local'],

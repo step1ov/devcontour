@@ -914,6 +914,25 @@ async function main() {
     );
     return;
   }
+  if (operation === 'storage-step-down') {
+    // D53: перед откатом на версию без строк аренды — после остановки очереди.
+    const down = new Store(
+      join(root, 'state.sqlite'),
+      config.storage === 'component' ? repositories(config) : undefined,
+    );
+    try {
+      const leader = down.read().leader;
+      if (leader && leader.leaseUntil > Date.now())
+        throw new Error(
+          `Очередь ведёт controller ${leader.owner}: остановите serve перед шагом вниз`,
+        );
+      const moved = down.stepDownLeases();
+      console.log(JSON.stringify({ status: 'stepped-down', attempts: moved }));
+    } finally {
+      down.close();
+    }
+    return;
+  }
   const store = new Store(
     join(root, 'state.sqlite'),
     config.storage === 'component' ? repositories(config) : undefined,
