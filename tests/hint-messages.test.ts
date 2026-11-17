@@ -794,5 +794,24 @@ test('Тексты для ведущего агента не называют к
       offending.push(`${file}:${i + 1}: ${line.trim().slice(0, 160)}`);
     });
   }
+  // 5. Документы для агента вне src: навык и руководство разработки. Каждое
+  // упоминание команды человека — в предложении с отметкой operator-only.
+  const docs = ['START.md'];
+  const walkDocs = (dir: string) => {
+    for (const name of readdirSync(dir)) {
+      const path = join(dir, name);
+      if (statSync(path).isDirectory()) walkDocs(path);
+      else if (/\.(md|json)$/.test(path)) docs.push(path);
+    }
+  };
+  walkDocs('skills');
+  for (const file of docs)
+    readFileSync(file, 'utf8')
+      .split('\n')
+      .forEach((line, i) => {
+        for (const sentence of line.split(/(?<=[.;])\s+/))
+          if (HUMAN_START.test(sentence) && !sentence.includes('operator-only'))
+            offending.push(`${file}:${i + 1}: ${sentence.trim().slice(0, 160)}`);
+      });
   assert.deepEqual(offending, []);
 });
