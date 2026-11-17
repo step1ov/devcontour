@@ -500,6 +500,7 @@ export function cliAdapter(name: 'codex' | 'claude'): AgentAdapter {
         // Каталог по признаку владения — только worktree исполнителя: ревью
         // плана идёт в основном checkout, где работает и человек.
         contain: { dirs: r.review ? [] : (r.isolation?.write ?? []) },
+        label: `${name} ${r.purpose ?? (r.review ? 'review' : 'run')}`.slice(0, 300),
         onRawStdout: (text) => telemetry.push(text),
         onOutput: (stream, text) => {
           // Keep live logs bounded; final diagnostics retain both stream tails.
