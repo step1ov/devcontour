@@ -290,6 +290,39 @@ type Runtimes = Record<Author, AgentAdapter>;
 
 /** Предел текста отказа ревью: столько хранит ошибка задания очереди. */
 const REJECTION_LIMIT = 1000;
+/**
+ * Текст отказа ревью. Он доходит до ведущего через ошибку задания (предел
+ * 1000 знаков в очереди), и длинная сводка вытесняла ссылку на находки
+ * (F54). Целиком идут префикс, указание по невыполнимым обязательствам,
+ * число находок и каталог решения; сокращаются сводка и тексты находок
+ * выполнимости — каждая не больше половины остатка. Окончание
+ * «Артефакты: <каталог>» разбирает операция изменения контракта.
+ */
+export function rejectionMessage(r: {
+  summary: string;
+  feasibility: string[];
+  open: number;
+  opened: number;
+  artifact: string;
+}) {
+  const prefix = 'Независимое ревью отклонено: ';
+  const guide = r.feasibility.length
+    ? ' Добавьте ограничения области входов и ресурсов, допущения или измените требование.'
+    : '';
+  const pointer =
+    ` Открытых находок: ${r.open}, из них новых в этом раунде: ${r.opened};` +
+    ` ответ ревьюера раунда — review.json в каталоге решения. Артефакты: ${r.artifact}`;
+  const fit = (text: string, n: number) => (n <= 1 ? '' : clipAtBoundary(text, n));
+  const budget = Math.max(0, REJECTION_LIMIT - prefix.length - guide.length - pointer.length);
+  const feasibility = r.feasibility.length
+    ? ` Обязательства невыполнимы или неизмеримы в заявленном виде: ${r.feasibility.join('; ')}.`
+    : '';
+  const summary = fit(
+    r.summary + '.',
+    budget - Math.min(feasibility.length, Math.floor(budget / 2)),
+  );
+  return prefix + summary + fit(feasibility, budget - summary.length) + guide + pointer;
+}
 // Попытки накапливаются: держим последние, чтобы состояние не росло без предела.
 const MAX_CONTRACT_ATTEMPTS = 60;
 function recordContractAttempt(h: DevContour, attempt: ContractAttempt) {
@@ -546,19 +579,14 @@ async function review(
     const feasibility = record.findings.filter(
       (f) => f.status === 'open' && f.severity === 'blocking' && f.rule === FEASIBILITY,
     );
-    // Текст отказа доходит до ведущего через ошибку задания (предел 1000
-    // знаков в очереди): длинная сводка вытесняла ссылку на полные находки
-    // (F54). Ссылка и число находок идут целиком, сокращается сводка.
-    // Окончание «Артефакты: <каталог>» разбирает операция изменения контракта.
-    const pointer = ` Находок: ${opened.length}; полный текст ревью — review.json в каталоге решения. Артефакты: ${artifact}`;
     throw new DomainError(
-      clipAtBoundary(
-        `Независимое ревью отклонено: ${record.summary}.` +
-          (feasibility.length
-            ? ` Обязательства невыполнимы или неизмеримы в заявленном виде: ${feasibility.map((f) => f.message).join('; ')}. Добавьте ограничения области входов и ресурсов, допущения или измените требование.`
-            : ''),
-        Math.max(200, REJECTION_LIMIT - pointer.length),
-      ) + pointer,
+      rejectionMessage({
+        summary: record.summary,
+        feasibility: feasibility.map((f) => f.message),
+        open: record.findings.filter((f) => f.status === 'open').length,
+        opened: opened.length,
+        artifact,
+      }),
     );
   }
   return {

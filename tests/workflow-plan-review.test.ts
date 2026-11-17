@@ -6,7 +6,7 @@ import { delimiter, join } from 'node:path';
 import { setTimeout as delay } from 'node:timers/promises';
 import { FINDING_ID_PATTERN, REVIEW_ITEMS_LIMIT } from 'devcontour-harness';
 import { LeadRunner } from '../src/runner/lead-workflow.ts';
-import { reviewPlan } from '../src/runner/agent-control.ts';
+import { rejectionMessage, reviewPlan } from '../src/runner/agent-control.ts';
 import { reviewSchema, type AgentAdapter } from '../src/runner/adapters.ts';
 import { fixture, input } from './helpers.ts';
 
@@ -242,7 +242,7 @@ test('F54: отказ ревью плана с длинной сводкой с�
     assert.ok(error.message.startsWith('Независимое ревью отклонено: Причина 0'));
     assert.ok(
       error.message.endsWith(
-        `Находок: 5; полный текст ревью — review.json в каталоге решения. Артефакты: ${attempt.artifact}`,
+        `Открытых находок: 5, из них новых в этом раунде: 5; ответ ревьюера раунда — review.json в каталоге решения. Артефакты: ${attempt.artifact}`,
       ),
       error.message.slice(-300),
     );
@@ -254,13 +254,77 @@ test('F54: отказ ревью плана с длинной сводкой с�
     assert.equal(saved.response.summary, summary);
     assert.equal(saved.response.findings.length, 5);
     assert.equal(attempt.findings.length, 5);
-    // Через очередь заданий ссылка доходит до ведущего без обрезки.
-    const runner = new LeadRunner(f.h, f.root);
-    const job = runner.workflow.start({ kind: 'board', id: board.id, authorRuntime: 'codex' });
-    runner.workflow.fail(runner.workflow.claim(job.key, 'main')!, error.message);
-    const failed = runner.workflow.list('main').find((j) => j.key === job.key)!;
-    assert.equal(failed.status, 'failed');
-    assert.ok(failed.error!.endsWith(`Артефакты: ${attempt.artifact}`));
+  } finally {
+    f.cleanup();
+  }
+});
+
+test('F54: указание по невыполнимым обязательствам и число всех открытых находок не теряются при сокращении', () => {
+  const artifact = '/repo/.devcontour-local/decisions/0f8a1c2e-1b3d-4e5f-8a9b-0c1d2e3f4a5b';
+  const message = rejectionMessage({
+    summary: 'Сводка. '.repeat(200),
+    feasibility: ['O-1 ' + 'точность '.repeat(100), 'O-2 недостижимо'],
+    // Второй раунд: три прежние находки открыты, новых нет.
+    open: 3,
+    opened: 0,
+    artifact,
+  });
+  assert.ok(message.length <= 1000, String(message.length));
+  assert.ok(message.startsWith('Независимое ревью отклонено: Сводка.'));
+  assert.match(message, /Обязательства невыполнимы или неизмеримы в заявленном виде: O-1 точность/);
+  assert.match(
+    message,
+    / Добавьте ограничения области входов и ресурсов, допущения или измените требование\. Открытых находок: 3, из них новых в этом раунде: 0; /,
+  );
+  assert.ok(message.endsWith(`Артефакты: ${artifact}`));
+  // Короткий отказ не сокращается.
+  assert.equal(
+    rejectionMessage({ summary: 'План неполон', feasibility: [], open: 1, opened: 1, artifact }),
+    'Независимое ревью отклонено: План неполон. Открытых находок: 1, из них новых в этом раунде: 1; ответ ревьюера раунда — review.json в каталоге решения. Артефакты: ' +
+      artifact,
+  );
+});
+
+test('F54: во втором раунде отказ считает открытыми и перенесённые находки', async () => {
+  const f = fixture();
+  try {
+    f.h.config.repository = f.root;
+    f.h.config.mode = 'local';
+    f.h.config.approvalMode = 'agent';
+    const board = f.h.createBoard('Carried findings', '', 'main');
+    f.h.addTask(board.id, input());
+    const round = (first: boolean): Record<'codex' | 'claude', AgentAdapter> => {
+      const make = (name: 'codex' | 'claude'): AgentAdapter => ({
+        name,
+        execute: (request) => {
+          const ids = [...String(request.prompt).matchAll(/"id":"([a-f0-9]{64})"/g)].map(
+            (m) => m[1],
+          );
+          return Promise.resolve({
+            data: {
+              approved: false,
+              summary: first ? 'Три пробела в плане' : 'Пробелы не закрыты',
+              discoveries: [],
+              findings: first
+                ? [1, 2, 3].map((i) => ({ severity: 'blocking', message: `Пробел ${i}` }))
+                : [],
+              previous: ids.map((id) => ({ id, status: 'open', basis: 'не исправлено' })),
+            },
+            log: 'Fixture only; no provider called',
+            command: ['fixture'],
+          });
+        },
+      });
+      return { codex: make('codex'), claude: make('claude') };
+    };
+    await assert.rejects(
+      reviewPlan(f.h, f.root, board.id, 'codex', round(true)),
+      /новых в этом раунде: 3;/,
+    );
+    await assert.rejects(
+      reviewPlan(f.h, f.root, board.id, 'codex', round(false)),
+      /Открытых находок: 3, из них новых в этом раунде: 0;/,
+    );
   } finally {
     f.cleanup();
   }
