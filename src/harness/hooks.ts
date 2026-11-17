@@ -4,7 +4,7 @@
 // закреплённые контрактом файлы) и могут только отказать попытке: решения о
 // приёмке — gates, ревью, fencing, CAS — остаются за runner и движком.
 import { BlockedError, repairPolicy, type RunnerHooks } from 'devcontour-harness';
-import { ProjectMemory } from '../application/memory.ts';
+import { ProjectMemory, taskRecall } from '../application/memory.ts';
 import { roleBinding, repository } from '../core/repositories.ts';
 import { digest, supersededBy, type DevContour } from '../core/service.ts';
 import { taskOwner } from '../core/sync-state.ts';
@@ -55,8 +55,7 @@ export function devcontourHooks(h: DevContour): RunnerHooks {
       const memory = new ProjectMemory(h).recall(
         {
           repositoryId: taskOwner(task),
-          query: task.title + ' ' + task.description,
-          entities: task.contracts,
+          ...taskRecall(task),
           maxBytes: h.config.memoryPolicy.maxBytes,
         },
         taskOwner(task) ? baseSha : 'HEAD',

@@ -25,6 +25,7 @@ const scope = {
 };
 const kind = z.enum(['fact', 'experience', 'decision', 'hypothesis', 'summary']);
 const ids = z.array(z.string().uuid()).max(20).default([]);
+export const MEMORY_RECALL_LIMITS = { query: 2000, entities: 20 } as const;
 export const memoryInputs = {
   memory_retain: z.strictObject({
     ...scope,
@@ -39,8 +40,8 @@ export const memoryInputs = {
   }),
   memory_recall: z.strictObject({
     ...scope,
-    query: z.string().max(2000).default(''),
-    entities: z.array(z.string().max(100)).max(20).default([]),
+    query: z.string().max(MEMORY_RECALL_LIMITS.query).default(''),
+    entities: z.array(z.string().max(100)).max(MEMORY_RECALL_LIMITS.entities).default([]),
     maxBytes: z.number().int().min(0).max(24000).default(8000),
     includeUncertain: z.boolean().default(false),
     after: z.iso.datetime().optional(),
@@ -92,6 +93,21 @@ function source(root: string, path: string, ref: string) {
   return { path, sha, digest: digest(git(root, 'show', `${sha}:${path}`)) };
 }
 const words = (text: string) => new Set(text.toLowerCase().match(/[\p{L}\p{N}_-]+/gu) ?? []);
+// Запрос памяти для задачи (F55). Описание задачи — до 12 000 символов, а
+// контрактов — до 30, тогда как memory_recall принимает запрос до 2 000
+// символов и до 20 сущностей: склейка «title + description» роняла попытку
+// до работы. Recall сравнивает множества слов, поэтому запрос — различные
+// слова заголовка, затем описания, в порядке появления, пока помещаются;
+// сущности — первые по лимиту контракты.
+export function taskRecall(task: { title: string; description: string; contracts: string[] }) {
+  let query = '';
+  for (const w of words(task.title + ' ' + task.description)) {
+    const next = query ? query + ' ' + w : w;
+    if (next.length > MEMORY_RECALL_LIMITS.query) continue;
+    query = next;
+  }
+  return { query, entities: task.contracts.slice(0, MEMORY_RECALL_LIMITS.entities) };
+}
 export class ProjectMemory {
   constructor(readonly h: DevContour) {}
   private root(repositoryId?: string) {
