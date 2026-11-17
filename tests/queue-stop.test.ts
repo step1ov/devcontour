@@ -124,8 +124,13 @@ test('Пауза человека перед переносом базы наз�
     const view = await p.read();
     assert.equal(view.reason, 'operator');
     assert.match(view.stopReason ?? '', /^База прогонов перенесена \(main\)/);
+    // Режим агента: ведущему не предлагается команда, снимающая ожидание.
+    assert.match(view.action ?? '', /^Паузу человека ведущий агент не снимает: .*workflow_start/);
+    assert.doesNotMatch(view.action ?? '', /queue --start — он снимет/);
+    // Режим оператора: запуск человеком снимает и паузу, и ожидание.
+    f.h.config.approvalMode = 'operator';
     assert.equal(
-      view.action,
+      (await p.read()).action,
       'Проверьте базу gates, затем выполните ' +
         START +
         ' — он снимет и паузу человека, и ожидание',
@@ -275,6 +280,7 @@ test('Подсказка учитывает ожидание базы при о�
       waits: wait('База прогонов перенесена (main): проверьте её гейтами и продолжите очередь'),
     },
     [],
+    { approvalMode: 'operator' },
   );
   assert.equal(
     provider.action,
@@ -567,6 +573,8 @@ test('Ожидание проверки базы в режиме агента: �
     const view = queueStopOf(f.h);
     assert.equal(view.action, BASE_WAIT_ACTION);
     assert.doesNotMatch(view.action ?? '', /^Проверьте базу gates, затем выполните/);
+    // Ручной маршрут назван действием пользователя, а не командой ведущему.
+    assert.doesNotMatch(BASE_WAIT_ACTION, /devcontour queue --start/);
 
     // Снятие паузы ведущим сняло бы ожидание без gates — отказ.
     await assert.rejects(
@@ -578,6 +586,19 @@ test('Ожидание проверки базы в режиме агента: �
     // Пауза ведущего поверх ожидания: снимается пауза, ожидание остаётся.
     await agent.run({ operation: 'queue_set', input: { paused: true } });
     assert.equal(f.h.store.read().pauseReason, 'operator');
+    // Вид остановки в режиме агента не обещает, что запуск снимет ожидание.
+    const over = queueStopOf(f.h).action ?? '';
+    assert.match(
+      over,
+      /^Свою паузу ведущий снимает queue_set \{"paused": false\}: снимется только пауза/,
+    );
+    assert.doesNotMatch(over, /queue --start — он снимет/);
+    const failed = queueStopView(
+      { ...f.h.store.read(), pauseReason: 'runtime', pauseFailures: ['provider-auth'] },
+      [],
+    ).action;
+    assert.doesNotMatch(failed ?? '', /devcontour queue --start/);
+    assert.match(failed ?? '', /очередь останется на ожидании проверки базы/);
     const lifted = (await agent.run({ operation: 'queue_set', input: { paused: false } })) as {
       queue: QueueStopView;
     };

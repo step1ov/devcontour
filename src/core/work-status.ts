@@ -130,7 +130,7 @@ export function staleBaseStop(
  * `pause` отказывает. Ручной маршрут — запуск оператора после проверки.
  */
 export const BASE_WAIT_ACTION =
-  'Базу проверит workflow доски: зарегистрируйте доску через workflow_start (идущее задание проверит её само) — его цикл исполнит gates на новой базе и продолжит выдачу. Ведущий агент ожидание сам не снимает: queue_set и queue --start --by host откажут; на ручном маршруте — devcontour queue --start оператора после проверки базы gates';
+  'Базу проверит workflow доски: зарегистрируйте доску через workflow_start (идущее задание проверит её само) — его цикл исполнит gates на новой базе и продолжит выдачу. Ведущий агент ожидание сам не снимает: queue_set и queue --start --by host откажут. Без workflow ожидание снимает только пользователь после проверки базы — «Подтвердить и запустить» в «Внимании» панели; попросите его, сами очередь не запускайте';
 
 /** Действие при удержанном переносе базы: подтверждает оператор в «Внимании». */
 export const HELD_BASE_ACTION =
@@ -202,7 +202,20 @@ export function queueStopView(
         '; маршруты не смешивайте';
   // Продолжение очереди снимает и ожидание проверки базы: при нём базу
   // проверяют до запуска.
-  const thenStart = (wait ? ', проверьте базу gates, затем ' : ', затем ') + start;
+  // В режиме агента неудержанное ожидание проверки базы под любой паузой
+  // проверяет цикл задания доски: снятие паузы ведущим его не снимает
+  // (`pause` отказывает или оставляет `base-check`), а «queue --start снимет
+  // и ожидание» читалось бы как разрешение снять его без gates.
+  const agentWait =
+    agent && wait && !heldBaseOf(state) && !wait.startsWith('Проверка базы не пройдена')
+      ? options.workflowActive
+        ? 'Цикл ведущего проверит базу gates и продолжит выдачу сам'
+        : BASE_WAIT_ACTION
+      : undefined;
+  const thenStart = agentWait
+    ? ', затем снимите паузу queue_set {"paused": false} — очередь останется на ожидании проверки базы. ' +
+      agentWait
+    : (wait ? ', проверьте базу gates, затем ' : ', затем ') + start;
   const explain = (): [text: string, action: string, failed: boolean] => {
     if (failures.includes('provider-auth'))
       return [
@@ -223,23 +236,24 @@ export function queueStopView(
     if (wait) {
       const checkFailed = wait.startsWith('Проверка базы не пройдена');
       const held = !!heldBaseOf(state);
-      // В режиме агента ожидание проверяет цикл задания доски, а не
-      // ведущий: «проверьте базу и queue --start» читалось бы как разрешение
-      // снять ожидание без gates (такое снятие ведущим `pause` отклоняет).
-      const byWorkflow = reason === 'base-check' && agent;
+      // В режиме агента ожидание при любой паузе проверяет цикл задания
+      // доски (`agentWait`), провал проверки исправляет перенос базы.
       return [
         wait,
         held
           ? HELD_BASE_ACTION
-          : byWorkflow && checkFailed
+          : agent && checkFailed
             ? 'Исправьте базу и выполните devcontour base-update (ведущий агент — с --by host) — ' +
               (options.workflowActive
                 ? 'цикл ведущего проверит её снова'
                 : 'workflow доски (workflow_start) проверит её снова')
-            : byWorkflow
-              ? options.workflowActive
-                ? 'Цикл ведущего проверит базу gates и продолжит выдачу сам'
-                : BASE_WAIT_ACTION
+            : agentWait
+              ? reason === 'operator'
+                ? (lead
+                    ? 'Свою паузу ведущий снимает queue_set {"paused": false}: снимется только пауза, очередь останется на ожидании проверки базы. '
+                    : 'Паузу человека ведущий агент не снимает: её снимает пользователь («Подтвердить и запустить» в «Внимании» панели после проверки базы). ') +
+                  agentWait
+                : agentWait
               : 'Проверьте базу gates, затем выполните ' +
                 start +
                 (reason === 'operator' ? ` — он снимет и ${pauser}, и ожидание` : ''),
