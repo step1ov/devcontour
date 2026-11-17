@@ -16,6 +16,7 @@ import {
   leadScope,
   loopOutlook,
   pauseStep,
+  tickErrors,
   recoveryStep,
   repairStep,
 } from './lead-outlook.ts';
@@ -460,7 +461,7 @@ export class LeadRunner {
         // остановка сервера и пауза человека до старта задания. В режиме
         // агента перенесённую базу проверяет сам цикл (base-check.ts).
         // Правило — `pauseStep`, общее с пакетом передачи.
-        const pause = pauseStep(s, job, tasks);
+        const pause = pauseStep(s, job, tasks, tickErrors(this.h));
         if (pause.checkBase) await this.checkBase(job, guard, signal);
         if (pause.lift)
           this.h.store.atomic(() => {
@@ -489,7 +490,7 @@ export class LeadRunner {
           // Задачи ждут только ответов на вопросы исполнителя: задание ждёт
           // (без повтора и без провала) и отмечает это в истории один раз.
           if (this.workflow.inputWaitingOf(job, s)) this.workflow.noteWaiting(job);
-          const pause = pauseStep(s, job, tasks);
+          const pause = pauseStep(s, job, tasks, tickErrors(this.h));
           if (pause.checkBase) await this.checkBase(job, guard, signal);
           if (pause.lift)
             this.h.store.atomic(() => {

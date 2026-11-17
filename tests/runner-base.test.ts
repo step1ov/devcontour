@@ -777,3 +777,253 @@ test('Предел времени — на фазу: долгая реализа
     await f.cleanup();
   }
 });
+
+test('Такт снимает свою остановку «база прогонов отстала», когда причина ушла, и не трогает иные паузы', async () => {
+  const f = await runtimeFixture();
+  const repo = repositories(f.config)[0];
+  const target = `refs/heads/${repo.targetBranch}`;
+  const start = await git(repo.path, 'rev-parse', 'HEAD');
+  const idle = {
+    ...adapters,
+    demo: {
+      ...adapters.demo,
+      execute: () => Promise.reject(new BlockedError('исполнитель не нужен этой проверке')),
+    },
+  };
+  const scheduler = new Scheduler(f.h, f.root, idle);
+  scheduler.staleBaseProbeMs = 0;
+  let branch = '';
+  const commit = async (name: string) => {
+    await mkdir(join(repo.path, name, '..'), { recursive: true });
+    await writeFile(join(repo.path, name), '# ' + name + '\n');
+    await git(repo.path, 'add', name);
+    await git(repo.path, '-c', 'core.hooksPath=/dev/null', 'commit', '--no-gpg-sign', '-m', name);
+    return git(repo.path, 'rev-parse', 'HEAD');
+  };
+  /** Очередь идёт, база на `start`, рабочая линия (detached) — на `head`. */
+  const reset = async (head: string) => {
+    await git(repo.path, 'update-ref', target, start);
+    await git(repo.path, 'checkout', '-q', '--detach', head);
+    f.store.change('fixture', (s) => {
+      s.paused = false;
+      for (const k of [
+        'pausedAt',
+        'pauseReason',
+        'pauseFailures',
+        'pauseActor',
+        'waits',
+        'baseMoves',
+      ])
+        delete (s as unknown as Record<string, unknown>)[k];
+      return {};
+    });
+    const until = Date.now() + 5;
+    while (Date.now() < until);
+  };
+  /** Такт находит отставание; сбой записывается так же, как интервалом сервера. */
+  const stop = async () => {
+    const error = await scheduler.tick().then(
+      () => assert.fail('отставшая база останавливает такт'),
+      (e: unknown) => e,
+    );
+    assert.match(String(error), /База прогонов отстала/);
+    scheduler.noteTickFailure(error);
+    assert.equal(f.store.read().paused, true);
+  };
+  const runs = () => f.store.read().runs.length;
+  try {
+    await scheduler.init();
+    branch = await git(repo.path, 'symbolic-ref', '--short', 'HEAD');
+    const prepared = await commit('PREPARED.md');
+
+    // 1. Причина ушла: коммит убран с рабочей линии — такт снимает остановку.
+    await reset(prepared);
+    await stop();
+    await scheduler.tick();
+    assert.equal(f.store.read().paused, true, 'база всё ещё отстала');
+    await git(repo.path, 'checkout', '-q', '--detach', start);
+    await scheduler.tick();
+    const lifted = f.store.read();
+    assert.equal(lifted.paused, false, 'такт снял свою остановку');
+    assert.equal(lifted.pausedAt, undefined);
+    assert.ok(f.store.events().some((e) => e.type === 'scheduler.stale-base.cleared'));
+
+    // 2. Пауза человека после такой же остановки — его решение: не снимается.
+    await reset(prepared);
+    await stop();
+    await git(repo.path, 'checkout', '-q', '--detach', start);
+    f.h.pause(true);
+    await scheduler.tick();
+    assert.equal(f.store.read().paused, true, 'пауза человека остаётся');
+    assert.equal(f.store.read().pauseReason, 'operator');
+
+    // 3. Пауза, поставленная во время сверки git, — CAS: остановка не снимается.
+    await reset(prepared);
+    await stop();
+    await git(repo.path, 'checkout', '-q', '--detach', start);
+    const read = scheduler.baseState.bind(scheduler);
+    scheduler.baseState = async () => {
+      if (f.store.read().pauseReason !== 'operator') f.h.pause(true);
+      return read();
+    };
+    try {
+      await scheduler.tick();
+    } finally {
+      scheduler.baseState = read;
+    }
+    assert.equal(f.store.read().paused, true, 'пауза во время сверки остаётся');
+    assert.equal(f.store.read().pauseReason, 'operator');
+
+    // 4. Другой сбой такта после остановки — последний: остановка не снимается.
+    await reset(prepared);
+    await stop();
+    // Запись сбоя на уже стоящей паузе документ не меняет и событие не
+    // пишет; более поздний сбой другой причины — событием журнала.
+    f.store.atomic(() =>
+      f.store.appendEvent('scheduler.error', { error: 'Error: другой сбой такта' }),
+    );
+    await git(repo.path, 'checkout', '-q', '--detach', start);
+    await scheduler.tick();
+    assert.equal(f.store.read().paused, true, 'причина — уже не отставание базы');
+
+    // 5. База сдвинута git мимо base-update: это перенос базы, а не выдача.
+    await reset(prepared);
+    await stop();
+    const before = runs();
+    await git(repo.path, 'update-ref', target, prepared);
+    await scheduler.tick();
+    const moved = f.store.read();
+    assert.equal(moved.paused, true, 'сдвиг базы git не продолжает выдачу');
+    assert.equal(moved.pauseReason, 'base-check');
+    assert.ok(moved.waits?.some((w) => w.kind === 'base-check'));
+    assert.deepEqual(moved.baseMoves?.bases, [
+      { repositoryId: repo.id, from: start, to: prepared },
+    ]);
+    assert.equal(runs(), before, 'выдачи нет');
+    assert.ok(f.store.events().some((e) => e.type === 'scheduler.stale-base.target-moved'));
+
+    // 6. Сдвиг на чувствительные пути контура удержан до человека (D42).
+    const sensitive = await commit('.devcontour/probe.md');
+    await reset(sensitive);
+    await stop();
+    await git(repo.path, 'update-ref', target, sensitive);
+    await scheduler.tick();
+    const held = f.store.read();
+    assert.equal(held.paused, true);
+    assert.match(
+      held.waits?.find((w) => w.kind === 'base-check')?.detail ?? '',
+      /меняет приёмку или настройку контура \(.*\.devcontour\/probe\.md/,
+    );
+    assert.equal(runs(), before, 'выдачи нет');
+
+    // 7. Остановка прежней версии (без `targets`): не тупик — когда
+    // отставания нет, это ожидание `base-check` на текущей вершине.
+    await reset(start);
+    f.store.change('scheduler.error', (st) => {
+      st.paused = true;
+      st.pausedAt = new Date().toISOString();
+      return {
+        error:
+          'TaskFailure: База прогонов отстала от рабочей ветки: main — main без 1 коммитов. Выполните devcontour base-update, иначе исполнитель получит дерево без подготовленной работы.',
+      };
+    });
+    await scheduler.tick();
+    const legacy = f.store.read();
+    assert.equal(legacy.paused, true, 'без записанных вершин выдачи нет');
+    assert.equal(legacy.pauseReason, 'base-check', 'остановка прежней версии — не тупик');
+    // Диапазон неизвестен: перенос удержан до подтверждения оператора, а не
+    // снимается одними gates (D42).
+    assert.match(
+      legacy.waits?.find((w) => w.kind === 'base-check')?.detail ?? '',
+      /меняет приёмку или настройку контура \(main:\(диапазон переноса неизвестен\)\)/,
+    );
+    assert.equal(legacy.baseMoves?.bases[0]?.unknown, true);
+    assert.deepEqual(
+      (
+        f.store.events().find((e) => e.type === 'scheduler.stale-base.target-moved')?.data as {
+          unknown?: string[];
+        }
+      ).unknown,
+      [repo.id],
+    );
+
+    // 8. Сверка под остановкой — не чаще staleBaseProbeMs; первая — сразу.
+    await reset(prepared);
+    scheduler.staleBaseProbeMs = 60_000;
+    await stop();
+    await scheduler.tick();
+    await git(repo.path, 'checkout', '-q', '--detach', start);
+    await scheduler.tick();
+    assert.equal(f.store.read().paused, true, 'вторая сверка в пределе ждёт');
+    scheduler.staleBaseProbeMs = 0;
+    await scheduler.tick();
+    assert.equal(f.store.read().paused, false, 'сверка после предела снимает');
+
+    // 9. Сбой сверки — одно событие на остановку, не сбой такта.
+    await reset(prepared);
+    await stop();
+    const errorsBefore = f.store.events().filter((e) => e.type === 'scheduler.error').length;
+    const real = scheduler.baseState.bind(scheduler);
+    // Текст сбоя несёт значение секрета окружения: в журнал — под маской.
+    const environment = f.h.config.environment;
+    process.env.DC_PROBE_SECRET = 'probe-secret-value-7f3a';
+    f.h.config.environment = {
+      inherit: environment?.inherit ?? [],
+      values: environment?.values ?? {},
+      secrets: { ...environment?.secrets, PROBE_TOKEN: 'DC_PROBE_SECRET' },
+    };
+    scheduler.baseState = () => Promise.reject(new Error('ref удалён probe-secret-value-7f3a'));
+    try {
+      await scheduler.tick();
+      await scheduler.tick();
+    } finally {
+      scheduler.baseState = real;
+      f.h.config.environment = environment;
+      delete process.env.DC_PROBE_SECRET;
+    }
+    const failedProbes = f.store
+      .events()
+      .filter((e) => e.type === 'scheduler.stale-base.probe-failed')
+      .map((e) => e.data as { pausedAt: string; error: string });
+    assert.equal(failedProbes.length, 1);
+    assert.equal(failedProbes[0].pausedAt, f.store.read().pausedAt);
+    assert.match(failedProbes[0].error, /^ref удалён /);
+    assert.doesNotMatch(failedProbes[0].error, /probe-secret-value-7f3a/);
+    assert.equal(
+      f.store.events().filter((e) => e.type === 'scheduler.error').length,
+      errorsBefore,
+      'сбой сверки — не сбой такта',
+    );
+
+    // 10. Вершины остановки — из того же снимка, что нашёл отставание: сдвиг
+    // ref сразу после чтения не записывается как вершина остановки.
+    await reset(prepared);
+    let reads = 0;
+    scheduler.baseState = async () => {
+      const read = await real();
+      // Второе чтение — то, по которому такт ставит остановку.
+      if (++reads === 2) await git(repo.path, 'update-ref', target, prepared);
+      return read;
+    };
+    try {
+      await stop();
+    } finally {
+      scheduler.baseState = real;
+    }
+    const recorded = f.store.events().find((e) => e.type === 'scheduler.error')?.data as {
+      targets?: Record<string, string>;
+    };
+    assert.deepEqual(recorded.targets, { [repo.id]: start });
+    // Ref уже сдвинут: следующая сверка видит перенос, а не уход коммитов.
+    await scheduler.tick();
+    assert.equal(f.store.read().pauseReason, 'base-check');
+  } finally {
+    await scheduler.stop();
+    if (branch) {
+      await git(repo.path, 'checkout', '-q', branch);
+      await git(repo.path, 'reset', '-q', '--hard', start);
+      await git(repo.path, 'update-ref', target, start);
+    }
+    await f.cleanup();
+  }
+});

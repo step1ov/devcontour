@@ -8,7 +8,7 @@ import { mkdir, writeFile } from 'node:fs/promises';
 import { demoPool, testDemo } from './demo-pool.ts';
 import { fixture, input } from './helpers.ts';
 import { Store } from '../src/core/store.ts';
-import { BASE_HELD_REFUSAL, DevContour } from '../src/core/service.ts';
+import { BASE_HELD_REFUSAL, DevContour, waitBaseCheck } from '../src/core/service.ts';
 import { DomainError } from '../src/core/model.ts';
 import { command } from '../src/runner/process.ts';
 import { loadConfig } from '../src/runner/config.ts';
@@ -83,7 +83,7 @@ test('base-update переноса, который gates не подтвержд
     };
     assert.equal(result.updated.length, 1);
     assert.deepEqual(result.baseHeld, { paths: [held] });
-    assert.doesNotMatch(result.next, /Запущенный workflow доски проверит/);
+    assert.doesNotMatch(result.next, /Базу проверит workflow доски/);
     assert.match(result.next, /ждёт подтверждения оператора/);
     assert.ok(result.next.includes(held), result.next);
     assert.ok(result.next.includes(HELD_BASE_ACTION), result.next);
@@ -166,7 +166,7 @@ test('base-update продуктовых коммитов не удержива�
     };
     assert.equal(result.updated.length, 1);
     assert.equal(result.baseHeld, undefined);
-    assert.match(result.next, /Запущенный workflow доски проверит её gates/);
+    assert.match(result.next, /Базу проверит workflow доски/);
     assert.equal(events('base.check.held').length, 0);
     assert.ok(!detail().startsWith(BASE_HELD_DETAIL), detail());
     const started = agent(h, 'workflow_start', {
@@ -385,7 +385,7 @@ test('Документ контракта в одобренной ревью р�
         next: string;
       };
       assert.equal(result.baseHeld, undefined);
-      assert.match(result.next, /Запущенный workflow доски проверит её gates/);
+      assert.match(result.next, /Базу проверит workflow доски/);
       assert.equal(f.events('base.check.held').length, 0);
       assert.ok(!f.detail().startsWith(BASE_HELD_DETAIL), f.detail());
     } finally {
@@ -750,5 +750,54 @@ test('queue --start --by host не снимает удержанный пере�
     }
   } finally {
     seed.release();
+  }
+});
+
+test('Перенос с неизвестным диапазоном: удержание переживает следующий base-update, а проверка базы держит его, не исполняя gates', async () => {
+  const f = await gitFixture();
+  const { root, config, store, h, commit, events, detail } = f;
+  try {
+    store.change('fixture.reset', (s) => {
+      s.tasks = [];
+      s.boards = [];
+      s.runs = [];
+    });
+    const target = `refs/heads/${config.targetBranch}`;
+    const tip = await git(config.repository, 'rev-parse', target);
+    // Ожидание, как его ставит остановка «база отстала» без записанной вершины.
+    const unknownWait = () =>
+      store.change('fixture.unknown-move', (s) => {
+        s.paused = true;
+        s.pauseReason = 'base-check';
+        s.pausedAt = new Date().toISOString();
+        waitBaseCheck(
+          s,
+          [{ repositoryId: 'main', from: tip, to: tip, unknown: true }],
+          'База прогонов перенесена мимо base-update (main): проверьте её гейтами и продолжите очередь',
+        );
+        return {};
+      });
+
+    // 1. Проверка базы циклом удерживает перенос, а не исполняет gates.
+    unknownWait();
+    assert.equal(await checkBase(h, { data: root, state: root }, () => {}), false);
+    assert.equal(events('base.check.started').length, 0, 'gates не исполнялись');
+    assert.match(detail(), /main:\(диапазон переноса неизвестен\)/);
+    assert.equal(store.read().paused, true);
+
+    // 2. Следующий base-update не стирает неизвестное начало диапазона.
+    await commit({ 'src/after-unknown.txt': 'product\n' });
+    const result = (await baseUpdateOperation(h, root, { by: 'host' })) as {
+      baseHeld?: { paths: string[] };
+    };
+    const moves = store.read().baseMoves?.bases ?? [];
+    assert.equal(moves.length, 1);
+    assert.equal(moves[0].unknown, true, 'неизвестное начало осталось неизвестным');
+    assert.notEqual(moves[0].to, tip);
+    assert.deepEqual(result.baseHeld?.paths, ['main:(диапазон переноса неизвестен)']);
+    assert.equal(await checkBase(h, { data: root, state: root }, () => {}), false);
+    assert.equal(events('base.check.started').length, 0);
+  } finally {
+    f.cleanup();
   }
 });

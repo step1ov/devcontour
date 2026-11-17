@@ -42,7 +42,13 @@ import { approvalPolicyDigest } from '../harness/policy.ts';
 import { rebindInputContext } from '../harness/input-host.ts';
 import { planIngest } from './plan.ts';
 import { boardOwner, completion, receiptHolds, receiptRecordBytes } from './sync-state.ts';
-import { carriedTaskIds, heldBaseOf, heldBaseWait, pausedByLead } from './work-status.ts';
+import {
+  BASE_WAIT_ACTION,
+  carriedTaskIds,
+  heldBaseOf,
+  heldBaseWait,
+  pausedByLead,
+} from './work-status.ts';
 import { assertDag, descendants, latestTaskId, impactGraph } from './graph.ts';
 import {
   DomainError,
@@ -938,7 +944,10 @@ export function baseMovesOf(s: Readonly<DevContourState>) {
   const wait = s.waits?.find((w) => w.kind === 'base-check');
   return wait && s.baseMoves?.at === wait.at ? s.baseMoves.bases : undefined;
 }
-/** Начало отказа снять паузу ведущим при удержанном переносе базы (`pause`). */
+/**
+ * Начало отказа снять паузу ведущим при ожидании проверки базы (`pause`):
+ * удержанный перенос или ожидание, которое снимают только gates или человек.
+ */
 export const BASE_HELD_REFUSAL = 'Очередь не продолжена';
 
 export function waitBaseCheck(s: DevContourState, updated: BaseMove[], detail: string) {
@@ -948,11 +957,16 @@ export function waitBaseCheck(s: DevContourState, updated: BaseMove[], detail: s
   const previous = baseMovesOf(s) ?? [];
   const bases = [
     ...previous.filter((p) => !updated.some((u) => u.repositoryId === p.repositoryId)),
-    ...updated.map((u) => ({
-      repositoryId: u.repositoryId,
-      from: previous.find((p) => p.repositoryId === u.repositoryId)?.from ?? u.from,
-      to: u.to,
-    })),
+    ...updated.map((u) => {
+      const prior = previous.find((p) => p.repositoryId === u.repositoryId);
+      return {
+        repositoryId: u.repositoryId,
+        from: prior?.from ?? u.from,
+        to: u.to,
+        // Неизвестное начало диапазона остаётся неизвестным.
+        ...((prior ? prior.unknown : u.unknown) ? { unknown: true as const } : {}),
+      };
+    }),
   ];
   s.baseMoves = { at, bases };
   s.waits = [
@@ -2058,6 +2072,44 @@ export class DevContour {
               `${BASE_HELD_REFUSAL}: перенос базы меняет приёмку или настройку контура (${held.paths.join(', ') || 'пути — в ожидании base-check'}). ${held.action}`,
               409,
             );
+          // Неудержанное ожидание проверки базы снимают gates (цикл задания
+          // доски, `base-check`) или запуск человека после проверки. Снятие
+          // паузы ведущим (`queue_set`, `queue --start --by host`) снимает в
+          // движке и ожидание (`resume`) — то есть перенос без единого gate.
+          if (before.paused && before.waits?.some((w) => w.kind === 'base-check')) {
+            // Очередь держит только само ожидание: снимать ведущему нечего.
+            if (before.pauseReason === 'base-check')
+              throw new DomainError(
+                `${BASE_HELD_REFUSAL}: выдача ждёт проверки перенесённой базы gates, а снятие паузы ведущим сняло бы ожидание без gates. ` +
+                  ((this.config.approvalMode ?? 'agent') === 'agent'
+                    ? BASE_WAIT_ACTION
+                    : 'В режиме оператора ожидание снимает оператор, запустив очередь после проверки базы gates; ведущий его не снимает'),
+                409,
+              );
+            // Любая другая пауза поверх ожидания — ведущего, человека (и до,
+            // и после старта задания: снять паузу человека ведущий мог и
+            // прежде, `resume`), штатной остановки, отказа runtime вместе с
+            // его классами (в том числе provider-auth): снимается сама пауза,
+            // а очередь остаётся на ожидании `base-check`, которое проверит
+            // цикл задания (как `clearFailure` движка при устранённом
+            // отказе). То есть пауза человека, снятая ведущим, становится
+            // ожиданием, которое gates снимут без человека; само ожидание
+            // ведущий не снимает никогда.
+            const s = ht.state;
+            s.paused = true;
+            s.pauseReason = 'base-check';
+            s.pausedAt = now();
+            delete s.pauseFailures;
+            delete s.pauseOperation;
+            delete s.pauseActor;
+            const kept = {
+              paused: true,
+              reason: 'base-check' as const,
+              kept: 'base-check' as const,
+            };
+            ht.journal(kept);
+            return kept;
+          }
         }
         const { control } = value ? engine.pause(reason) : engine.resume();
         // Кто поставил паузу `operator`: ведущий агент — отметкой со временем

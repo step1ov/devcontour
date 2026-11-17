@@ -41,7 +41,7 @@ import {
   type LoopOutlook,
 } from '../runner/lead-outlook.ts';
 import { repositories } from '../core/repositories.ts';
-import { heldBaseOf, leadLiftsPause, pausedByLead } from '../core/work-status.ts';
+import { heldBaseOf, leadLiftsPause, pausedByLead, staleBaseStop } from '../core/work-status.ts';
 import { executionOf, toDomain } from '../harness/execution.ts';
 import { resolveIdPrefix } from '../core/id-prefix.ts';
 import type { DevContourExecutionStore } from '../harness/store.ts';
@@ -82,14 +82,14 @@ const hostCommandsEn = {
   'harness run':
     'Not a DevContour command. The running server holds the controller role but does not lift pauses itself: a board continues under its lead workflow job (workflow_start {"kind": "board", "id": BOARD, "authorRuntime": …}; workflow_status lists jobs). With approvalMode agent the job loop, at stage 1 (tasks), lifts the initial pause, the shutdown pause and an operator pause set before the job started, and checks a moved base itself (base-check); at stage 2 (acceptance) it lifts only the shutdown pause. It retries failed tasks within the repair budget and stops the job when the budget or the failure class allows no retry. With approvalMode operator jobs do not run: the operator starts the queue and retries. host.next names the step for this pack.',
   'harness resume':
-    'queue_set {"paused": false}, or devcontour queue --start --workspace …; an operator pause is lifted only on the user\'s decision.',
+    'queue_set {"paused": false}, or devcontour queue --start --by host --workspace …; an operator pause is lifted only on the user\'s decision. Over a base-check wait either lifts only the pause: the board workflow checks the base.',
 };
 
 const hostCommandsRu: Record<keyof typeof hostCommandsEn, string> = {
   'harness run':
     'Не команда DevContour. Работающий сервер держит роль controller, но паузы сам не снимает: доску продолжает её задание ведущего (workflow_start {"kind": "board", "id": BOARD, "authorRuntime": …}; workflow_status перечисляет задания). С approvalMode agent цикл задания на стадии 1 (задачи) снимает начальную паузу, паузу остановки и паузу оператора, поставленную до старта задания, и сам проверяет сдвинутую базу (base-check); на стадии 2 (приёмка) снимает только паузу остановки. Он повторяет упавшие задачи в пределах бюджета исправлений и останавливает задание, когда бюджет или класс отказа повтора не допускают. С approvalMode operator задания не исполняются: оператор запускает очередь и повторяет задачи. host.next называет шаг для этого пакета.',
   'harness resume':
-    'queue_set {"paused": false} или devcontour queue --start --workspace …; паузу оператора снимают только по решению пользователя.',
+    'queue_set {"paused": false} или devcontour queue --start --by host --workspace …; паузу оператора снимают только по решению пользователя. Над ожиданием проверки базы (base-check) оба снимают только паузу: базу проверит workflow доски.',
 };
 
 /** Описания команд harness на языке подсказок (`hintLocale`); ключи — как есть. */
@@ -119,6 +119,7 @@ interface HandoffHostNextFields {
     | 'workflow_retry'
     | 'wait'
     | 'queue_set'
+    | 'base-update'
     | 'decide'
     | 'fix-input'
     | 'operator'
@@ -445,6 +446,63 @@ export function withHeldBaseStop(
   );
   const next = waits(pack.next) ? toUser(pack.next, 'detail') : pack.next;
   return { ...pack, stops, works, next, truncated };
+}
+
+/**
+ * Остановка такта «база прогонов отстала» (`staleBaseStop`) в пакете harness.
+ * Движок видит лишь паузу без причины и называет её ожиданием controller,
+ * которое «снимет следующий harness run» (`liftedByRun`), хотя её не снимет
+ * ни run, ни цикл задания, пока база отстаёт. Очередь пакета, остановка
+ * выдачи очереди, `next` пакета и `next` поручений, ждущих выдачи у
+ * controller, называют ведущего (`actor: lead`, `action: resume-queue`) и
+ * перенос базы; команда `harness run` не называется. Текст — под маской и в
+ * пределе строки пакета (полный — `host.next.detail`).
+ */
+export function withStaleBaseStop(
+  pack: HandoffPack,
+  stale: string | undefined,
+  redact: (text: string) => string = (text) => text,
+  /** Режим согласований: `--by host` — флаг ведущего агента режима `agent`. */
+  approvalMode: 'agent' | 'operator' = 'agent',
+): HandoffPack {
+  if (!stale) return pack;
+  const update =
+    approvalMode === 'agent' ? 'devcontour base-update --by host' : 'devcontour base-update';
+  const chars = [
+    ...redact(
+      `${stale} Выдачу снимет перенос базы: ${update} (или уберите коммиты с рабочей ветки — такт serve снимет остановку сам, а базу, сдвинутую иначе, поставит на проверку base-check); harness run её не снимет`,
+    ),
+  ];
+  const text =
+    chars.length > PACK_TEXT_CHARS
+      ? chars.slice(0, PACK_TEXT_CHARS - 1).join('') + '…'
+      : chars.join('');
+  const waits = (x: { actor?: string | null; action?: string }) =>
+    x.actor === 'controller' && x.action === 'wait';
+  const toLead = <T extends { actor?: string | null; action?: string; command?: unknown }>(
+    x: T,
+    field: 'detail' | 'message',
+  ): T => {
+    const out = { ...x, actor: 'lead', action: 'resume-queue', [field]: text } as T;
+    delete out.command;
+    return out;
+  };
+  const queue = { ...pack.queue };
+  delete queue.liftedByRun;
+  const stops = pack.stops.map((x) => (x.queue && waits(x) ? toLead(x, 'message') : x));
+  const works = pack.works.map((w) =>
+    waits(w.next) && w.next.step === 'awaiting-claim'
+      ? { ...w, next: toLead(w.next, 'detail') }
+      : w,
+  );
+  const next = waits(pack.next) ? toLead(pack.next, 'detail') : pack.next;
+  return {
+    ...pack,
+    queue: pack.queue.paused ? toLead({ ...queue, detail: text }, 'detail') : pack.queue,
+    stops,
+    works,
+    next,
+  };
 }
 
 /** Наследуемое значение короче — обычное слово или число, а не учётные данные. */
@@ -800,6 +858,7 @@ const urgency: Record<HandoffHostNext['action'], number> = {
   'apply-input': 0,
   'close-follow-up': 1,
   queue_set: 1,
+  'base-update': 1,
   workflow_retry: 1,
   workflow_start: 2,
   wait: 3,
@@ -1173,6 +1232,20 @@ function hostStep(ctx: HostContext): HandoffHostNext | undefined {
         params: { paths: held.paths },
       });
     }
+    // Остановка такта «база прогонов отстала»: её не снимет ни задание (на
+    // стадии задач), ни harness run, а снятие паузы (в том числе циклом на
+    // стадии запуска) лишь даёт следующему такту остановить выдачу снова.
+    // Шаг — перенос базы ведущим; ушедшую причину такт снимает сам (F51).
+    const stale = staleBaseStop(state, h.store.latestEvents(['scheduler.error'], 50));
+    if (stale) {
+      const first = live[0];
+      return withDetail(h, {
+        action: 'base-update',
+        ...(first ? { boardId: first.id, job: jobRef(first) } : {}),
+        code: 'stale-base',
+        params: { reason: stale },
+      });
+    }
     // Пауза выдачи общая: её снимает любое действующее задание, чей цикл
     // снимет её — сразу или после такта, который сначала чинит задачу.
     for (const job of live)
@@ -1275,12 +1348,18 @@ export function devcontourHandoffWithin(
       // Остановка очереди пакета без предела: пакет в пределе её возвращает,
       // если предел её отбросил (`withHeldBaseStop`).
       const full: { queueStop?: HandoffPack['stops'][number] } = {};
+      const stale = staleBaseStop(state, h.store.latestEvents(['scheduler.error'], 50));
       const packOf = (options: Parameters<typeof handoffPack>[1]) =>
-        withHeldBaseStop(
-          withoutIdleControllerStop(handoffPack(packSource, options)),
-          state,
+        withStaleBaseStop(
+          withHeldBaseStop(
+            withoutIdleControllerStop(handoffPack(packSource, options)),
+            state,
+            options?.redact,
+            full.queueStop,
+          ),
+          stale,
           options?.redact,
-          full.queueStop,
+          h.config.approvalMode ?? 'agent',
         );
       // Короткая форма из журнала и панели (`B-xxxxxxxx`) — однозначный
       // префикс полного id; неоднозначный называет кандидатов.

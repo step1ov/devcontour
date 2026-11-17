@@ -21,13 +21,13 @@ import {
 import { adapters, type AgentAdapter } from './adapters.ts';
 import { pinArtifacts } from './contract-artifacts.ts';
 import { contractImpact } from './contract-impact.ts';
-import { STALE_BASE, updateBase } from './base-update.ts';
+import { updateBase } from './base-update.ts';
 import { planRepin, stalePins } from './context.ts';
 import { applyConfig, busyWork } from './reconfigure.ts';
 import { loadConfig } from './config.ts';
 import { loadedDigest } from '../core/service.ts';
 import { git, isAncestor } from './process.ts';
-import { heldBaseOf, queueStopView } from '../core/work-status.ts';
+import { settleStaleBaseStop } from './stale-base.ts';
 import {
   registeredContractLifts,
   siblingContractLifts,
@@ -783,38 +783,35 @@ export class ContractChanges {
   }
 
   /**
-   * Снять паузу сбоя такта «база прогонов отстала от рабочей ветки» (F40),
-   * если ни одна база больше не отстаёт. Только паузу этой причины: без
-   * назначенной причины (`runtime`) и с последней ошибкой такта о базе;
-   * паузы оператора, ведущего, штатной остановки, проверки базы и
-   * применения конфигурации не трогает. Проверка и снятие — одной записью.
+   * Остановка такта «база прогонов отстала от рабочей ветки» (F40) после шага
+   * `base`: то же правило, что у такта (`settleStaleBaseStop`). Базы на
+   * вершинах, записанных при остановке, или сдвинуты ровно этой операцией
+   * (`performed`) — пауза снимается, событие `contract-change.queue-resumed`
+   * пишется той же записью. База сдвинута иначе (git напрямую, слияние в
+   * ветку интеграции) или вершины не записаны — ожидание `base-check` с
+   * удержанием чувствительных путей: непроверенная база не выдаётся. Паузы
+   * оператора, ведущего, остановки, проверки базы и применения конфигурации
+   * не трогаются. `true` — пауза снята.
    */
-  private async liftStaleBasePause(op: Pick<ContractChange, 'id'>) {
-    for (const r of repositories(this.h.config)) {
-      const behind = Number(
-        await git(r.path, 'rev-list', '--count', `refs/heads/${r.targetBranch}..HEAD`),
-      );
-      if (behind) return false;
-    }
+  private async liftStaleBasePause(
+    op: Pick<ContractChange, 'id'>,
+    performed: { repositoryId: string; from: string; to: string }[] = [],
+  ) {
     try {
-      return this.h.store.atomic(() => {
-        const state = this.h.store.read();
-        // Удержанный перенос базы снимает только человек (D42).
-        if (!state.paused || state.pauseReason || heldBaseOf(state)) return false;
-        const stop = queueStopView(state, this.h.store.latestEvents(['scheduler.error'], 50));
-        if (stop.reason !== 'runtime' || !stop.stopReason?.startsWith(STALE_BASE)) return false;
-        this.h.pause(false);
-        // Запуск записан как снятие паузы операцией, а не решение человека:
-        // событие называет операцию и причину снятой паузы.
-        this.h.store.appendEvent('contract-change.queue-resumed', {
-          operation: op.id,
-          reason: 'stale-base',
-        });
-        return true;
+      const outcome = await settleStaleBaseStop(this.h, this.root, {
+        by: 'contract-change',
+        performed,
+        released: () =>
+          // Снятие записано как действие операции, а не решение человека:
+          // событие называет операцию и причину снятой паузы.
+          this.h.store.appendEvent('contract-change.queue-resumed', {
+            operation: op.id,
+            reason: 'stale-base',
+          }),
       });
+      return outcome === 'released';
     } catch {
-      // Очередь сейчас не запустить (сервер останавливается, нет готовой
-      // разработки): пауза остаётся, перенос базы от этого не зависит.
+      // Сверку сейчас не выполнить (git): пауза остаётся, её снимет такт.
       return false;
     }
   }
@@ -1139,8 +1136,12 @@ export class ContractChanges {
         }
         const tip = await git(repo.path, 'rev-parse', target);
         // База догнала рабочую ветку: пауза сбоя такта «база отстала»
-        // (коммит контракта на рабочую ветку до переноса) больше не нужна (F40).
-        await this.liftStaleBasePause(op);
+        // (коммит контракта на рабочую ветку до переноса) больше не нужна (F40)
+        // — если базу сдвинула только эта операция.
+        await this.liftStaleBasePause(
+          op,
+          updated.map((u) => ({ repositoryId: u.repositoryId, from: u.from, to: u.to })),
+        );
         this.advanceStep(op, (current) => {
           if (lifted.size)
             this.log(

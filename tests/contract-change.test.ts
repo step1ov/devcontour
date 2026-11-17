@@ -10,7 +10,7 @@ import {
   type ContractChange,
 } from '../src/runner/contract-change.ts';
 import { contractImpact } from '../src/runner/contract-impact.ts';
-import { STALE_BASE, updateBase } from '../src/runner/base-update.ts';
+import { STALE_BASE } from '../src/runner/base-update.ts';
 import { type AgentAdapter, type AgentRequest } from '../src/runner/adapters.ts';
 import { readyTasks } from '../src/core/graph.ts';
 import { command } from '../src/runner/process.ts';
@@ -59,14 +59,19 @@ test('A contract change runs as one command: review, rebind, plan review, base a
 
 const staleBaseError = `TaskFailure: ${STALE_BASE}: main — main без 1 коммитов. Выполните devcontour base-update (ведущий агент — с --by host), иначе исполнитель получит дерево без подготовленной работы.`;
 
-/** Пауза такта очереди — та же запись, что у планировщика (или пауза человека с той же ошибкой). */
-const tickPause = (s: Awaited<ReturnType<typeof stage>>, error: string, reason?: 'operator') =>
-  s.h.store.change('scheduler.error', (st) => {
+/**
+ * Пауза такта очереди — та же запись, что у планировщика: с вершиной базы
+ * прогонов на момент остановки (`targets`); или пауза человека с той же ошибкой.
+ */
+const tickPause = (s: Awaited<ReturnType<typeof stage>>, error: string, reason?: 'operator') => {
+  const targets = { main: s.sh('rev-parse', `refs/heads/${s.h.config.targetBranch}`) };
+  return s.h.store.change('scheduler.error', (st) => {
     st.paused = true;
     st.pauseReason = reason;
     st.pausedAt = new Date().toISOString();
-    return { error };
+    return { error, targets };
   });
+};
 
 test('F40: the base step lifts the runtime pause «base lags behind» once the base caught up; another runtime pause and an operator pause stay', async () => {
   for (const [error, reason, lifted] of [
@@ -101,18 +106,49 @@ test('F40: the base step lifts the runtime pause «base lags behind» once the b
   }
 });
 
-test('F40: while a base still lags behind its working branch the pause stays; once moved it is lifted', async () => {
+test('F40: while a base still lags the pause stays; a base moved past the operation is checked, not dispatched; commits taken off the branch lift it', async () => {
   const s = await stage();
   try {
-    tickPause(s, staleBaseError);
+    const target = `refs/heads/${s.h.config.targetBranch}`;
     const lift = () =>
       (
         s.changes() as unknown as { liftStaleBasePause(op: { id: string }): Promise<boolean> }
       ).liftStaleBasePause({ id: 'CC-direct' });
+    const before = s.sh('rev-parse', target);
+    const head = s.sh('rev-parse', 'HEAD');
+    tickPause(s, staleBaseError);
     // Рабочая ветка впереди базы: снимать нечего.
     assert.equal(await lift(), false);
     assert.equal(s.store.read().paused, true);
-    await updateBase(s.h.config, s.root);
+    // Рабочую ветку слили в ветку интеграции git напрямую: это перенос базы
+    // без gates, а не повод выдавать. Очередь встаёт на ожидание base-check.
+    const merge = join(s.root, 'merge-worktree');
+    s.sh('worktree', 'add', '-q', merge, s.h.config.targetBranch);
+    try {
+      s.sh('-C', merge, 'merge', '-q', '--ff-only', head);
+    } finally {
+      s.sh('worktree', 'remove', '--force', merge);
+    }
+    assert.equal(s.sh('rev-parse', target), head);
+    assert.equal(await lift(), false);
+    const moved = s.store.read();
+    assert.equal(moved.paused, true, 'база, сдвинутая мимо операции, не выдаётся');
+    assert.equal(moved.pauseReason, 'base-check');
+    assert.deepEqual(moved.baseMoves?.bases, [{ repositoryId: 'main', from: before, to: head }]);
+    assert.ok(
+      !s.store.allEvents().some((e) => e.type === 'contract-change.queue-resumed'),
+      'снятия нет',
+    );
+    // Та же остановка, а коммиты убраны с рабочей ветки (база на записанной
+    // вершине): снимается.
+    s.sh('update-ref', target, before);
+    s.store.change('fixture', (st) => {
+      st.paused = false;
+      for (const k of ['pausedAt', 'pauseReason', 'waits', 'baseMoves'] as const) delete st[k];
+      return {};
+    });
+    tickPause(s, staleBaseError);
+    s.sh('reset', '-q', '--hard', before);
     assert.equal(await lift(), true);
     assert.equal(s.store.read().paused, false);
   } finally {

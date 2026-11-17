@@ -806,6 +806,13 @@ export interface BaseMove {
   repositoryId: string;
   from: string;
   to: string;
+  /**
+   * Начало диапазона неизвестно (остановка «база отстала» без записанной
+   * вершины, компонент добавлен после неё): `from` равен `to`, и разбор
+   * переноса удерживает его до подтверждения оператора (D42) — пустой
+   * диапазон не доказывает, что чувствительные пути не тронуты.
+   */
+  unknown?: true;
 }
 export interface DevContourState {
   preparation?: PreparationState;
