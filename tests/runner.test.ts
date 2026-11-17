@@ -232,35 +232,62 @@ test('Changes to gate policy files are rejected before commit', async () => {
   }
 });
 test('Тысячи посторонних файлов в кандидате не перечитывают состояние на каждый файл', async () => {
+  // Порог — число файлов: чтение состояния на каждый изменённый файл дало бы
+  // не меньше `files` чтений сверх обычных (около 230 на весь прогон, от
+  // числа файлов не зависят). Объём сам по себе ничего не доказывает —
+  // доказывает счётчик, поэтому файлов столько, чтобы порог был далеко над
+  // обычным числом чтений.
+  const files = 1000;
   const f = await runtimeFixture();
   try {
+    let written = false;
     const junk = {
       ...adapters,
       demo: {
         name: 'demo' as const,
         async execute(r: AgentRequest) {
           const result = await adapters.demo.execute(r);
-          if (!r.review) {
+          if (!r.review && !written) {
+            written = true;
             // Как хранилище пакетов, созданное установкой прямо в worktree.
             await mkdir(join(r.cwd, '.pnpm-store-fixture'), { recursive: true });
-            for (let i = 0; i < 3000; i++)
+            for (let i = 0; i < files; i++)
               await writeFile(join(r.cwd, '.pnpm-store-fixture', `f${i}`), String(i));
           }
           return result;
         },
       },
     };
-    const read = f.store.read.bind(f.store);
+    // Считаются оба пути к состоянию: копия (`read`) и общий снимок (`view`),
+    // через который его читают движок и такт очереди.
+    const read = f.store.read.bind(f.store),
+      view = f.store.view.bind(f.store);
     let reads = 0;
     f.store.read = () => {
       reads++;
       return read();
     };
+    f.store.view = () => {
+      reads++;
+      return view();
+    };
     const scheduler = new Scheduler(f.h, f.root, junk);
     f.h.pause(false);
     await scheduler.drain();
     f.store.read = read;
-    assert.ok(reads < 3000, `состояние прочитано ${reads} раз`);
+    f.store.view = view;
+    assert.ok(reads < files, `состояние прочитано ${reads} раз`);
+    // Все файлы прошли через проверку кандидата: они в принятой истории.
+    const merged = await git(
+      f.config.repository,
+      'ls-tree',
+      '-r',
+      '--name-only',
+      scheduler.target,
+      '--',
+      '.pnpm-store-fixture',
+    );
+    assert.equal(merged.split('\n').length, files);
     assert.ok(
       !f.store.read().runs.some((r) => r.status === 'expired'),
       'попытка завершилась своим исходом, а не истечением владения',
