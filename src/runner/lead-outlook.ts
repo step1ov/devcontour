@@ -3,9 +3,15 @@
 // решения, пакет передачи контекста (`session_handoff`) объясняет по ним
 // следующий шаг: правила одни, разойтись им негде.
 import type { WorkflowJob } from '../core/lead-workflow.ts';
-import { DomainError, unverifiedFinding, type DevContourState, type Task } from '../core/model.ts';
+import {
+  DomainError,
+  unverifiedFinding,
+  type AuditEvent,
+  type DevContourState,
+  type Task,
+} from '../core/model.ts';
 import type { DevContour } from '../core/service.ts';
-import { carriedTaskIds, heldBaseOf } from '../core/work-status.ts';
+import { carriedTaskIds, heldBaseOf, staleBaseStop } from '../core/work-status.ts';
 import { repairDecision, type RepairDecision } from '../core/repair.ts';
 
 /** Решение по эпизоду восстановления свойства (`recoverProperties`). */
@@ -107,7 +113,8 @@ export function repairStep(h: DevContour, job: WorkflowJob, taskIds: readonly st
  * Пауза выдачи на стадии задания: проверить перенесённую базу, снять паузу
  * или оставить. Стадия 1 снимает исходную паузу («очередь не запускали»),
  * паузу штатной остановки и паузу человека, поставленную до старта задания;
- * паузу отказа runtime и ожидание проверки базы не снимает. Стадия 2 снимает
+ * паузу отказа runtime, остановку «база прогонов отстала» (`staleBaseStop`)
+ * и ожидание проверки базы не снимает. Стадия 2 снимает
  * только паузу остановки. С выполненными задачами пауза не трогается. При
  * удержанном переносе базы (`heldBaseOf`) пауза не снимается ни на одной
  * стадии: её снимает подтверждение человека.
@@ -116,6 +123,8 @@ export function pauseStep(
   s: DevContourState,
   job: WorkflowJob,
   tasks: readonly Task[],
+  /** Сбои такта (`scheduler.error`): по ним узнаётся остановка «база отстала». */
+  errors: Pick<AuditEvent, 'id' | 'at' | 'type' | 'data'>[] = [],
 ): { checkBase: boolean; lift: boolean } {
   if (tasks.every((t) => t.status === 'done')) return { checkBase: false, lift: false };
   const checkBase = s.paused && s.pauseReason === 'base-check';
@@ -130,11 +139,18 @@ export function pauseStep(
       (s.pauseReason === 'runtime' ||
         // Перенесённую базу проверяет цикл (или человек): само ожидание цикл не снимает.
         s.pauseReason === 'base-check' ||
+        // Остановку «база прогонов отстала» снятие не исправит: следующий
+        // такт поставит её снова. Её снимает сам такт, когда причина ушла.
+        !!staleBaseStop(s, errors) ||
         operatorDecided(s, job));
     return { checkBase, lift: !decided && !held };
   }
   return { checkBase, lift: s.paused && s.pauseReason === 'shutdown' && !held };
 }
+
+/** Последние сбои такта очереди: вход правила `pauseStep`. */
+export const tickErrors = (h: Pick<DevContour, 'store'>) =>
+  h.store.latestEvents(['scheduler.error'], 50);
 
 /** Задачи текущей ревизии доски без перенесённых из принятой. */
 export function boardTasks(s: DevContourState, boardId: string) {
@@ -298,7 +314,7 @@ export function loopOutlook(h: DevContour, s: DevContourState, job: WorkflowJob)
       reason: repair.reason,
     };
   if (repair) return { step: 'repair', taskId: repair.taskId, reason: repair.reason };
-  const pause = pauseStep(s, job, scope.tasks);
+  const pause = pauseStep(s, job, scope.tasks, tickErrors(h));
   if (pause.checkBase) return { step: 'check-base' };
   if (pause.lift && s.paused)
     return {
@@ -328,7 +344,10 @@ export function liftsPause(h: DevContour, s: DevContourState, job: WorkflowJob):
     (outlook.step === 'recovery' && (outlook.action === 'retry-task' || outlook.action === 'wait'));
   if (!first) return false;
   const found = boardTasks(s, job.id);
-  return !!found && pauseStep(s, { ...job, stage }, leadScope(found.tasks, s.runs).tasks).lift;
+  return (
+    !!found &&
+    pauseStep(s, { ...job, stage }, leadScope(found.tasks, s.runs).tasks, tickErrors(h)).lift
+  );
 }
 
 /**

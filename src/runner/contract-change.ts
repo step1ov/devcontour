@@ -21,13 +21,13 @@ import {
 import { adapters, type AgentAdapter } from './adapters.ts';
 import { pinArtifacts } from './contract-artifacts.ts';
 import { contractImpact } from './contract-impact.ts';
-import { STALE_BASE, updateBase } from './base-update.ts';
+import { updateBase } from './base-update.ts';
 import { planRepin, stalePins } from './context.ts';
 import { applyConfig, busyWork } from './reconfigure.ts';
 import { loadConfig } from './config.ts';
 import { loadedDigest } from '../core/service.ts';
 import { git, isAncestor } from './process.ts';
-import { heldBaseOf, queueStopView } from '../core/work-status.ts';
+import { staleBaseStop } from '../core/work-status.ts';
 import {
   registeredContractLifts,
   siblingContractLifts,
@@ -800,9 +800,10 @@ export class ContractChanges {
       return this.h.store.atomic(() => {
         const state = this.h.store.read();
         // Удержанный перенос базы снимает только человек (D42).
-        if (!state.paused || state.pauseReason || heldBaseOf(state)) return false;
-        const stop = queueStopView(state, this.h.store.latestEvents(['scheduler.error'], 50));
-        if (stop.reason !== 'runtime' || !stop.stopReason?.startsWith(STALE_BASE)) return false;
+        // Та же остановка, что снимает такт (`staleBaseStop`): без причины,
+        // классов отказа и ожиданий (удержанный перенос — ожидание, его
+        // снимает только человек, D42).
+        if (!staleBaseStop(state, this.h.store.latestEvents(['scheduler.error'], 50))) return false;
         this.h.pause(false);
         // Запуск записан как снятие паузы операцией, а не решение человека:
         // событие называет операцию и причину снятой паузы.

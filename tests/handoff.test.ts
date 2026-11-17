@@ -26,7 +26,7 @@ import { DevContour, specDigest } from '../src/core/service.ts';
 import { Store } from '../src/core/store.ts';
 import { DomainError, repositorySchema, type Config } from '../src/core/model.ts';
 import { LeadRunner } from '../src/runner/lead-workflow.ts';
-import { loopAhead } from '../src/runner/lead-outlook.ts';
+import { loopAhead, pauseStep, tickErrors } from '../src/runner/lead-outlook.ts';
 import { LeadWorkflow } from '../src/core/lead-workflow.ts';
 import { BASE_HELD_DETAIL } from '../src/runner/base-check.ts';
 import { DevContourExecutionStore } from '../src/harness/store.ts';
@@ -1921,7 +1921,7 @@ test('withoutIdleControllerStop: остановка, отброшенная пр
 test('session_handoff: остановка «база прогонов отстала» называет перенос базы, а не ожидание следующего run (F51)', () => {
   const f = fixture();
   try {
-    const { board, at, start } = oneBoard(f.h);
+    const { board, task, at, start } = oneBoard(f.h);
     start();
     f.h.pause(false);
     tick();
@@ -1949,6 +1949,11 @@ test('session_handoff: остановка «база прогонов отста
       !pack.stops.some((x) => x.queue && x.actor === 'controller'),
       JSON.stringify(pack.stops),
     );
+    // Цикл задания на стадии запуска её не снимает: снятие не исправит
+    // отставание, следующий такт поставил бы её снова.
+    const job = { ...new LeadWorkflow(f.h).list()[0], stage: 1 };
+    const tasks = f.store.read().tasks.filter((t) => t.id === task);
+    assert.equal(pauseStep(f.store.read(), job, tasks, tickErrors(f.h)).lift, false);
     // Пауза человека поверх — уже не остановка такта: шаг прежний.
     f.h.pause(true);
     assert.notEqual(at().host.next?.code, 'stale-base');
