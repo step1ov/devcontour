@@ -10,6 +10,8 @@ import { randomUUID } from 'node:crypto';
 import { join } from 'node:path';
 import { HarnessError, Runner, fencedRefMove } from 'devcontour-harness';
 import { DevContour, waitBaseCheck } from '../core/service.ts';
+import type { DevContourState } from '../core/model.ts';
+import { holdSensitiveBaseMove } from './base-check.ts';
 import { repository, repositories } from '../core/repositories.ts';
 import { validateWorkflow } from '../core/workflow.ts';
 import { TaskFailure } from '../core/failure.ts';
@@ -296,33 +298,105 @@ export class Scheduler {
     return none;
   }
   /**
+   * Не чаще одной сверки базы под остановкой «база прогонов отстала» за
+   * столько миллисекунд (первая сверка новой остановки — сразу): иначе git
+   * шёл бы каждые 750 мс, пока остановка ждёт ведущего. Тесты ставят 0.
+   */
+  staleBaseProbeMs = 10_000;
+  private staleBaseProbe?: { since: string; at: number };
+  /**
    * Остановка «база прогонов отстала» (`assertBaseCurrent`) — техническая:
-   * её ставит сам такт на идущей очереди, записывая сбой (`scheduler.error`)
-   * и паузу без причины. Когда причина ушла — рабочая ветка снова не впереди
-   * базы (коммит убрали с ветки, базу перенесли иначе), — такт снимает свою
-   * остановку сам и в том же такте снова сверяет базу перед выдачей. Раньше
-   * пауза висела с уже ложной причиной: задание доски на стадии задач её не
-   * снимает, а пакет ведущего обещал «снимет следующий run», и выдача стояла,
-   * пока ведущий не догадывался снять её `queue_set`.
+   * её ставит сам такт на идущей очереди, записывая сбой (`scheduler.error`
+   * с вершинами баз прогонов в `targets`) и паузу без причины. Пока она
+   * стоит, такт (не чаще `staleBaseProbeMs`) сверяет базу:
    *
-   * Снимается только такая пауза (`staleBaseStop`): без причины, без классов
-   * отказа и ожиданий, и последний сбой такта после неё — отставание базы. Пауза
-   * человека или ведущего, ожидание проверки базы, отказ runtime и прочие
-   * сбои такта не трогаются. Запись — CAS по времени паузы.
+   * - отставания нет, и базы прогонов на тех же вершинах, что при остановке,
+   *   — значит, коммиты ушли с рабочей ветки: такт снимает свою остановку
+   *   (`scheduler.stale-base.cleared`) и в том же такте снова сверяет базу
+   *   перед выдачей;
+   * - отставания нет, но база сдвинута мимо `base-update` (git напрямую) —
+   *   это перенос базы, а не повод выдавать: очередь встаёт на ожидание
+   *   `base-check` с диапазоном от записанной вершины
+   *   (`scheduler.stale-base.target-moved`), удержание чувствительных путей
+   *   записывается сразу (`holdSensitiveBaseMove`), дальше — gates базы и
+   *   правило удержания (D42), как после `base-update`;
+   * - остановка прежней версии без `targets` не снимается.
+   *
+   * Только пауза `staleBaseStop` (без причины, классов отказа и ожиданий;
+   * последний сбой такта после неё — отставание базы); запись — CAS по
+   * времени паузы. Сбой сверки (git) в журнал сбоев не пишется и выдачу не
+   * трогает: следующая сверка повторит её.
    */
   private async releaseStaleBaseStop() {
     const view = this.h.store.view();
-    if (!staleBaseStop(view, this.h.store.latestEvents(['scheduler.error'], 50))) return;
-    const since = view.pausedAt;
+    const errors = this.h.store.latestEvents(['scheduler.error'], 50);
+    if (!staleBaseStop(view, errors)) {
+      this.staleBaseProbe = undefined;
+      return;
+    }
+    const since = view.pausedAt!;
+    const probe = this.staleBaseProbe;
+    if (probe?.since === since && Date.now() - probe.at < this.staleBaseProbeMs) return;
+    this.staleBaseProbe = { since, at: Date.now() };
+    // Сбой, который `staleBaseStop` назвал причиной (последний после паузы).
+    const from = Date.parse(since) - 1000;
+    const cause = errors.find((e) => Date.parse(e.at) >= from);
+    const targets = (cause?.data as { targets?: Record<string, string> } | undefined)?.targets;
+    if (!targets) return;
     if ((await this.baseDrift()).length) return;
-    this.h.store.change('scheduler.stale-base.cleared', (s) => {
-      // CAS: та же пауза, что прочитана до сверки базы.
-      if (!s.paused || s.pauseReason || s.pausedAt !== since || s.waits?.length)
-        return { cleared: false };
-      s.paused = false;
-      delete s.pausedAt;
-      delete s.pauseActor;
-      return { cleared: true, pausedAt: since };
+    const moved: { repositoryId: string; from: string; to: string }[] = [];
+    for (const repo of repositories(this.h.config)) {
+      const to = await git(repo.path, 'rev-parse', this.targetFor(repo.id));
+      const recorded = targets[repo.id];
+      if (!recorded) return;
+      if (recorded !== to) moved.push({ repositoryId: repo.id, from: recorded, to });
+    }
+    const same = (s: DevContourState) =>
+      s.paused &&
+      !s.pauseReason &&
+      !s.pauseFailures?.length &&
+      !s.waits?.length &&
+      s.pausedAt === since;
+    if (!moved.length) {
+      this.h.store.change('scheduler.stale-base.cleared', (s) => {
+        // CAS: та же пауза, что прочитана до сверки базы.
+        if (!same(s)) return { cleared: false };
+        s.paused = false;
+        delete s.pausedAt;
+        delete s.pauseActor;
+        return { cleared: true, pausedAt: since };
+      });
+      return;
+    }
+    const recorded = this.h.store.change('scheduler.stale-base.target-moved', (s) => {
+      if (!same(s)) return { recorded: false };
+      s.pauseReason = 'base-check';
+      s.pausedAt = new Date().toISOString();
+      waitBaseCheck(
+        s,
+        moved,
+        `База прогонов перенесена мимо base-update (${moved.map((m) => m.repositoryId).join(', ')}): проверьте её гейтами и продолжите очередь`,
+      );
+      return { recorded: true, pausedAt: since, updated: moved };
+    });
+    if (recorded.recorded) await holdSensitiveBaseMove(this.h, this.root);
+  }
+  /**
+   * Сбой такта интервала: пауза без причины и событие `scheduler.error`.
+   * Остановка «база прогонов отстала» несёт вершины баз прогонов на момент
+   * остановки (`targets`): по ним такт отличает уход коммитов с рабочей
+   * ветки от переноса базы мимо `base-update` (`releaseStaleBaseStop`).
+   */
+  noteTickFailure(e: unknown) {
+    const targets = (e as { targets?: Record<string, string> } | undefined)?.targets;
+    this.h.store.change('scheduler.error', (s) => {
+      // Время остановки отличает сбой такта от исходной паузы «очередь
+      // ещё не запускали» (у обеих нет причины), даже когда событие
+      // ушло из последних записей журнала. Уже стоящую паузу сбой не
+      // передатирует.
+      if (!s.paused) s.pausedAt = new Date().toISOString();
+      s.paused = true;
+      return { error: String(e), ...(targets ? { targets } : {}) };
     });
   }
   private async assertBaseCurrent(
@@ -337,16 +411,22 @@ export class Scheduler {
       held.length && this.h.config.approvalMode === 'agent'
         ? ` После переноса очередь продолжит только подтверждение оператора (${held.slice(0, 20).join(', ')}): «Подтвердить и запустить» в «Внимании» панели; ведущий агент это ожидание сам не снимает — попросите пользователя подтвердить перенос. Без человека — только изменение приёмки через contract-change; документ контракта снимает цикл, если его редакцию одобрило независимое ревью (review-contract).`
         : '';
-    throw new TaskFailure(
-      'stale-base',
-      STALE_BASE +
-        ': ' +
-        drift.map((d) => `${d.repositoryId} — ${d.branch} без ${d.behind} коммитов`).join('; ') +
-        (sensitive.length
-          ? `. Перемотка не выполнена автоматически: коммиты меняют приёмку или настройку контура (${sensitive.slice(0, 20).join(', ')})`
-          : '') +
-        '. Выполните devcontour base-update (ведущий агент — с --by host), иначе исполнитель получит дерево без подготовленной работы.' +
-        operator,
+    const targets: Record<string, string> = {};
+    for (const repo of repositories(this.h.config))
+      targets[repo.id] = await git(repo.path, 'rev-parse', this.targetFor(repo.id));
+    throw Object.assign(
+      new TaskFailure(
+        'stale-base',
+        STALE_BASE +
+          ': ' +
+          drift.map((d) => `${d.repositoryId} — ${d.branch} без ${d.behind} коммитов`).join('; ') +
+          (sensitive.length
+            ? `. Перемотка не выполнена автоматически: коммиты меняют приёмку или настройку контура (${sensitive.slice(0, 20).join(', ')})`
+            : '') +
+          '. Выполните devcontour base-update (ведущий агент — с --by host), иначе исполнитель получит дерево без подготовленной работы.' +
+          operator,
+      ),
+      { targets },
     );
   }
   /**
@@ -369,15 +449,7 @@ export class Scheduler {
       void this.tick()
         .catch((e: unknown) => {
           if (this.stopped) return;
-          this.h.store.change('scheduler.error', (s) => {
-            // Время остановки отличает сбой такта от исходной паузы «очередь
-            // ещё не запускали» (у обеих нет причины), даже когда событие
-            // ушло из последних записей журнала. Уже стоящую паузу сбой не
-            // передатирует.
-            if (!s.paused) s.pausedAt = new Date().toISOString();
-            s.paused = true;
-            return { error: String(e) };
-          });
+          this.noteTickFailure(e);
         })
         .catch(() => {
           // Запись сбоя не удалась (хранилище недоступно): следующий такт
@@ -487,7 +559,9 @@ export class Scheduler {
     // снова встаёт на base-check — выдача на неподтверждённой базе исключена
     // здесь, а не только у каждого, кто снимает паузу.
     this.h.restoreBaseHold();
-    await this.releaseStaleBaseStop();
+    // Сверка под остановкой «база отстала» не мешает остальному такту
+    // (восстановление, истечение попыток): её сбой повторит следующая.
+    await this.releaseStaleBaseStop().catch(() => {});
     const runner = this.runner;
     if (!this.h.store.view().paused && runner.active < this.h.config.concurrency) {
       // Сверка базы — git на каждом такте; без расхождения повторно не читается.
