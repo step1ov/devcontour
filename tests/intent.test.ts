@@ -24,6 +24,7 @@ import { acceptBoard, reviewPlan } from '../src/runner/agent-control.ts';
 import { git, command } from '../src/runner/process.ts';
 import { syncGit } from '../src/runner/git-sync.ts';
 import { input } from './helpers.ts';
+import { cliCommand } from './cli-command.ts';
 
 const spec =
   '## REQ-list: Catalogue\nList products.\n## REQ-later: Export\nExport products.\n## REQ-out: Billing\nBilling is excluded.\n';
@@ -447,10 +448,7 @@ test('Intent and task bindings survive an independent Git clone without centrali
     assert.equal(shared, '');
     const check = await command(
       [
-        process.execPath,
-        '--import',
-        'tsx',
-        'src/cli.ts',
+        ...cliCommand(),
         'intent-report',
         '--repository-id',
         'main',
@@ -735,10 +733,7 @@ test('task_story привязывает принятую задачу к ист�
     // Оператор привязывает через CLI, агент в agent mode — через API.
     const cli = await command(
       [
-        process.execPath,
-        '--import',
-        'tsx',
-        'src/cli.ts',
+        ...cliCommand(),
         'task-story',
         '--story',
         'list',

@@ -15,7 +15,7 @@ import {
   writeFileSync,
 } from 'node:fs';
 import { tmpdir } from 'node:os';
-import { join, resolve } from 'node:path';
+import { join } from 'node:path';
 import { command } from '../src/runner/process.ts';
 import { processAlive } from '../src/runner/resources.ts';
 import {
@@ -29,8 +29,9 @@ import {
   type ServerRecord,
 } from '../src/runner/server-record.ts';
 import { fixture } from './helpers.ts';
+import { cliCommand } from './cli-command.ts';
 
-const cli = ['node', '--import', 'tsx', resolve('src/cli.ts')];
+const cli = cliCommand();
 
 async function until<T>(what: string, read: () => T | undefined, ms = 60000): Promise<T> {
   const deadline = Date.now() + ms;

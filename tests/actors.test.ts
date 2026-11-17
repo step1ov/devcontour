@@ -21,6 +21,7 @@ import { Scheduler } from '../src/runner/scheduler.ts';
 import { command, git } from '../src/runner/process.ts';
 import { baseUpdateOperation } from '../src/runner/base-update.ts';
 import { repositorySchema } from '../src/core/model.ts';
+import { cliCommand } from './cli-command.ts';
 
 type Payload = { by?: string; reset?: boolean; hadAttempt?: boolean };
 /** События harness типа `type` с актёром и поручением. */
@@ -59,7 +60,7 @@ test('actors: CLI retry и cancel — operator по умолчанию, --by hos
       h.store.close();
     }
     const cli = (...args: string[]) =>
-      command(['node', '--import', 'tsx', 'src/cli.ts', ...args, '--data', data], process.cwd());
+      command([...cliCommand(), ...args, '--data', data], process.cwd());
     const retried = await cli('retry', '--task', ids.failed);
     assert.equal(retried.code, 0, retried.stderr);
     const other = ids.ids.find((id) => id !== ids.failed)!;

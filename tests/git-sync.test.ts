@@ -10,6 +10,7 @@ import { canonical } from '../src/core/sync-model.ts';
 import { syncGit, assertTeamCheckout } from '../src/runner/git-sync.ts';
 import { input } from './helpers.ts';
 import { complete, edit, fixture, git, rewrite } from './git-sync-fixture.ts';
+import { cliArgs } from './cli-command.ts';
 
 test('Requirement bindings sync between independent clones and remain in the component', () => {
   const f = fixture();
@@ -531,16 +532,12 @@ test('CLI exposes sync, status and assignment against an explicit workspace', ()
     writeFileSync(join(a.workspace, '.devcontour-local/config.json'), JSON.stringify(a.h.config));
     const cli = (...args: string[]) =>
       JSON.parse(
-        execFileSync(
-          process.execPath,
-          ['--import', 'tsx', 'src/cli.ts', ...args, '--workspace', a.workspace],
-          {
-            cwd: new URL('../', import.meta.url).pathname,
-            encoding: 'utf8',
-            stdio: ['ignore', 'pipe', 'pipe'],
-            timeout: 30000,
-          },
-        ),
+        execFileSync(process.execPath, [...cliArgs(), ...args, '--workspace', a.workspace], {
+          cwd: new URL('../', import.meta.url).pathname,
+          encoding: 'utf8',
+          stdio: ['ignore', 'pipe', 'pipe'],
+          timeout: 30000,
+        }),
       );
     assert.equal(cli('sync', '--member', 'alice').status, 'synchronized');
     cli('assign-task', '--task', t.id, '--member', 'alice');

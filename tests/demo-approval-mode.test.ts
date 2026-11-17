@@ -3,15 +3,15 @@ import assert from 'node:assert/strict';
 import { spawn } from 'node:child_process';
 import { existsSync, mkdtempSync, readFileSync, realpathSync, rmSync } from 'node:fs';
 import { tmpdir } from 'node:os';
-import { join, resolve, sep } from 'node:path';
+import { join, sep } from 'node:path';
 import { command } from '../src/runner/process.ts';
+import { cliArgs, cliCommand } from './cli-command.ts';
 
 // `devcontour demo --approval-mode agent|operator` записывает режим
 // согласования в конфигурацию учебного проекта; другое значение — отказ до
 // создания проекта. Учебный runtime `demo`: модели не вызываются.
 
 const prefix = 'dc-demo-approval-';
-const cli = resolve('src/cli.ts');
 
 function scratch() {
   return realpathSync(mkdtempSync(join(tmpdir(), prefix)));
@@ -28,9 +28,7 @@ async function demo(root: string, mode: string) {
   const child = spawn(
     process.execPath,
     [
-      '--import',
-      'tsx',
-      cli,
+      ...cliArgs(),
       'demo',
       '--data',
       data,
@@ -87,7 +85,7 @@ test('demo --approval-mode refuses another value before creating the demo projec
   try {
     const data = join(root, 'data');
     const result = await command(
-      ['node', '--import', 'tsx', cli, 'demo', '--data', data, '--approval-mode', 'host'],
+      [...cliCommand(), 'demo', '--data', data, '--approval-mode', 'host'],
       process.cwd(),
     );
     assert.notEqual(result.code, 0);

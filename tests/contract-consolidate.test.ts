@@ -1,7 +1,7 @@
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
 import { writeFile } from 'node:fs/promises';
-import { join, resolve } from 'node:path';
+import { join } from 'node:path';
 import { type ContractChange } from '../src/runner/contract-change.ts';
 import { supersededBy } from '../src/core/service.ts';
 import { devcontourHooks } from '../src/harness/hooks.ts';
@@ -9,6 +9,7 @@ import { reviewedContractDocument } from '../src/runner/sensitive-paths.ts';
 import { command } from '../src/runner/process.ts';
 import { input } from './helpers.ts';
 import { AMENDED, CONSOLIDATED, consolidationStage } from './consolidation-fixture.ts';
+import { cliCommand } from './cli-command.ts';
 
 type Stage = Awaited<ReturnType<typeof consolidationStage>>;
 const start = async (s: Stage, proposal: object = s.proposal) =>
@@ -212,10 +213,7 @@ test('F20: the CLI flag --consolidate starts the consolidation mode', async () =
     await writeFile(file, JSON.stringify(s.proposal));
     const run = await command(
       [
-        process.execPath,
-        '--import',
-        import.meta.resolve('tsx'),
-        resolve('src/cli.ts'),
+        ...cliCommand(),
         'contract-change',
         '--consolidate',
         '--file',

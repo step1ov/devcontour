@@ -27,15 +27,15 @@ import {
   writeFileSync,
 } from 'node:fs';
 import { tmpdir } from 'node:os';
-import { basename, delimiter, dirname, join, resolve } from 'node:path';
+import { basename, delimiter, dirname, join } from 'node:path';
 import { startWorkspace } from '../src/runner/start.ts';
 import { architecture } from './preparation-fixture.ts';
 import { testCheckoutRoot, withTestHome } from './helpers.ts';
 import { loadConfig } from '../src/runner/config.ts';
 import { repositories } from '../src/core/repositories.ts';
 import type { QuickStep } from '../src/runner/quick.ts';
+import { cliArgs } from './cli-command.ts';
 
-const cli = resolve('src/cli.ts');
 const prefix = 'devcontour-quick-e2e-';
 const temp = () => realpathSync(mkdtempSync(join(tmpdir(), prefix)));
 /** Удаляет только каталог, созданный этим тестом во временной папке системы. */
@@ -240,7 +240,7 @@ async function approve(url: string, changeId: string, stage: string) {
  */
 const cliRun = (root: string, ...args: string[]) =>
   new Promise<{ status: number | null; stdout: string; stderr: string }>((done, fail) => {
-    const child = spawn(process.execPath, ['--import', 'tsx', cli, ...args, '--workspace', root], {
+    const child = spawn(process.execPath, [...cliArgs(), ...args, '--workspace', root], {
       env: process.env,
       stdio: ['ignore', 'pipe', 'pipe'],
     });

@@ -18,7 +18,6 @@ import {
 } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { delimiter, join, sep } from 'node:path';
-import { fileURLToPath } from 'node:url';
 import { demoPool, testDemo } from './demo-pool.ts';
 import { loadConfig } from '../src/runner/config.ts';
 import { Scheduler } from '../src/runner/scheduler.ts';
@@ -28,6 +27,7 @@ import { adapters, type AgentRequest } from '../src/runner/adapters.ts';
 import { git } from '../src/runner/process.ts';
 import { repositories } from '../src/core/repositories.ts';
 import { input } from './helpers.ts';
+import { cliArgs } from './cli-command.ts';
 
 const demos = demoPool(testDemo);
 after(() => demos.close());
@@ -217,10 +217,9 @@ test('SIGTERM to serve terminates the live CLI child and requeues its work', asy
       store.close();
     }
   }
-  const cli = fileURLToPath(new URL('../src/cli.ts', import.meta.url));
   const serve = spawn(
     process.execPath,
-    ['--import', 'tsx', cli, 'serve', '--data', live.seed.root, '--port', '0'],
+    [...cliArgs(), 'serve', '--data', live.seed.root, '--port', '0'],
     { env: { ...process.env, PATH: live.path }, stdio: ['ignore', 'pipe', 'pipe'] },
   );
   let output = '';

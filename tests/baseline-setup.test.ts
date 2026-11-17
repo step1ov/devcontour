@@ -25,6 +25,7 @@ import { setupProject } from '../src/runner/setup.ts';
 import { loadConfig } from '../src/runner/config.ts';
 import { chooseWorkspaceMode } from '../src/runner/workspace-mode.ts';
 import { command, git } from '../src/runner/process.ts';
+import { cliCommand } from './cli-command.ts';
 
 async function temp(prefix = 'devcontour-baseline-setup-') {
   return realpath(await mkdtemp(join(tmpdir(), prefix)));
@@ -458,10 +459,7 @@ test('Baseline CLI setup: --workspace without an approved product process is ref
     const before = await tree(root);
     const result = await command(
       [
-        process.execPath,
-        '--import',
-        'tsx',
-        'src/cli.ts',
+        ...cliCommand(),
         'setup',
         '--workspace',
         workspace,
@@ -488,19 +486,7 @@ test('Baseline CLI setup: legacy --data keeps its data root and JSON envelope', 
   try {
     const data = join(root, 'legacy-data');
     const result = await command(
-      [
-        process.execPath,
-        '--import',
-        'tsx',
-        'src/cli.ts',
-        'setup',
-        '--repository',
-        root,
-        '--profile',
-        'go-api',
-        '--data',
-        data,
-      ],
+      [...cliCommand(), 'setup', '--repository', root, '--profile', 'go-api', '--data', data],
       resolve('.'),
     );
     assert.equal(result.code, 0, result.stderr);
@@ -514,19 +500,7 @@ test('Baseline CLI setup: legacy --data keeps its data root and JSON envelope', 
     const resumed = JSON.parse(
       (
         await command(
-          [
-            process.execPath,
-            '--import',
-            'tsx',
-            'src/cli.ts',
-            'setup',
-            '--repository',
-            root,
-            '--profile',
-            'go-api',
-            '--data',
-            data,
-          ],
+          [...cliCommand(), 'setup', '--repository', root, '--profile', 'go-api', '--data', data],
           resolve('.'),
         )
       ).stdout,

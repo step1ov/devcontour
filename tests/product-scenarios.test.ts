@@ -3,6 +3,7 @@ import assert from 'node:assert/strict';
 import { IntentService } from '../src/runner/intent.ts';
 import { command } from '../src/runner/process.ts';
 import { fixture, localDefinition, map, releaseScenario, sceneProof } from './product-fixture.ts';
+import { cliCommand } from './cli-command.ts';
 
 test('A release scenario needs its own testcase or a recorded deferral; story coverage alone does not accept the release', async () => {
   const f = await fixture();
@@ -137,18 +138,7 @@ test('A release accepted under the earlier rule without proven scenarios is not 
     assert.match(view.issues[0], /принят по прежнему правилу/);
     assert.ok(view.acceptanceOverridden);
     const cli = await command(
-      [
-        process.execPath,
-        '--import',
-        'tsx',
-        'src/cli.ts',
-        'product-view',
-        '--release',
-        'mvp',
-        '--require-accepted',
-        '--data',
-        f.root,
-      ],
+      [...cliCommand(), 'product-view', '--release', 'mvp', '--require-accepted', '--data', f.root],
       process.cwd(),
       { timeoutMs: 20000 },
     );

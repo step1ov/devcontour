@@ -13,10 +13,13 @@ import { command } from '../src/runner/process.ts';
 import { Store } from '../src/core/store.ts';
 import { DevContour } from '../src/core/service.ts';
 import { loadConfig } from '../src/runner/config.ts';
+import { cliCommand } from './cli-command.ts';
 
 const cli = resolve('src/cli.ts');
 const loader = import.meta.resolve('tsx');
-const run = (cwd: string, ...args: string[]) =>
+const run = (cwd: string, ...args: string[]) => command([...cliCommand(), ...args], cwd);
+// The launch hint names how the CLI was started: from source it is the npm script.
+const runSource = (cwd: string, ...args: string[]) =>
   command([process.execPath, '--import', loader, cli, ...args], cwd);
 
 test('Product commands require scope; invalid or conflicting scope never silently selects demo', () => {
@@ -74,7 +77,7 @@ test('CLI называет версии DevContour и движка; справк
     assert.equal(r.stderr, '');
   }
   // Из исходников — npm script checkout; из собранного пакета — бинарник.
-  const help = await run(tmpdir(), 'help');
+  const help = await runSource(tmpdir(), 'help');
   assert.match(help.stdout, /Запуск: npm run devcontour -- <команда>/);
   assert.match(help.stdout, /^devcontour stop \[--timeout-ms 60000\] --workspace/m);
   assert.equal(help.stderr, '');
