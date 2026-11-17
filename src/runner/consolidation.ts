@@ -104,20 +104,26 @@ const names = (side: string, h: ReturnType<typeof headingName>) =>
 /**
  * Пропуски отображения в итоге ревью. Отображение — строки «старое → новое»
  * (`→` или `->`; несколько пар в строке — через `;`). Строка годна, если в её
- * левой части не больше одного заголовка прежнего текста, а правая называет
- * хотя бы одну цель в новом тексте: ID, заголовок (целиком или меткой вроде
+ * левой части не больше одного заголовка прежнего текста и не все правила
+ * документа сразу (при двух правилах и больше), а правая называет хотя бы
+ * одну цель в новом тексте: ID, заголовок (целиком или меткой вроде
  * `ORD-04`) или якорь. Заголовок прежнего текста слева годной строки
- * отображён. ID правила слева отображён, если его держит одна из целей:
- * стоит в собственном тексте раздела цели (раздел ID-цели — тот, где этот ID
- * определён). Так несколько ID делят одну строку, если цель их содержит.
+ * отображён. ID правила слева отображён, если цель его определяет: в
+ * собственном тексте раздела цели (раздел ID-цели — тот, где этот ID
+ * определён) ID стоит в месте определения, а не упоминанием. Так несколько ID
+ * делят одну строку. Слияние пишется явно — `merged into REQ-1` или
+ * `слито в REQ-1`: REQ-1 определён в новом тексте, и его раздел держит
+ * слитый ID. Правило, которое в новом тексте больше нигде не определено и
+ * не слито, — пропуск с пометкой «в новом тексте не определено».
  *
  * Отображения требуют ID, которые прежний текст определяет сам
- * (`definitions`), и заголовки с собственным текстом (заголовок только с
- * подразделами, оставшийся в новом тексте, отображать не нужно). Ссылки на ID, определённые в другом
- * месте (ADR, сценарии тестов, правила соседних документов), строки не
- * требуют, пока стоят в новом тексте дословно; пропавшая ссылка — пропуск.
- * Перечисление без стрелок, ссылка в никуда, одна строка на несколько
- * заголовков и совпадение по части слова отображением не считаются.
+ * (`definitions`), и заголовки с собственным текстом (k-е вхождение
+ * заголовка только с подразделами, если в новом тексте есть k-е вхождение,
+ * отображать не нужно). Ссылки на ID, определённые в другом месте (ADR,
+ * сценарии тестов, правила соседних документов), строки не требуют, пока
+ * стоят в новом тексте дословно; пропавшая ссылка — пропуск. Перечисление
+ * без стрелок, ссылка в никуда, одна строка на несколько заголовков или на
+ * все правила и совпадение по части слова отображением не считаются.
  */
 export function mappingGaps(previous: string, next: string, summary: string) {
   const newIds = new Set(ruleTokens(next));
@@ -125,16 +131,21 @@ export function mappingGaps(previous: string, next: string, summary: string) {
   const oldIds = ruleTokens(previous);
   const rules = oldIds.filter((id) => defined.has(id));
   // Заголовок без собственного текста (только подразделы), оставшийся в новом
-  // тексте, ничего не несёт: отображать в нём нечего.
-  const kept = new Set(headings(next).map(headingText));
-  const empty = new Set(
-    sections(previous)
-      .filter((p) => p.heading !== undefined && !p.text.split('\n').slice(1).join('').trim())
-      .map((p) => headingText(p.heading!)),
-  );
-  const oldHeads = headings(previous)
-    .map(headingName)
-    .filter((h) => h.text && !(empty.has(h.text) && kept.has(h.text)));
+  // тексте, ничего не несёт: отображать в нём нечего. Считается по месту:
+  // k-е вхождение заголовка пусто, и в новом тексте есть k-е вхождение.
+  const kept = new Map<string, number>();
+  for (const h of headings(next).map(headingText)) kept.set(h, (kept.get(h) ?? 0) + 1);
+  const seen = new Map<string, number>();
+  const oldHeads = sections(previous)
+    .slice(1)
+    .map((p) => {
+      const name = headingName(p.heading!);
+      const k = (seen.get(name.text) ?? 0) + 1;
+      seen.set(name.text, k);
+      const empty = !p.text.split('\n').slice(1).join('').trim();
+      return { ...name, exempt: empty && (kept.get(name.text) ?? 0) >= k };
+    })
+    .filter((h) => h.text && !h.exempt);
   const parts = sections(next).map((s) => ({
     ...s,
     ids: new Set(ruleTokens(s.text)),
@@ -162,29 +173,50 @@ export function mappingGaps(previous: string, next: string, summary: string) {
     const [, left, right] = m;
     const heads = oldHeads.filter((h) => names(left, h));
     if (heads.length > 1) continue;
-    const targets = new Set([
-      ...ruleTokens(right)
-        .filter((id) => newIds.has(id))
-        .flatMap(strongest),
-      ...parts.filter(
-        (p) =>
-          (p.name && (names(right, p.name) || (p.name.label && whole(right, p.name.label)))) ||
-          p.anchors.some((a) => whole(right, a)),
-      ),
-    ]);
-    if (!targets.size) continue;
+    // Одна строка на все правила документа — не отображение.
+    const named = new Set(ruleTokens(left));
+    if (rules.length > 1 && rules.every((id) => named.has(id))) continue;
+    const targets = [
+      ...new Set([
+        ...ruleTokens(right)
+          .filter((id) => newIds.has(id))
+          .flatMap(strongest),
+        ...parts.filter(
+          (p) =>
+            (p.name && (names(right, p.name) || (p.name.label && whole(right, p.name.label)))) ||
+            p.anchors.some((a) => whole(right, a)),
+        ),
+      ]),
+    ];
+    if (!targets.length) continue;
+    // Слияние называется явно: «merged into REQ-1» или «слито в REQ-1», и
+    // REQ-1 определён в новом тексте; его раздел держит слитый ID.
+    const into = /(?:merged into|слито в)\s+([^\s,;()]+)/iu.exec(right)?.[1];
+    const merged = ruleTokens(into ?? '')
+      .filter((id) => newDefined.has(id))
+      .flatMap(strongest);
+    // ID отображён, если цель его определяет (не просто упоминает) или он
+    // слит в определённый ID.
+    const holds = (id: string) =>
+      targets.some((t) => t.defines.has(id)) || merged.some((t) => t.ids.has(id));
     for (const h of heads) covered.heads.add(h.text);
-    // Раздел, названный меткой (`ORD-04`), — как ID: цель должна его держать.
+    // Раздел, названный меткой (`ORD-04`), — как его ID.
     for (const h of oldHeads)
-      if (h.label && whole(left, h.label) && [...targets].some((t) => whole(t.text, h.label!)))
-        covered.heads.add(h.text);
-    for (const id of ruleTokens(left))
-      if ([...targets].some((t) => t.ids.has(id))) covered.ids.add(id);
+      if (h.label && whole(left, h.label)) {
+        const id = ruleTokens(h.label)[0];
+        if (id ? holds(id) : targets.some((t) => whole(t.text, h.label!)))
+          covered.heads.add(h.text);
+      }
+    for (const id of named) if (holds(id)) covered.ids.add(id);
   }
   return [
-    ...rules.filter((id) => !covered.ids.has(id)),
-    ...oldIds.filter((id) => !defined.has(id) && !newIds.has(id)),
-    ...oldHeads.filter((h) => !covered.heads.has(h.text)).map((h) => `«${h.text}»`),
+    ...new Set([
+      ...rules
+        .filter((id) => !covered.ids.has(id))
+        .map((id) => (newDefined.has(id) ? id : `${id} (в новом тексте не определено)`)),
+      ...oldIds.filter((id) => !defined.has(id) && !newIds.has(id)),
+      ...oldHeads.filter((h) => !covered.heads.has(h.text)).map((h) => `«${h.text}»`),
+    ]),
   ];
 }
 

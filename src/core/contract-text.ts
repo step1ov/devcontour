@@ -44,12 +44,20 @@ export function idTokens(text: string) {
 
 /**
  * Тело ID правила для консолидации: составной ID в верхнем регистре
- * (`ORD-RET-01`, `FR-LOG-01`, `PRG-R09` — сегменты букв, последний — до трёх
- * прописных и номер) или ID-токен `ID_TOKEN` (`REQ-12`, `ТР-4`, `req-1.2`).
+ * (`ORD-RET-01`, `FR-LOG-01`, `PRG-R09`, `CVE-2024-1234` — сегменты букв или
+ * цифр, последний — до трёх прописных и номер) или ID-токен `ID_TOKEN`
+ * (`REQ-12`, `ТР-4`, `req-1.2`); номер может нести строчную букву
+ * (`REQ-3a`). Составные ID в нижнем регистре не распознаются: цепочки
+ * `vue-router-4`, `node-fetch-2` в обычном тексте и коде неотличимы от них.
  */
 const RULE_BODY =
-  '\\p{Lu}{2,}(?:-\\p{Lu}[\\p{Lu}\\p{N}]*)*-\\p{Lu}{0,3}\\d+(?:\\.\\d+)*|\\p{L}{2,}-\\d+(?:\\.\\d+)*';
-const RULE_TOKEN = new RegExp(`(?<![\\p{L}\\p{N}_-])(?:${RULE_BODY})`, 'gu');
+  '\\p{Lu}{2,}(?:-[\\p{Lu}\\p{N}]+)*-\\p{Lu}{0,3}\\d+\\p{Ll}?(?:\\.\\d+)*|\\p{L}{2,}-\\d+\\p{Ll}?(?:\\.\\d+)*';
+/** Граница ID: `REQ-3a` и `REQ-3b` — разные ID, а не два `REQ-3`. */
+const BEFORE = '(?<![\\p{L}\\p{N}_-])';
+const AFTER = '(?![\\p{L}\\p{N}_])';
+const RULE_TOKEN = new RegExp(`${BEFORE}(?:${RULE_BODY})${AFTER}`, 'gu');
+/** Несколько ID подряд: `REQ-1, REQ-2`, `REQ-3 и REQ-4`, `REQ-5/REQ-6`. */
+const RULE_LIST = `(?:${RULE_BODY})${AFTER}(?:(?:\\s*[,/&]\\s*|\\s+(?:and|и)\\s+)(?:${RULE_BODY})${AFTER})*`;
 
 /**
  * ID правил для консолидации: `idTokens` и составные ID. Консолидация не
@@ -69,7 +77,7 @@ const SECTION_NUMBER = /^\d+(?:\.\d+)*\.?\s+/;
  * `ORD-RET-01`, `REQ-4.2`. По ней ревьюер называет раздел, не повторяя
  * его заголовок целиком.
  */
-const LABEL = new RegExp(`^(?:${RULE_BODY})`, 'u');
+const LABEL = new RegExp(`^(?:${RULE_BODY})${AFTER}`, 'u');
 
 /** Метка заголовка (`ORD-04` у «ORD-04. Оплата заказа») или undefined. */
 export function headingLabel(heading: string) {
@@ -116,25 +124,56 @@ export function sections(text: string) {
   return out;
 }
 
+/** Разделитель после метки правила: `REQ-1.`, `REQ-1:`, `REQ-1 —`, `| REQ-1 |`, конец. */
+const SEPARATOR = /^\s*(?:[.:|—–]|-\s|$)/u;
+/**
+ * ID, которыми начинается блок: список ID (`REQ-1, REQ-2:`) с разделителем
+ * следом; в обёртке — `**REQ-15**`, `` `REQ-4` ``, `(REQ-10)`, `[REQ-11]` —
+ * хватает пробела после неё.
+ */
+function leadIds(start: string) {
+  const text = start.trim();
+  const wrapped = /^(?:\*\*|__|`|\(|\[)/.test(text);
+  const m = new RegExp(`^[(\\[]?(${RULE_LIST})([)\\]]?)(.*)$`, 'u').exec(text.replace(MARKUP, ''));
+  if (!m) return [];
+  const [, ids, closed, rest] = m;
+  return SEPARATOR.test(rest) || closed || (wrapped && /^\s/.test(rest)) ? ruleTokens(ids) : [];
+}
+
 /**
  * ID, которые документ определяет сам, по месту в структуре, с силой
- * определения: 3 — метка в начале заголовка (`### ORD-04. …`); 2 — первое
- * слово блока (абзаца, пункта списка, строки таблицы или цитаты) с
- * разделителем следом (`REQ-1. …`, `- REQ-2: …`, `| REQ-3 | …`); 1 — метка
- * правила в тексте (`…: REQ-3. The listing…` — ID, точка и слово с
- * прописной). Остальные вхождения — ссылки: на ADR, сценарии тестов, правила
- * других документов или этого же («по ORD-05»).
+ * определения:
+ *
+ * - 3 — заголовок: метка в начале (`### ORD-04. …`) или после одного слова
+ *   с разделителем (`## Rule REQ-6: …`);
+ * - 2 — начало блока: абзаца, пункта списка (и задачи `- [ ]`), ячейки
+ *   таблицы, цитаты или элемента HTML (`<li>`, `<td>`, `<p>`, `<dt>`), — ID
+ *   или список ID с разделителем следом (`REQ-1. …`, `- REQ-1, REQ-2: …`,
+ *   `| Orders | REQ-3: … |`, `| REQ-4 |`) или в обёртке (`**REQ-5** …`,
+ *   `(REQ-6) …`, `[REQ-7] …`). Ячейка таблицы — запись строки: ID в её
+ *   начале с разделителем или во всю ячейку называет правило строки, а
+ *   ячейка-перечень вроде `REQ-5 (TC-01), REQ-6` — ссылки;
+ * - 1 — метка в тексте: ID с точкой и словом следом (`…: REQ-3. The listing`)
+ *   или полужирная метка с разделителем (`**REQ-7**: …`).
+ *
+ * Остальные вхождения — ссылки: на ADR, сценарии тестов, правила других
+ * документов или этого же («по ORD-05»). Определение в прозе («REQ-7
+ * requires …» посреди абзаца) и в блоке кода не распознаётся: такой ID
+ * остаётся в предпроверке (должен стоять в новом тексте) и приходит ревьюеру
+ * в `references`, смысл которых он обязан сохранить и которые, если они
+ * задают правило, отображает как правило.
  */
 export function definitions(text: string) {
   const known = new Set(ruleTokens(text));
   const out = new Map<string, number>();
-  const define = (id: string | undefined, strength: number) => {
-    if (id && known.has(id) && (out.get(id) ?? 0) < strength) out.set(id, strength);
+  const define = (ids: string[], strength: number) => {
+    for (const id of ids) if (known.has(id) && (out.get(id) ?? 0) < strength) out.set(id, strength);
   };
-  const lead = (line: string) =>
-    new RegExp(`^(${RULE_BODY})\\s*(?:[.:)|—–]|-\\s|$)`, 'u').exec(
-      line.replace(MARKUP, '').trim(),
-    )?.[1];
+  const inline = [
+    new RegExp(`${BEFORE}(${RULE_LIST})[\`*_]*\\.[\`*_]*\\s+(?=\\p{L})`, 'gu'),
+    new RegExp(`(?:\\*\\*|__)(${RULE_LIST})(?:\\*\\*|__)\\s*[:.—–]`, 'gu'),
+    new RegExp(`(?:\\*\\*|__)(${RULE_LIST})[.:](?:\\*\\*|__)`, 'gu'),
+  ];
   let fence: string | undefined;
   let previous = '';
   for (const line of text.split('\n')) {
@@ -148,21 +187,37 @@ export function definitions(text: string) {
     if (fence) continue;
     const heading = /^\s{0,3}#{1,6}\s+(.*?)\s*#*\s*$/.exec(line)?.[1];
     if (heading !== undefined) {
-      define(headingLabel(heading), 3);
+      const label = headingLabel(heading);
+      if (label) define([label], 3);
+      const plain = heading
+        .replace(/\{#[^}]*\}\s*$/, '')
+        .replace(MARKUP, '')
+        .trim()
+        .replace(SECTION_NUMBER, '');
+      const named = new RegExp(`^\\p{L}+\\s+(${RULE_LIST})`, 'u').exec(plain);
+      if (named && SEPARATOR.test(plain.slice(named[0].length))) define(ruleTokens(named[1]), 3);
       previous = '';
       continue;
     }
-    // Первое слово блока: после пустой строки или заголовка, пункт списка,
-    // строка таблицы; маркеры цитаты не считаются.
+    // Начало блока: после пустой строки или заголовка, пункт списка (и
+    // задача), ячейка таблицы, элемент HTML; маркеры цитаты не считаются.
     const bare = line.replace(/^\s*(?:>\s?)+/, '');
-    const item = /^\s*(?:[-*+]|\d+[.)])\s+(.*)$/.exec(bare)?.[1];
-    const row = /^\s*\|(.*)$/.exec(bare)?.[1];
-    const start = item ?? row ?? (previous.trim() ? undefined : bare);
-    if (start !== undefined) define(lead(start), 2);
-    for (const m of line.matchAll(
-      new RegExp(`(?<![\\p{L}\\p{N}_-])(${RULE_BODY})[\`*_]*\\.[\`*_]*\\s+(?=\\p{Lu})`, 'gu'),
-    ))
-      define(m[1], 1);
+    const item = /^\s*(?:[-*+]|\d+[.)])\s+(?:\[[ xX]\]\s+)?(.*)$/.exec(bare)?.[1];
+    const starts: string[] = [];
+    if (/^\s*\|/.test(bare))
+      starts.push(
+        ...bare
+          .trim()
+          .replace(/^\||\|$/g, '')
+          .split(/(?<!\\)\|/),
+      );
+    else if (item !== undefined) starts.push(item);
+    else if (!previous.trim()) starts.push(bare);
+    for (const m of bare.matchAll(/<(?:li|td|th|p|dt|dd)\b[^>]*>/gi))
+      starts.push(bare.slice(m.index + m[0].length));
+    for (const start of starts) define(leadIds(start.replace(/^(?:\s*<[a-z][^>]*>)+/i, '')), 2);
+    for (const pattern of inline)
+      for (const m of line.matchAll(pattern)) define(ruleTokens(m[1]), 1);
     previous = bare;
   }
   return out;
