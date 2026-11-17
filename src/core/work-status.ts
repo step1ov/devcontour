@@ -89,6 +89,41 @@ export const leadLiftsPause = (
 ) => pausedByLead(state) && !state.waits?.some((w) => w.kind === 'base-check');
 
 /**
+ * Начало остановки такта «база прогонов отстала» (`Scheduler.assertBaseCurrent`):
+ * по нему перенос базы операцией изменения контракта узнаёт свою паузу (F40).
+ */
+export const STALE_BASE = 'База прогонов отстала от рабочей ветки';
+
+/**
+ * Остановка такта «база прогонов отстала»: пауза без причины, классов отказа
+ * и ожиданий, причина которой (последний сбой такта после неё) — отставание
+ * базы. Возвращает её причину (`stopReason`). Один источник для такта,
+ * который снимает её, когда отставания нет (F51), и пакета ведущего, который
+ * называет шаг, пока оно есть: движок видит лишь паузу без причины и
+ * назвал бы её ожиданием «следующего harness run».
+ */
+export function staleBaseStop(
+  state: Pick<
+    DevContourState,
+    'paused' | 'pauseReason' | 'pausedAt' | 'pauseFailures' | 'waits' | 'pauseActor'
+  >,
+  events: Pick<AuditEvent, 'id' | 'at' | 'type' | 'data'>[],
+): string | undefined {
+  if (
+    !state.paused ||
+    state.pauseReason ||
+    state.pauseFailures?.length ||
+    state.waits?.length ||
+    !state.pausedAt
+  )
+    return undefined;
+  const stop = queueStopView(state, events);
+  return stop.reason === 'runtime' && stop.stopReason?.startsWith(STALE_BASE)
+    ? stop.stopReason
+    : undefined;
+}
+
+/**
  * Действие при ожидании проверки базы в режиме агента без идущего задания
  * доски: базу проверяет цикл workflow, а не ведущий. Снятие паузы ведущим
  * (`queue_set`, `queue --start --by host`) сняло бы ожидание без gates —

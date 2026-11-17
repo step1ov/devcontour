@@ -10,11 +10,10 @@ import { randomUUID } from 'node:crypto';
 import { join } from 'node:path';
 import { HarnessError, Runner, fencedRefMove } from 'devcontour-harness';
 import { DevContour, waitBaseCheck } from '../core/service.ts';
-import type { DevContourState } from '../core/model.ts';
 import { repository, repositories } from '../core/repositories.ts';
 import { validateWorkflow } from '../core/workflow.ts';
 import { TaskFailure } from '../core/failure.ts';
-import { STALE_BASE } from './base-update.ts';
+import { STALE_BASE, staleBaseStop } from '../core/work-status.ts';
 import { executionOf, type Execution } from '../harness/execution.ts';
 import { devcontourContextSource, pinnedSnapshot, taskPacks } from '../harness/host.ts';
 import { runtimeAdapters } from '../harness/adapters.ts';
@@ -306,31 +305,20 @@ export class Scheduler {
    * снимает, а пакет ведущего обещал «снимет следующий run», и выдача стояла,
    * пока ведущий не догадывался снять её `queue_set`.
    *
-   * Снимается только такая пауза: без причины, без классов отказа и
-   * ожиданий, и первый сбой такта после неё — отставание базы. Пауза
+   * Снимается только такая пауза (`staleBaseStop`): без причины, без классов
+   * отказа и ожиданий, и последний сбой такта после неё — отставание базы. Пауза
    * человека или ведущего, ожидание проверки базы, отказ runtime и прочие
    * сбои такта не трогаются. Запись — CAS по времени паузы.
    */
   private async releaseStaleBaseStop() {
-    const stop = (
-      s: Pick<DevContourState, 'paused' | 'pauseReason' | 'pausedAt' | 'pauseFailures' | 'waits'>,
-    ) =>
-      s.paused && !s.pauseReason && !s.pauseFailures?.length && !s.waits?.length
-        ? s.pausedAt
-        : undefined;
-    const since = stop(this.h.store.view());
-    if (!since) return;
-    // Сбой, поставивший паузу, записан той же транзакцией, что её время.
-    const from = Date.parse(since) - 1000;
-    const cause = this.h.store
-      .latestEvents(['scheduler.error'], 20)
-      .filter((e) => Date.parse(e.at) >= from)
-      .at(-1);
-    const error = (cause?.data as { error?: string } | undefined)?.error ?? '';
-    if (!error.includes(STALE_BASE)) return;
+    const view = this.h.store.view();
+    if (!staleBaseStop(view, this.h.store.latestEvents(['scheduler.error'], 50))) return;
+    const since = view.pausedAt;
     if ((await this.baseDrift()).length) return;
     this.h.store.change('scheduler.stale-base.cleared', (s) => {
-      if (stop(s) !== since) return { cleared: false };
+      // CAS: та же пауза, что прочитана до сверки базы.
+      if (!s.paused || s.pauseReason || s.pausedAt !== since || s.waits?.length)
+        return { cleared: false };
       s.paused = false;
       delete s.pausedAt;
       delete s.pauseActor;

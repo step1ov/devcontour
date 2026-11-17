@@ -82,6 +82,12 @@ export interface HintParamMap {
    * снять не вправе.
    */
   'base-held': { paths: string[] };
+  /**
+   * Такт очереди остановил выдачу: база прогонов отстала от рабочей ветки
+   * (`staleBaseStop`); `reason` — причина остановки. Пакет harness видит лишь
+   * паузу без причины и назвал бы её ожиданием «следующего harness run».
+   */
+  'stale-base': { reason: string };
   /** Открытый follow-up исполнителя. */
   'follow-up': { severity: number; version: number };
   /** Вопрос ждёт ответа ведущего (без минимумов, режим agent). */
@@ -324,6 +330,9 @@ const en: Catalog = {
     (s.loop && s.boardId ? ` Meanwhile the job loop of board ${s.boardId} ${loopEn(s.loop)}.` : ''),
   'base-held': (p, s) =>
     `operator: confirm the base move. The moved base changes acceptance or contour setup (${p.paths.length ? p.paths.join(', ') : 'see the wait in the attention center'}), and gates of that base do not prove such a change, so dispatch waits for a human: ask the user to confirm it with the confirm-and-start action of the base move card in the attention center of the panel. The lead does not lift this wait itself (no queue_set, no workflow_retry). The job loop lifts on its own only contract documents at the exact text that an independent review approved (review-contract or contract-change); acceptance files, profile, config and gates always need the user.` +
+    (s.boardId ? ` The job loop of board ${s.boardId} waits until then.` : ''),
+  'stale-base': (p, s) =>
+    `The queue tick stopped dispatch because the run base is behind the working branch: ${p.reason} No job loop and no harness run lifts this stop while the base lags, and queue_set {"paused": false} only lets the next tick stop dispatch again. Bring the base up with devcontour base-update --by host: the moved base then waits for the base check, which the board workflow runs (workflow_start when no job is live); if the commits change acceptance or contour setup, the move waits for the operator instead (code base-held). If the commits should not reach the base (a draft committed to the working branch), take them off the branch: with devcontour serve running, the tick lifts its own stop once the branch is no longer ahead of the base.` +
     (s.boardId ? ` The job loop of board ${s.boardId} waits until then.` : ''),
   'follow-up': (p, s) => {
     const { requestId, taskId } = s.input!;
@@ -571,6 +580,9 @@ const ru: Catalog = {
     (s.loop && s.boardId ? ` Тем временем цикл задания доски ${s.boardId} ${loopRu(s.loop)}.` : ''),
   'base-held': (p, s) =>
     `operator: подтвердите перенос базы. Перенесённая база меняет приёмку или настройку контура (${p.paths.length ? p.paths.join(', ') : 'см. ожидание в центре внимания'}), а gates этой базы такое изменение не доказывают, поэтому выдача ждёт человека: попросите пользователя подтвердить перенос кнопкой «Подтвердить и запустить» в «Внимании» панели. Ведущий агент это ожидание сам не снимает (ни queue_set, ни workflow_retry). Цикл задания сам снимает только документы контрактов в редакции, одобренной независимым ревью (review-contract или contract-change); файлы приёмки, профиль, конфигурацию и gates всегда подтверждает пользователь.` +
+    (s.boardId ? ` До этого цикл задания доски ${s.boardId} ждёт.` : ''),
+  'stale-base': (p, s) =>
+    `Такт очереди остановил выдачу: база прогонов отстала от рабочей ветки: ${p.reason} Пока база отстаёт, эту остановку не снимет ни цикл задания, ни harness run, а queue_set {"paused": false} лишь даст следующему такту остановить выдачу снова. Перенесите базу: devcontour base-update --by host; перенесённая база ждёт проверки, которую исполнит workflow доски (workflow_start, если задания нет); если коммиты меняют приёмку или настройку контура, перенос вместо этого ждёт оператора (код base-held). Если коммиты не должны попасть в базу (черновик закоммичен в рабочую ветку), уберите их с ветки: при работающем devcontour serve такт сам снимет свою остановку, как только ветка перестанет опережать базу.` +
     (s.boardId ? ` До этого цикл задания доски ${s.boardId} ждёт.` : ''),
   'follow-up': (p, s) => {
     const { requestId, taskId } = s.input!;

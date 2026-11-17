@@ -256,6 +256,21 @@ const samples: { [C in HintCode]: (HintSubject & Extract<HintOf, { code: C }>)[]
       job,
     },
   ],
+  'stale-base': [
+    {
+      code: 'stale-base',
+      params: {
+        reason:
+          'База прогонов отстала от рабочей ветки: main — main без 1 коммитов. Выполните devcontour base-update (ведущий агент — с --by host), иначе исполнитель получит дерево без подготовленной работы.',
+      },
+    },
+    {
+      code: 'stale-base',
+      params: { reason: 'База прогонов отстала от рабочей ветки: main — main без 2 коммитов.' },
+      boardId: 'board-1',
+      job,
+    },
+  ],
   'follow-up': [{ code: 'follow-up', params: { severity: 5, version: 3 }, input: input1 }],
   'answer-lead': [
     { code: 'answer-lead', params: { version: 2 }, input: input1 },
@@ -519,8 +534,10 @@ test('Подсказки шага: новая конфигурация setup п�
  * остановка вопроса не держится, F39); прочие образцы байтово прежние.
  * Добавлен образец `apply-moved` с `operator` (approvalMode operator: перенос
  * применяет оператор); прочие образцы байтово прежние.
+ * Добавлены образцы кода `stale-base` (остановка такта «база прогонов
+ * отстала»: шаг — перенос базы ведущим); прочие образцы байтово прежние.
  */
-const ENGLISH_SAMPLES_SHA256 = '5380226c913ef80a6b7ee44a1037ef0abf3e4d0d737d8f033cc82ab47046199d';
+const ENGLISH_SAMPLES_SHA256 = '8710263b5193a81674437e65acabd067c2ccde2a24546cca7ba1a710120e4626';
 
 test('Подсказки шага: английские тексты образцов закреплены', () => {
   assert.equal(

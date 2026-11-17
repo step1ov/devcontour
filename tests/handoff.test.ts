@@ -1917,3 +1917,42 @@ test('withoutIdleControllerStop: остановка, отброшенная пр
     f.cleanup();
   }
 });
+
+test('session_handoff: остановка «база прогонов отстала» называет перенос базы, а не ожидание следующего run (F51)', () => {
+  const f = fixture();
+  try {
+    const { board, at, start } = oneBoard(f.h);
+    start();
+    f.h.pause(false);
+    tick();
+    // Такт сервера остановил выдачу отставшей базой (как `Scheduler.start`).
+    f.store.change('scheduler.error', (s) => {
+      s.pausedAt = new Date().toISOString();
+      s.paused = true;
+      return {
+        error:
+          'TaskFailure: База прогонов отстала от рабочей ветки: main — main без 1 коммитов. Выполните devcontour base-update (ведущий агент — с --by host), иначе исполнитель получит дерево без подготовленной работы.',
+      };
+    });
+    const { pack, host } = at();
+    assert.equal(host.next?.action, 'base-update');
+    assert.equal(host.next?.code, 'stale-base');
+    assert.equal(host.next?.boardId, board);
+    assert.match(String(host.next?.params.reason), /^База прогонов отстала/);
+    assert.match(host.next?.detail ?? '', /devcontour base-update --by host/);
+    // Пакет не обещает, что паузу снимет следующий harness run.
+    assert.equal(pack.queue.liftedByRun, undefined);
+    assert.equal(pack.queue.actor, 'lead');
+    assert.match(pack.queue.detail ?? '', /devcontour base-update --by host/);
+    assert.notEqual(pack.next.command, 'harness run');
+    assert.ok(
+      !pack.stops.some((x) => x.queue && x.actor === 'controller'),
+      JSON.stringify(pack.stops),
+    );
+    // Пауза человека поверх — уже не остановка такта: шаг прежний.
+    f.h.pause(true);
+    assert.notEqual(at().host.next?.code, 'stale-base');
+  } finally {
+    f.cleanup();
+  }
+});
