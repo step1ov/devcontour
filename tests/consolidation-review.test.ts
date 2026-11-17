@@ -169,11 +169,14 @@ test('F20 M2: a summary without the full mapping counts as a rejected round; the
     const lazy = reviewers(s.calls, s.prompts, () => ({ approved: true, summary: 'ok' }));
     await assert.rejects(
       reviewConsolidation(s.h, s.root, s.proposal, 'codex', lazy, () => {}, head),
-      /Неполное отображение старого текста в новый: итог ревью не называет REQ-1, REQ-2, REQ-3, «Catalog», «Prices», «Listing»/,
+      /Неполное отображение старого текста в новый: ревью одобрило смысл, но итог не называет 5 пропусков: REQ-1, REQ-2, REQ-3, «Prices», «Listing»/,
     );
     assert.equal(s.store.read().contracts.length, 2, 'ничего не зарегистрировано');
     const attempt = s.store.read().contractAttempts!.at(-1)!;
     assert.equal(attempt.approved, false);
+    assert.equal(attempt.outcome, 'incomplete-mapping');
+    // «Catalog» без собственного текста и остался в новом тексте: отображать нечего.
+    assert.deepEqual(attempt.gaps, ['REQ-1', 'REQ-2', 'REQ-3', '«Prices»', '«Listing»']);
     assert.equal(attempt.findings.at(-1)?.rule, 'consolidation');
     // Неполный, но не пустой итог.
     const partial = reviewers(s.calls, s.prompts, () => ({
@@ -182,7 +185,7 @@ test('F20 M2: a summary without the full mapping counts as a rejected round; the
     }));
     await assert.rejects(
       reviewConsolidation(s.h, s.root, s.proposal, 'codex', partial, () => {}, head),
-      /не называет REQ-3$|не называет REQ-3\./,
+      /не называет 1 пропуск: REQ-3\./,
     );
     // Следующий раунд — новый вызов модели (не прежнее одобрение) и видит пропуски.
     const c = await reviewConsolidation(
@@ -212,7 +215,7 @@ test('F20 R2-M2: the mapping needs "old → new" lines pointing into the new tex
       CONSOLIDATED,
       'Covered: REQ-1, REQ-2, REQ-3; sections: Catalog, Prices, Listing. All good.',
     ),
-    ['REQ-1', 'REQ-2', 'REQ-3', '«Catalog»', '«Prices»', '«Listing»'],
+    ['REQ-1', 'REQ-2', 'REQ-3', '«Prices»', '«Listing»'],
   );
   // Стрелка в никуда: правая часть не называет ничего из нового текста.
   assert.deepEqual(
@@ -238,7 +241,7 @@ test('F20 R3-L1/L2: one bulk line is not a mapping, identity lines are, and Mark
   // Одна строка на всё: три заголовка слева.
   assert.deepEqual(
     mappingGaps(AMENDED, CONSOLIDATED, 'REQ-1, REQ-2, REQ-3, Catalog, Prices, Listing → REQ-1'),
-    ['REQ-1', 'REQ-2', 'REQ-3', '«Catalog»', '«Prices»', '«Listing»'],
+    ['REQ-1', 'REQ-2', 'REQ-3', '«Prices»', '«Listing»'],
   );
   // Несколько заголовков в одной строке.
   assert.deepEqual(
@@ -247,16 +250,16 @@ test('F20 R3-L1/L2: one bulk line is not a mapping, identity lines are, and Mark
       CONSOLIDATED,
       'REQ-1 → REQ-1\nREQ-2 → REQ-2\nREQ-3 → REQ-3\nCatalog, Prices, Listing → Catalog',
     ),
-    ['«Catalog»', '«Prices»', '«Listing»'],
+    ['«Prices»', '«Listing»'],
   );
-  // Три ID на одну цель — не хватает целей.
+  // Три ID на одну цель: раздел Listing держит REQ-2 и REQ-3, но не REQ-1.
   assert.deepEqual(
     mappingGaps(
       AMENDED,
       CONSOLIDATED,
       'Catalog → Catalog\nPrices → Prices\nListing → Listing\nREQ-1, REQ-2, REQ-3 → Listing',
     ),
-    ['REQ-1', 'REQ-2', 'REQ-3'],
+    ['REQ-1'],
   );
   // Строки тождества и по заголовку на строку.
   assert.deepEqual(

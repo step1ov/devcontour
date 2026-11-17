@@ -790,6 +790,13 @@ export interface ContractAttempt {
   summary: string;
   /** rule — класс находки; `feasibility` — обязательство невыполнимо или неизмеримо. */
   findings: { severity: string; message: string; rule?: string }[];
+  /**
+   * Исход, отличный от вердикта ревьюера: `incomplete-mapping` — ревью
+   * консолидации одобрило смысл, но итог не отобразил всё;
+   * `gaps` — полный список пропусков. Редакция не зарегистрирована.
+   */
+  outcome?: 'incomplete-mapping';
+  gaps?: string[];
   artifact: string;
   authorRuntime: string;
   reviewerRuntime: string;

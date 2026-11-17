@@ -39,6 +39,114 @@ export function idTokens(text: string) {
   ].sort();
 }
 
+/** Разметка Markdown, которая не меняет слово: `**REQ-1**`, `` `REQ-1` ``. */
+const MARKUP = /[`*_]/g;
+/** Номер раздела перед текстом заголовка: `4.`, `2.1`, `10.`. */
+const SECTION_NUMBER = /^\d+(?:\.\d+)*\.?\s+/;
+/**
+ * Метка в начале заголовка, похожая на ID, в том числе составная:
+ * `ORD-RET-01`, `REQ-4.2`. По ней ревьюер называет раздел, не повторяя
+ * его заголовок целиком.
+ */
+const LABEL = /^\p{L}{2,}(?:-\p{L}[\p{L}\p{N}]*)*-\d+(?:\.\d+)*/u;
+
+/** Метка заголовка (`ORD-04` у «ORD-04. Оплата заказа») или undefined. */
+export function headingLabel(heading: string) {
+  const text = heading
+    .replace(/\{#[^}]*\}\s*$/, '')
+    .replace(MARKUP, '')
+    .trim();
+  return LABEL.exec(text.replace(SECTION_NUMBER, ''))?.[0];
+}
+
+/**
+ * Разделы документа: заголовок (undefined — текст до первого заголовка),
+ * его якоря и собственный текст до следующего заголовка любого уровня, вместе
+ * со строкой заголовка. Подразделы в текст раздела не входят. Заголовки
+ * внутри блоков кода разделов не начинают.
+ */
+export function sections(text: string) {
+  const out: { heading?: string; anchors: string[]; text: string }[] = [{ anchors: [], text: '' }];
+  const counts = new Map<string, number>();
+  let fence: string | undefined;
+  for (const line of text.split('\n')) {
+    const marker = /^\s{0,3}(`{3,}|~{3,})/.exec(line)?.[1];
+    if (marker) {
+      if (!fence) fence = marker[0];
+      else if (marker[0] === fence) fence = undefined;
+    }
+    const heading = fence || marker ? undefined : /^\s{0,3}#{1,6}\s+(.*?)\s*#*\s*$/.exec(line)?.[1];
+    if (heading !== undefined) {
+      const own: string[] = [];
+      const explicit = /\{#([^}\s]+)\}\s*$/.exec(heading)?.[1];
+      if (explicit) own.push(explicit.toLowerCase());
+      const base = slug(heading.replace(/\{#[^}]*\}\s*$/, ''));
+      const n = counts.get(base) ?? 0;
+      counts.set(base, n + 1);
+      own.push(n ? `${base}-${n}` : base);
+      out.push({ heading, anchors: own, text: line + '\n' });
+      continue;
+    }
+    const section = out.at(-1)!;
+    section.text += line + '\n';
+    for (const m of line.matchAll(/<a\s[^>]*\b(?:id|name)\s*=\s*["']([^"']+)["']/gi))
+      section.anchors.push(m[1].toLowerCase());
+  }
+  return out;
+}
+
+/**
+ * ID, которые документ определяет сам, по месту в структуре, с силой
+ * определения: 3 — метка в начале заголовка (`### ORD-04. …`); 2 — первое
+ * слово блока (абзаца, пункта списка, строки таблицы или цитаты) с
+ * разделителем следом (`REQ-1. …`, `- REQ-2: …`, `| REQ-3 | …`); 1 — метка
+ * правила в тексте (`…: REQ-3. The listing…` — ID, точка и слово с
+ * прописной). Остальные вхождения — ссылки: на ADR, сценарии тестов, правила
+ * других документов или этого же («по ORD-05»).
+ */
+export function definitions(text: string) {
+  const known = new Set(idTokens(text));
+  const out = new Map<string, number>();
+  const define = (id: string | undefined, strength: number) => {
+    if (id && known.has(id) && (out.get(id) ?? 0) < strength) out.set(id, strength);
+  };
+  const lead = (line: string) =>
+    new RegExp(`^(${ID_TOKEN.source})\\s*(?:[.:)|—–]|-\\s|$)`, 'u').exec(
+      line.replace(MARKUP, '').trim(),
+    )?.[1];
+  let fence: string | undefined;
+  let previous = '';
+  for (const line of text.split('\n')) {
+    const marker = /^\s{0,3}(`{3,}|~{3,})/.exec(line)?.[1];
+    if (marker) {
+      if (!fence) fence = marker[0];
+      else if (marker[0] === fence) fence = undefined;
+      previous = '';
+      continue;
+    }
+    if (fence) continue;
+    const heading = /^\s{0,3}#{1,6}\s+(.*?)\s*#*\s*$/.exec(line)?.[1];
+    if (heading !== undefined) {
+      define(headingLabel(heading), 3);
+      previous = '';
+      continue;
+    }
+    // Первое слово блока: после пустой строки или заголовка, пункт списка,
+    // строка таблицы; маркеры цитаты не считаются.
+    const bare = line.replace(/^\s*(?:>\s?)+/, '');
+    const item = /^\s*(?:[-*+]|\d+[.)])\s+(.*)$/.exec(bare)?.[1];
+    const row = /^\s*\|(.*)$/.exec(bare)?.[1];
+    const start = item ?? row ?? (previous.trim() ? undefined : bare);
+    if (start !== undefined) define(lead(start), 2);
+    for (const m of line.matchAll(
+      new RegExp(`(${ID_TOKEN.source})[\`*_]*\\.[\`*_]*\\s+(?=\\p{Lu})`, 'gu'),
+    ))
+      define(m[1], 1);
+    previous = bare;
+  }
+  return out;
+}
+
 /** Якорь заголовка в форме GitHub: нижний регистр, без пунктуации, пробелы — дефисы. */
 export function slug(heading: string) {
   return heading

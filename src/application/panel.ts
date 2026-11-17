@@ -604,9 +604,10 @@ function buildSummary(
       obligationCount: c.checks?.obligations.length ?? 0,
     })),
     // Последние попытки ревью без находок; все — страницами с находками.
-    contractAttempts: attempts.slice(-20).map(({ findings, ...a }) => ({
+    contractAttempts: attempts.slice(-20).map(({ findings, gaps, ...a }) => ({
       ...clip(a),
       findingsCount: findings.length,
+      ...(gaps ? { gapCount: gaps.length } : {}),
     })),
     contractAttemptCount: attempts.length,
     paused: state.paused,
