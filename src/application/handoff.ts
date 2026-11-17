@@ -82,14 +82,14 @@ const hostCommandsEn = {
   'harness run':
     'Not a DevContour command. The running server holds the controller role but does not lift pauses itself: a board continues under its lead workflow job (workflow_start {"kind": "board", "id": BOARD, "authorRuntime": …}; workflow_status lists jobs). With approvalMode agent the job loop, at stage 1 (tasks), lifts the initial pause, the shutdown pause and an operator pause set before the job started, and checks a moved base itself (base-check); at stage 2 (acceptance) it lifts only the shutdown pause. It retries failed tasks within the repair budget and stops the job when the budget or the failure class allows no retry. With approvalMode operator jobs do not run: the operator starts the queue and retries. host.next names the step for this pack.',
   'harness resume':
-    'queue_set {"paused": false}, or devcontour queue --start --workspace …; an operator pause is lifted only on the user\'s decision.',
+    'queue_set {"paused": false}, or devcontour queue --start --by host --workspace …; an operator pause is lifted only on the user\'s decision. Over a base-check wait either lifts only the pause: the board workflow checks the base.',
 };
 
 const hostCommandsRu: Record<keyof typeof hostCommandsEn, string> = {
   'harness run':
     'Не команда DevContour. Работающий сервер держит роль controller, но паузы сам не снимает: доску продолжает её задание ведущего (workflow_start {"kind": "board", "id": BOARD, "authorRuntime": …}; workflow_status перечисляет задания). С approvalMode agent цикл задания на стадии 1 (задачи) снимает начальную паузу, паузу остановки и паузу оператора, поставленную до старта задания, и сам проверяет сдвинутую базу (base-check); на стадии 2 (приёмка) снимает только паузу остановки. Он повторяет упавшие задачи в пределах бюджета исправлений и останавливает задание, когда бюджет или класс отказа повтора не допускают. С approvalMode operator задания не исполняются: оператор запускает очередь и повторяет задачи. host.next называет шаг для этого пакета.',
   'harness resume':
-    'queue_set {"paused": false} или devcontour queue --start --workspace …; паузу оператора снимают только по решению пользователя.',
+    'queue_set {"paused": false} или devcontour queue --start --by host --workspace …; паузу оператора снимают только по решению пользователя. Над ожиданием проверки базы (base-check) оба снимают только паузу: базу проверит workflow доски.',
 };
 
 /** Описания команд harness на языке подсказок (`hintLocale`); ключи — как есть. */

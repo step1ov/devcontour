@@ -609,7 +609,7 @@ test('Ожидание проверки базы в режиме агента: �
     f.h.config.approvalMode = 'operator';
     assert.throws(
       () => f.h.pause(false, 'operator', 'lead'),
-      /ожидание снимает оператор: devcontour queue --start/,
+      /ожидание снимает оператор, запустив очередь после проверки базы gates/,
     );
     f.h.pause(false);
     assert.equal(f.h.store.read().paused, false);

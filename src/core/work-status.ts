@@ -179,7 +179,8 @@ export function queueStopView(
   // снимает и ожидание проверки базы (D54).
   const start = agent
     ? 'queue_set {"paused": false} (devcontour queue --start --by host)'
-    : 'devcontour queue --start';
+    : // operator-only: в режиме оператора очередь запускает человек.
+      'devcontour queue --start';
   const reconfiguring = 'Ничего не требуется: операция изменения контракта снимет паузу сама';
   const since = state.pausedAt;
   // Самая свежая ошибка диспетчера после паузы: более старая относится к

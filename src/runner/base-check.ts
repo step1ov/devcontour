@@ -664,7 +664,7 @@ export async function checkBase(
   if (decision === 'failed')
     return hold(
       'base.check.waiting',
-      `Проверка базы не пройдена: ${failed.join(', ')}. Исправьте базу и выполните base-update (ведущий агент — с --by host); если провал вызван средой — проверьте и выполните queue --start`,
+      `Проверка базы не пройдена: ${failed.join(', ')}. Исправьте базу и выполните base-update (ведущий агент — с --by host); если провал вызван средой — устраните её: цикл ведущего повторит проверку один раз, дальше — новый base-update (в режиме оператора — запуск очереди оператором)`,
       { failures: failed },
     );
   return decision === 'cleared';

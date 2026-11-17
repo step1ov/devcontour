@@ -163,6 +163,14 @@ export interface HintSubject {
 }
 
 /** Код шага и его параметры одной парой (по ней сужается тип параметров). */
+/**
+ * Коды шагов, которые выдаются только в режиме `approvalMode: operator`
+ * (читает оператор): их тексты вправе называть команду человека
+ * `devcontour queue --start`. Остальные тексты каталога читает ведущий
+ * агент — тест текстов агента это проверяет.
+ */
+export const OPERATOR_ONLY_HINTS: ReadonlySet<HintCode> = new Set(['operator']);
+
 export type HintOf = { [C in HintCode]: { code: C; params: HintParamMap[C] } }[HintCode];
 
 type Catalog = { [C in HintCode]: (p: HintParamMap[C], s: HintSubject) => string };
@@ -263,6 +271,7 @@ function planEn(p: { scope: number }, s: HintSubject) {
 const failedEn = (error: string | undefined) => (error ? ': ' + error : '');
 
 const en: Catalog = {
+  // operator-only: шаг только режима `approvalMode: operator` (OPERATOR_ONLY_HINTS).
   operator: () =>
     'approvalMode operator: lead workflow jobs do not run. The operator reviews plans and accepts boards in the panel, starts the queue (devcontour queue --start --workspace …) and retries failed tasks (devcontour retry --task ID --workspace …).',
   'plan-unapproved': planEn,
@@ -315,7 +324,7 @@ const en: Catalog = {
   'job-exhausted': (p, s) =>
     `The lead workflow job of board ${s.boardId!} used all ${s.job!.maxAttempts} attempts${failedEn(p.error)}. workflow_start returns this failed job until the board input changes: diagnose, then change the board or its tasks (a new input registers a new job) or ask the user.`,
   'job-settled': (_, s) =>
-    `A lead workflow job for exactly the current input of board ${s.boardId!} is already ${s.job!.status}${s.job!.status === 'stale' ? ' (the input changed and then returned to it)' : ''}; workflow_start returns it unchanged and it will not run. Change the board or its tasks to register a new job, or continue by hand (devcontour queue --start, retry, accept; docs/cli.md), or ask the user.`,
+    `A lead workflow job for exactly the current input of board ${s.boardId!} is already ${s.job!.status}${s.job!.status === 'stale' ? ' (the input changed and then returned to it)' : ''}; workflow_start returns it unchanged and it will not run. Change the board or its tasks to register a new job, or continue by hand (queue_set {"paused": false} or devcontour queue --start --by host, devcontour retry --by host, accept; docs/cli.md), or ask the user.`,
   'job-idle': (_, s) =>
     `The lead workflow job of board ${s.boardId!} is ${s.job!.status} but does not continue now (a policy apply is pending or another process holds it); check workflow_status.`,
   'board-start': (p, s) =>
@@ -327,8 +336,9 @@ const en: Catalog = {
     `Dispatch is paused (${p.pause}); the lead workflow job of board ${s.boardId!} lifts the pause at stage ${p.stage}${s.loop!.step === 'lift-pause' ? '' : ' after it ' + loopEn(s.loop!)}. ${SERVER_EN}`,
   'pause-operator': (p, s) =>
     (p.by === 'lead'
-      ? 'Dispatch is paused by the lead (queue_set) and no job loop lifts it: resume with queue_set {"paused": false} (devcontour queue --start) once the reason for the pause is resolved.'
-      : 'Dispatch is paused by the operator and no job loop lifts it: resume only on the user\'s decision with queue_set {"paused": false} (devcontour queue --start).') +
+      ? 'Dispatch is paused by the lead (queue_set) and no job loop lifts it: resume with queue_set {"paused": false} (devcontour queue --start --by host) once the reason for the pause is resolved.'
+      : 'Dispatch is paused by the operator and no job loop lifts it: resume only on the user\'s decision with queue_set {"paused": false} (devcontour queue --start --by host).') +
+    ' Over a base-check wait this lifts only the pause: the board workflow checks the base.' +
     (s.loop && s.boardId ? ` Meanwhile the job loop of board ${s.boardId} ${loopEn(s.loop)}.` : ''),
   'base-held': (p, s) =>
     `operator: confirm the base move. The moved base changes acceptance or contour setup (${p.paths.length ? p.paths.join(', ') : 'see the wait in the attention center'}), and gates of that base do not prove such a change, so dispatch waits for a human: ask the user to confirm it with the confirm-and-start action of the base move card in the attention center of the panel. The lead does not lift this wait itself (no queue_set, no workflow_retry). The job loop lifts on its own only contract documents at the exact text that an independent review approved (review-contract or contract-change); acceptance files, profile, config and gates always need the user.` +
@@ -515,6 +525,7 @@ function planRu(p: { scope: number }, s: HintSubject) {
 const failedRu = (error: string | undefined) => (error ? ': ' + error : '');
 
 const ru: Catalog = {
+  // operator-only: шаг только режима `approvalMode: operator` (OPERATOR_ONLY_HINTS).
   operator: () =>
     'approvalMode operator: задания ведущего не исполняются. Оператор проводит ревью планов и принимает доски в панели, запускает очередь (devcontour queue --start --workspace …) и повторяет упавшие задачи (devcontour retry --task ID --workspace …).',
   'plan-unapproved': planRu,
@@ -565,7 +576,7 @@ const ru: Catalog = {
   'job-exhausted': (p, s) =>
     `Задание ведущего доски ${s.boardId!} израсходовало все попытки (${s.job!.maxAttempts})${failedRu(p.error)}. Пока вход доски не изменится, workflow_start возвращает это упавшее задание: разберите причину, затем измените доску или её задачи (новый вход регистрирует новое задание) либо спросите пользователя.`,
   'job-settled': (_, s) =>
-    `Задание ведущего для точно такого же текущего входа доски ${s.boardId!} уже в состоянии ${s.job!.status}${s.job!.status === 'stale' ? ' (вход менялся и вернулся к прежнему)' : ''}; workflow_start вернёт его без изменений, и оно не будет исполняться. Измените доску или её задачи, чтобы зарегистрировать новое задание, или продолжайте вручную (devcontour queue --start, retry, accept; docs/cli.md), или спросите пользователя.`,
+    `Задание ведущего для точно такого же текущего входа доски ${s.boardId!} уже в состоянии ${s.job!.status}${s.job!.status === 'stale' ? ' (вход менялся и вернулся к прежнему)' : ''}; workflow_start вернёт его без изменений, и оно не будет исполняться. Измените доску или её задачи, чтобы зарегистрировать новое задание, или продолжайте вручную (queue_set {"paused": false} или devcontour queue --start --by host, devcontour retry --by host, accept; docs/cli.md), или спросите пользователя.`,
   'job-idle': (_, s) =>
     `Задание ведущего доски ${s.boardId!} в состоянии ${s.job!.status}, но сейчас не продолжается (ждёт применения политики или его держит другой процесс); проверьте workflow_status.`,
   'board-start': (p, s) =>
@@ -577,8 +588,9 @@ const ru: Catalog = {
     `Выдача на паузе (${p.pause}); задание ведущего доски ${s.boardId!} снимет паузу на стадии ${p.stage}${s.loop!.step === 'lift-pause' ? '' : '; до этого цикл задания ' + loopRu(s.loop!)}. ${SERVER_RU}`,
   'pause-operator': (p, s) =>
     (p.by === 'lead'
-      ? 'Выдачу приостановил ведущий агент (queue_set), и ни один цикл задания её не снимет: возобновите queue_set {"paused": false} (devcontour queue --start), когда причина паузы устранена.'
-      : 'Выдачу приостановил оператор, и ни один цикл задания её не снимет: возобновляйте только по решению пользователя — queue_set {"paused": false} (devcontour queue --start).') +
+      ? 'Выдачу приостановил ведущий агент (queue_set), и ни один цикл задания её не снимет: возобновите queue_set {"paused": false} (devcontour queue --start --by host), когда причина паузы устранена.'
+      : 'Выдачу приостановил оператор, и ни один цикл задания её не снимет: возобновляйте только по решению пользователя — queue_set {"paused": false} (devcontour queue --start --by host).') +
+    ' Над ожиданием проверки базы это снимает только паузу: базу проверит workflow доски.' +
     (s.loop && s.boardId ? ` Тем временем цикл задания доски ${s.boardId} ${loopRu(s.loop)}.` : ''),
   'base-held': (p, s) =>
     `operator: подтвердите перенос базы. Перенесённая база меняет приёмку или настройку контура (${p.paths.length ? p.paths.join(', ') : 'см. ожидание в центре внимания'}), а gates этой базы такое изменение не доказывают, поэтому выдача ждёт человека: попросите пользователя подтвердить перенос кнопкой «Подтвердить и запустить» в «Внимании» панели. Ведущий агент это ожидание сам не снимает (ни queue_set, ни workflow_retry). Цикл задания сам снимает только документы контрактов в редакции, одобренной независимым ревью (review-contract или contract-change); файлы приёмки, профиль, конфигурацию и gates всегда подтверждает пользователь.` +

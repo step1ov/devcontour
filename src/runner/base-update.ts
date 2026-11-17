@@ -7,7 +7,7 @@ import { SERVER_STOPPING, type DevContour } from '../core/service.ts';
 import { policyFromConfig } from '../harness/policy.ts';
 import { checkoutRootFor, checkoutRootOption } from './checkout-root.ts';
 import { holdSensitiveBaseMove } from './base-check.ts';
-import { HELD_BASE_ACTION } from '../core/work-status.ts';
+import { BASE_WAIT_ACTION, HELD_BASE_ACTION } from '../core/work-status.ts';
 import { handoffRedactor } from '../application/handoff.ts';
 
 /**
@@ -81,8 +81,9 @@ export async function updateBase(
       : {}),
     next: updated.length
       ? config.approvalMode === 'agent'
-        ? 'База обновлена; очередь ждёт проверки базы (base-check). Запущенный workflow доски проверит её gates и продолжит очередь; без workflow проверьте базу гейтами и выполните queue --start.'
-        : 'База обновлена. Проверьте её гейтами и запустите очередь: queue --start.'
+        ? 'База обновлена; очередь ждёт проверки базы (base-check). ' + BASE_WAIT_ACTION + '.'
+        : // operator-only: режим оператора, очередь запускает человек.
+          'База обновлена. Проверьте её гейтами и запустите очередь: queue --start.'
       : 'База уже содержит рабочую ветку; менять нечего.',
   };
 }
@@ -176,7 +177,7 @@ export async function baseUpdateOperation(
     throw new DomainError(
       'Переносить базу не пришлось, но очередь не продолжена: ' +
         SERVER_STOPPING +
-        '. Очередь осталась на паузе остановки сервера; её снимет запуск сервера (цикл ведущего в режиме агента) или queue --start',
+        '. Очередь осталась на паузе остановки сервера; её снимет запуск сервера (цикл ведущего в режиме агента), а без него — запуск очереди оператором',
       409,
     );
   return base;
@@ -195,7 +196,8 @@ function heldNext(paths: string[], by: 'operator' | 'host') {
     ? head +
         HELD_BASE_ACTION +
         '. Попросите пользователя подтвердить перенос. Тем временем не снимайте паузу (queue_set) и не повторяйте задание (workflow_retry): workflow доски ждёт и продолжит очередь после подтверждения; session_handoff называет этот шаг (host.next operator, code base-held). Без человека цикл снимает только документы контрактов в редакции, одобренной независимым ревью (review-contract); изменение приёмки — через contract-change.'
-    : head +
+    : // operator-only: ответ человеку, выполнившему base-update без --by host.
+      head +
         'Проверьте перенос и подтвердите его: «Подтвердить и запустить» в «Внимании» панели или devcontour queue --start.';
 }
 

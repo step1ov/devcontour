@@ -4,6 +4,9 @@
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
 import { createHash } from 'node:crypto';
+import { readdirSync, readFileSync, statSync } from 'node:fs';
+import { join } from 'node:path';
+import { capabilities } from '../src/application/agent.ts';
 import { config, fixture, input } from './helpers.ts';
 import { DevContour } from '../src/core/service.ts';
 import { configSchema, DomainError } from '../src/core/model.ts';
@@ -21,6 +24,7 @@ import { profile } from '../src/runner/packs.ts';
 import { projectConfig } from '../src/runner/setup.ts';
 import type { LoopOutlook } from '../src/runner/lead-outlook.ts';
 import {
+  OPERATOR_ONLY_HINTS,
   hintCatalogs,
   hintDetail,
   hintLocaleOf,
@@ -538,8 +542,11 @@ test('Подсказки шага: новая конфигурация setup п�
  * отстала»: шаг — перенос базы ведущим); прочие образцы байтово прежние.
  * Текст `stale-base` уточнён: такт снимает остановку, только если база там,
  * где остановка её застала, иначе ставит ожидание base-check (F51, ревью 2).
+ * Тексты `pause-operator` и `job-settled` называют команду ведущего
+ * (`--by host`), а не человека; над ожиданием проверки базы снимается только
+ * пауза (F47, ревью 3).
  */
-const ENGLISH_SAMPLES_SHA256 = 'ecc5fec44080a8c7674c16c29fc2fa32b70d5827b929f283a7cfd2b84b103e0e';
+const ENGLISH_SAMPLES_SHA256 = '19c6928ec45e46d1315389b0af8c4e59feb71e1588e322686b1470ae9ff538b9';
 
 test('Подсказки шага: английские тексты образцов закреплены', () => {
   assert.equal(
@@ -630,7 +637,7 @@ test('Описания команд harness пакета: без hintLocale — 
     'harness run':
       'Not a DevContour command. The running server holds the controller role but does not lift pauses itself: a board continues under its lead workflow job (workflow_start {"kind": "board", "id": BOARD, "authorRuntime": …}; workflow_status lists jobs). With approvalMode agent the job loop, at stage 1 (tasks), lifts the initial pause, the shutdown pause and an operator pause set before the job started, and checks a moved base itself (base-check); at stage 2 (acceptance) it lifts only the shutdown pause. It retries failed tasks within the repair budget and stops the job when the budget or the failure class allows no retry. With approvalMode operator jobs do not run: the operator starts the queue and retries. host.next names the step for this pack.',
     'harness resume':
-      'queue_set {"paused": false}, or devcontour queue --start --workspace …; an operator pause is lifted only on the user\'s decision.',
+      'queue_set {"paused": false}, or devcontour queue --start --by host --workspace …; an operator pause is lifted only on the user\'s decision. Over a base-check wait either lifts only the pause: the board workflow checks the base.',
   });
   // Команды, JSON и поля — как в английском.
   for (const key of Object.keys(en) as (keyof typeof en)[]) {
@@ -739,4 +746,52 @@ test('Ревью плана и контракта: с hintLocale ru ревьюе
   } finally {
     f.cleanup();
   }
+});
+
+/**
+ * Команда человека: `queue --start` без `--by host`. Снятие паузы так снимает
+ * и ожидание проверки базы без gates (D42, D54), поэтому тексты, которые
+ * читает ведущий агент, её не называют — только тексты с отметкой
+ * `operator-only` (режим `approvalMode: operator`, ответ человеку).
+ */
+const HUMAN_START = /queue --start(?! --by host)/;
+
+test('Тексты для ведущего агента не называют команду человека queue --start', () => {
+  // 1. Каталог подсказок шага на каждом языке (кроме шагов режима оператора).
+  for (const [code, steps] of Object.entries(samples)) {
+    if (OPERATOR_ONLY_HINTS.has(code as HintCode)) continue;
+    for (const step of steps as (HintSubject & HintOf)[])
+      for (const locale of hintLocales)
+        assert.doesNotMatch(hintDetail(step, locale), HUMAN_START, `${code} (${locale})`);
+  }
+  // 2. Описания команд пакета ведущего.
+  for (const [locale, commands] of Object.entries(handoffHostCommandsByLocale))
+    for (const [name, text] of Object.entries(commands))
+      assert.doesNotMatch(text, HUMAN_START, `${name} (${locale})`);
+  // 3. Описания операций MCP / агентского API.
+  for (const tool of capabilities().tools)
+    assert.doesNotMatch(JSON.stringify(tool), HUMAN_START, tool.name);
+  // 4. Исходники всех прочих текстов (ответы base-update, contract-change,
+  // проверки базы, вид остановки, отказы pause): строка с командой человека —
+  // только с отметкой operator-only рядом. Панель (src/web) читает человек.
+  const files: string[] = [];
+  const walk = (dir: string) => {
+    for (const name of readdirSync(dir)) {
+      const path = join(dir, name);
+      if (statSync(path).isDirectory()) {
+        if (path !== join('src', 'web')) walk(path);
+      } else if (path.endsWith('.ts')) files.push(path);
+    }
+  };
+  walk('src');
+  const offending: string[] = [];
+  for (const file of files) {
+    const lines = readFileSync(file, 'utf8').split('\n');
+    lines.forEach((line, i) => {
+      if (!HUMAN_START.test(line) || /^\s*(\/\/|\*|\/\*)/.test(line)) return;
+      if (lines.slice(Math.max(0, i - 3), i + 1).some((l) => l.includes('operator-only'))) return;
+      offending.push(`${file}:${i + 1}: ${line.trim().slice(0, 160)}`);
+    });
+  }
+  assert.deepEqual(offending, []);
 });

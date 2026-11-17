@@ -83,7 +83,7 @@ test('base-update переноса, который gates не подтвержд
     };
     assert.equal(result.updated.length, 1);
     assert.deepEqual(result.baseHeld, { paths: [held] });
-    assert.doesNotMatch(result.next, /Запущенный workflow доски проверит/);
+    assert.doesNotMatch(result.next, /Базу проверит workflow доски/);
     assert.match(result.next, /ждёт подтверждения оператора/);
     assert.ok(result.next.includes(held), result.next);
     assert.ok(result.next.includes(HELD_BASE_ACTION), result.next);
@@ -166,7 +166,7 @@ test('base-update продуктовых коммитов не удержива�
     };
     assert.equal(result.updated.length, 1);
     assert.equal(result.baseHeld, undefined);
-    assert.match(result.next, /Запущенный workflow доски проверит её gates/);
+    assert.match(result.next, /Базу проверит workflow доски/);
     assert.equal(events('base.check.held').length, 0);
     assert.ok(!detail().startsWith(BASE_HELD_DETAIL), detail());
     const started = agent(h, 'workflow_start', {
@@ -385,7 +385,7 @@ test('Документ контракта в одобренной ревью р�
         next: string;
       };
       assert.equal(result.baseHeld, undefined);
-      assert.match(result.next, /Запущенный workflow доски проверит её gates/);
+      assert.match(result.next, /Базу проверит workflow доски/);
       assert.equal(f.events('base.check.held').length, 0);
       assert.ok(!f.detail().startsWith(BASE_HELD_DETAIL), f.detail());
     } finally {
