@@ -19,9 +19,28 @@ import {
   reviewConsolidationRound,
 } from './agent-control.ts';
 import { pinArtifacts } from './contract-artifacts.ts';
-import { anchors, headings, idTokens, slug, textChecks } from '../core/contract-text.ts';
+import {
+  definitionSites,
+  definitions,
+  headingLabel,
+  ruleWords,
+  headings,
+  ruleTokens,
+  sections,
+  slug,
+  textChecks,
+} from '../core/contract-text.ts';
 
-export { anchors, headings, idTokens, referencedAnchors, slug } from '../core/contract-text.ts';
+export {
+  anchors,
+  definitions,
+  headings,
+  idTokens,
+  referencedAnchors,
+  ruleTokens,
+  sections,
+  slug,
+} from '../core/contract-text.ts';
 
 /**
  * Консолидация контракта (F20): переписать документ, накопивший поправки
@@ -64,46 +83,224 @@ const whole = (text: string, phrase: string) =>
   new RegExp(`(?<![\\p{L}\\p{N}_-])${escape(phrase)}(?![\\p{L}\\p{N}_-])`, 'iu').test(text);
 
 /**
- * Пропуски отображения в итоге ревью. Отображение — строки «старое → новое»
- * (`→` или `->`). Строка годна, если в её левой части не больше одного
- * заголовка прежнего текста, а у каждого ID прежнего текста слева своя цель
- * справа: тот же ID нового текста или отдельный заголовок либо якорь нового
- * текста. Каждый ID правил и каждый заголовок прежнего текста (целым словом
- * или якорем, без разметки) должен стоять в левой части годной строки.
- * Перечисление без стрелок, ссылка в никуда, одна строка на всё и совпадение
- * по части слова отображением не считаются.
+ * Как ревьюер называет заголовок: целиком, якорем, меткой (`ORD-04`), а
+ * нумерованный раздел ещё и без номера в кавычках («Область действия»),
+ * номером с первым словом («10. Ограничения») или знаком параграфа (`§2.1`).
  */
-export function mappingGaps(previous: string, next: string, summary: string) {
-  const newIds = new Set(idTokens(next));
-  const newHeads = headings(next).map(headingText).filter(Boolean);
-  const newAnchors = [...anchors(next)];
-  const oldIds = idTokens(previous);
-  const oldHeads = headings(previous).map(headingText).filter(Boolean);
-  const mentions = (left: string, h: string) => whole(left, h) || whole(left, slug(h));
+function headingName(heading: string) {
+  const text = headingText(heading);
+  const number = /^(\d+(?:\.\d+)*)(\.?)\s+(\S+)/u.exec(text);
+  const bare = number ? text.slice(number[0].length - number[3].length) : '';
+  return {
+    text,
+    label: headingLabel(heading),
+    number: number?.[1],
+    forms: [text, slug(text), ...(number ? [`«${bare}»`, `"${bare}"`, number[0]] : [])],
+  };
+}
+/** Называет ли `side` заголовок `h` (метка — отдельно: она ведёт себя как ID). */
+const names = (side: string, h: ReturnType<typeof headingName>) =>
+  h.forms.some((f) => whole(side, f)) ||
+  (!!h.number && new RegExp(`§\\s?${escape(h.number)}(?!\\.?\\d)`, 'u').test(side));
+
+/**
+ * Пропуски отображения в итоге ревью. Отображение — строки «старое → новое»
+ * (`→` или `->`; несколько пар в строке — через `;`). Строка годна, если в её
+ * левой части не больше одного заголовка прежнего текста и не все правила
+ * документа сразу (при двух правилах и больше), а правая называет хотя бы
+ * одну цель в новом тексте: ID, заголовок (целиком или меткой вроде
+ * `ORD-04`) или якорь. Заголовок прежнего текста слева годной строки
+ * отображён. ID правила слева отображён, если цель его определяет: в
+ * собственном тексте раздела цели (раздел ID-цели — тот, где этот ID
+ * определён) ID стоит в месте определения, а не упоминанием. Так несколько ID
+ * делят одну строку. Слияние пишется явно — `merged into REQ-1` или
+ * `слито в REQ-1`: REQ-1 определён в новом тексте, и его раздел держит
+ * слитый ID. Правило, которое в новом тексте больше нигде не определено и
+ * не слито, — пропуск с пометкой «в новом тексте не определено».
+ *
+ * Отображения требуют ID, которые прежний текст определяет сам
+ * (`definitions`), и заголовки с собственным текстом (k-е вхождение
+ * заголовка только с подразделами, если в новом тексте есть k-е вхождение,
+ * отображать не нужно). Ссылки на ID, определённые в другом месте (ADR,
+ * сценарии тестов, правила соседних документов), строки не требуют, пока
+ * стоят в новом тексте дословно; пропавшая ссылка — пропуск. Перечисление
+ * без стрелок, ссылка в никуда, одна строка на несколько заголовков или на
+ * все правила и совпадение по части слова отображением не считаются.
+ */
+export function mappingCheck(previous: string, next: string, summary: string) {
+  const newIds = new Set(ruleTokens(next));
+  const defined = definitions(previous);
+  const oldIds = ruleTokens(previous);
+  const rules = oldIds.filter((id) => defined.has(id));
+  // Заголовок без собственного текста (только подразделы), оставшийся в новом
+  // тексте, ничего не несёт: отображать в нём нечего. Считается по месту:
+  // k-е вхождение заголовка пусто, и в новом тексте есть k-е вхождение.
+  const kept = new Map<string, number>();
+  for (const h of headings(next).map(headingText)) kept.set(h, (kept.get(h) ?? 0) + 1);
+  const seen = new Map<string, number>();
+  const oldHeads = sections(previous)
+    .slice(1)
+    .map((p) => {
+      const name = headingName(p.heading!);
+      const k = (seen.get(name.text) ?? 0) + 1;
+      seen.set(name.text, k);
+      const empty = !p.text.split('\n').slice(1).join('').trim();
+      return { ...name, exempt: empty && (kept.get(name.text) ?? 0) >= k };
+    })
+    .filter((h) => h.text && !h.exempt);
+  const parts = sections(next).map((s) => ({
+    ...s,
+    ids: new Set(ruleTokens(s.text)),
+    defines: definitions(s.text),
+    name: s.heading === undefined ? undefined : headingName(s.heading),
+  }));
+  const newDefined = definitions(next);
+  // Раздел ID-цели: где ID определён сильнее всего; не определён — где упомянут.
+  const strongest = (id: string) => {
+    const own = parts.map((p) => p.defines.get(id) ?? 0);
+    const best = Math.max(...own);
+    return best && newDefined.has(id)
+      ? parts.filter((_, i) => own[i] === best)
+      : parts.filter((p) => p.ids.has(id));
+  };
+  const sites = definitionSites(previous);
+  const after = ruleWords(next);
+  const survives = (id: string) => {
+    const site = sites.get(id);
+    return !!site && site.strength < 3 && site.blocks.some((b) => entrySurvives(id, b, after));
+  };
   const covered = { ids: new Set<string>(), heads: new Set<string>() };
-  for (const raw of summary.split('\n')) {
-    const m = /^(.*?)(?:→|->)(.*)$/u.exec(plain(raw));
+  const merges: { id: string; into: string }[] = [];
+  const demoted: string[] = [];
+  const pairs = summary.split('\n').flatMap((raw) => {
+    const line = plain(raw);
+    const arrows = line.match(/→|->/gu)?.length ?? 0;
+    return arrows > 1 ? line.split(';') : [line];
+  });
+  for (const pair of pairs) {
+    const m = /^(.*?)(?:→|->)(.*)$/u.exec(pair);
     if (!m) continue;
     const [, left, right] = m;
-    const heads = oldHeads.filter((h) => mentions(left, h));
+    const heads = oldHeads.filter((h) => names(left, h));
     if (heads.length > 1) continue;
-    const ids = idTokens(left).filter((id) => oldIds.includes(id));
-    const sameIds = ids.filter((id) => newIds.has(id) && idTokens(right).includes(id));
-    const places =
-      newHeads.filter((h) => whole(right, h)).length +
-      newAnchors.filter((a) => whole(right, a)).length;
-    // Остальным ID нужна своя цель — заголовок или якорь, по одному на ID.
-    const rest = ids.length - sameIds.length;
-    if (!places && !sameIds.length) continue;
-    if (rest > places) continue;
-    for (const id of ids) covered.ids.add(id);
-    for (const h of heads) covered.heads.add(h);
+    const named = new Set(ruleTokens(left));
+    // `ID → reference`: ID помечен в старом тексте, но правилом документа не
+    // был (запись журнала, сценарий теста, решение) и стоит в новом тексте
+    // дословно. Строку ревьюер подтверждает одобрением; попытка её называет.
+    // Только для определения не заголовком, чей текст остался в новом
+    // тексте (сменилась разметка): исчезнувшее правило ссылкой не станет.
+    if (/^\s*(?:reference|ссылка)(?!\p{L})/iu.test(right)) {
+      for (const id of named)
+        if (defined.has(id) && newIds.has(id) && !covered.ids.has(id) && survives(id)) {
+          covered.ids.add(id);
+          demoted.push(id);
+        }
+      continue;
+    }
+    const targets = [
+      ...new Set([
+        ...ruleTokens(right)
+          .filter((id) => newIds.has(id))
+          .flatMap(strongest),
+        ...parts.filter(
+          (p) =>
+            (p.name && (names(right, p.name) || (p.name.label && whole(right, p.name.label)))) ||
+            p.anchors.some((a) => whole(right, a)),
+        ),
+      ]),
+    ];
+    if (!targets.length) continue;
+    // Слияние называется явно в начале правой части: «merged into REQ-1» или
+    // «слито в REQ-1», и REQ-1 определён в новом тексте; его раздел держит
+    // слитый ID.
+    const into = ruleTokens(
+      /^\s*(?:merged into|слито в)\s+([^\s,;()]+)/iu.exec(right)?.[1] ?? '',
+    ).find((id) => newDefined.has(id));
+    const merged = into ? strongest(into) : [];
+    // ID отображён, если цель его определяет (не просто упоминает) или он
+    // слит в определённый ID.
+    const holds = (id: string) => {
+      if (targets.some((t) => t.defines.has(id))) return true;
+      if (!merged.some((t) => t.ids.has(id))) return false;
+      if (!merges.some((x) => x.id === id)) merges.push({ id, into: into! });
+      return true;
+    };
+    // Заголовок с меткой правила (`## REQ-2. …`) отображён, только если его
+    // правило отображено этой строкой.
+    for (const h of heads) {
+      const id = h.label ? ruleTokens(h.label)[0] : undefined;
+      if (!id || holds(id)) covered.heads.add(h.text);
+    }
+    // Раздел, названный меткой (`ORD-04`), — как его ID.
+    for (const h of oldHeads)
+      if (h.label && whole(left, h.label)) {
+        const id = ruleTokens(h.label)[0];
+        if (id ? holds(id) : targets.some((t) => whole(t.text, h.label!)))
+          covered.heads.add(h.text);
+      }
+    for (const id of named) if (holds(id)) covered.ids.add(id);
   }
-  return [
-    ...oldIds.filter((id) => !covered.ids.has(id)),
-    ...oldHeads.filter((h) => !covered.heads.has(h)).map((h) => `«${h}»`),
+  const gaps = [
+    ...new Set([
+      ...rules
+        .filter((id) => !covered.ids.has(id))
+        .map((id) => (newDefined.has(id) ? id : `${id} (в новом тексте не определено)`)),
+      ...oldIds.filter((id) => !defined.has(id) && !newIds.has(id)),
+      ...oldHeads.filter((h) => !covered.heads.has(h.text)).map((h) => `«${h.text}»`),
+    ]),
   ];
+  return { gaps, merged: merges, demoted };
 }
+
+/** Пропуски отображения (см. `mappingCheck`). */
+export function mappingGaps(previous: string, next: string, summary: string) {
+  return mappingCheck(previous, next, summary).gaps;
+}
+
+/** Минимум текста записи, который узнаётся без своего ID рядом. */
+const ENTRY_WORDS = 4;
+const ENTRY_CHARS = 24;
+/** Есть ли `part` в `whole` подряд, целыми словами. */
+const contiguous = (whole: string[], part: string[]) =>
+  part.length > 0 && whole.some((_, i) => part.every((w, j) => whole[i + j] === w));
+
+/**
+ * Остался ли текст записи `block` (без ID) в новом тексте `after`: целыми
+ * словами подряд. Короткий текст (меньше четырёх слов и 24 знаков) узнаётся
+ * только рядом со своим ID: «optional» где-то в тексте — не запись
+ * `REQ-9. Optional.`, а `Chosen storage (DEC-004)` — запись
+ * `- DEC-004: chosen storage.`.
+ */
+function entrySurvives(id: string, block: string, after: ReturnType<typeof ruleWords>) {
+  const own = ruleWords(block)
+    .filter((w) => !w.id)
+    .map((w) => w.word);
+  if (!own.length) return false;
+  const plain = after.filter((w) => !w.id).map((w) => w.word);
+  if (own.length >= ENTRY_WORDS || own.join(' ').length >= ENTRY_CHARS)
+    return contiguous(plain, own);
+  // Рядом с ID: ближайшие слова до или после него; другие ID между ними
+  // пропускаются (`Chosen storage (DEC-004, DEC-005)`).
+  const text = own.join(' ');
+  return after.some((w, i) => {
+    if (!w.id || w.word !== id) return false;
+    const near = (side: typeof after) => side.filter((x) => !x.id).map((x) => x.word);
+    return (
+      near(after.slice(0, i)).slice(-own.length).join(' ') === text ||
+      near(after.slice(i + 1))
+        .slice(0, own.length)
+        .join(' ') === text
+    );
+  });
+}
+
+/** «пропуск», «пропуска», «пропусков» по числу. */
+const plural = (n: number) =>
+  n % 10 === 1 && n % 100 !== 11
+    ? 'пропуск'
+    : [2, 3, 4].includes(n % 10) && ![12, 13, 14].includes(n % 100)
+      ? 'пропуска'
+      : 'пропусков';
 
 /** Предел выдержек соседей и вопросов в запросе ревьюера. */
 const EXCERPTS = 40;
@@ -130,7 +327,10 @@ export interface ConsolidationPlan {
   current: Contract;
   content: string;
   pinned: Awaited<ReturnType<typeof pinArtifacts>>;
+  /** ID правил, которые документ определяет сам: им нужна строка отображения. */
   ids: string[];
+  /** ID, на которые документ только ссылается: остаются дословно. */
+  references: string[];
   siblings: { id: string; title: string; source?: string; excerpts: string[] }[];
   inputs: { id: string; taskId: string; lifecycle: string; question: string }[];
 }
@@ -201,7 +401,7 @@ export async function consolidationPlan(
   const siblings = s.contracts.filter(
     (c) => c.source !== file && !newerRedaction(s.contracts, c.id) && typeof c.content === 'string',
   );
-  const checks = textChecks(current.content, content, file, siblings);
+  const checks = textChecks(current.content, content, file, siblings, ruleTokens);
   if (checks.longer)
     throw new DomainError(
       `Консолидация сокращает документ: новый текст — ${content.length} знаков, действующий — ${current.content.length}. Дополнение правил — обычный contract-change`,
@@ -209,20 +409,23 @@ export async function consolidationPlan(
     );
   if (checks.lost.length)
     throw new DomainError(
-      `Консолидация не может убрать идентификаторы правил: в новом тексте нет ${checks.lost.slice(0, 30).join(', ')}. Верните их на место переписанных правил`,
+      `Консолидация не может убрать идентификаторы правил: в новом тексте нет ${checks.lost.join(', ')}. Верните их на место переписанных правил`,
       400,
     );
   if (checks.broken.length)
     throw new DomainError(
-      `Соседние контракты ссылаются на разделы, которых в новом тексте нет: ${checks.broken.slice(0, 20).join('; ')}. Сохраните эти заголовки или якоря`,
+      `Соседние контракты ссылаются на разделы, которых в новом тексте нет: ${checks.broken.join('; ')}. Сохраните эти заголовки или якоря`,
       400,
     );
-  const ids = idTokens(current.content);
+  const defined = definitions(current.content);
+  const all = ruleTokens(current.content);
+  const ids = all.filter((id) => defined.has(id));
   return {
     current,
     content,
     pinned,
     ids,
+    references: all.filter((id) => !defined.has(id)),
     siblings: siblings
       .map((c) => ({
         id: c.id,
@@ -294,13 +497,22 @@ export async function reviewConsolidation(
     (f) => f.rule === CONSOLIDATION && f.message.startsWith(INCOMPLETE),
   );
   const approval = await reviewConsolidationRound(h, root, author, runtimes, {
-    ...(incomplete ? { incompleteMapping: { round: last!.id, finding: incomplete.message } } : {}),
+    ...(incomplete
+      ? {
+          incompleteMapping: {
+            round: last!.id,
+            finding: incomplete.message,
+            ...(last!.gaps ? { gaps: last!.gaps } : {}),
+          },
+        }
+      : {}),
     title: parsed.title,
     ...(parsed.repositoryId ? { repositoryId: parsed.repositoryId } : {}),
     file: parsed.file!,
     previous: { id: plan.current.id, content: plan.current.content },
     content: plan.content,
     ids: plan.ids,
+    references: plan.references,
     ...(plan.pinned.contents.length ? { artifacts: plan.pinned.contents } : {}),
     ...(parsed.checks ? { checks: parsed.checks } : {}),
     ...(parsed.underTest?.length ? { underTest: parsed.underTest } : {}),
@@ -312,18 +524,34 @@ export async function reviewConsolidation(
   const attempt = (h.store.read().contractAttempts ?? []).find(
     (a) => a.artifact === approval.artifact,
   );
-  const gaps = mappingGaps(plan.current.content, plan.content, attempt?.summary ?? '');
+  const { gaps, merged, demoted } = mappingCheck(
+    plan.current.content,
+    plan.content,
+    attempt?.summary ?? '',
+  );
+  // Слияния и ID, отображённые ссылкой, держатся только на ревьюере: попытка
+  // называет их, чтобы ведущий видел «REQ-2 слито в REQ-1».
+  if (merged.length || demoted.length)
+    h.store.change('contract.review', (s) => {
+      const a = s.contractAttempts?.find((x) => x.artifact === approval.artifact);
+      if (!a) return;
+      if (merged.length) a.merged = merged;
+      if (demoted.length) a.demoted = demoted;
+    });
   if (gaps.length) {
-    const message = `${INCOMPLETE}: итог ревью не называет ${gaps.slice(0, 30).join(', ')}`;
+    // Одобрение смысла с неполным отображением — не отказ по смыслу: раунд
+    // записывается исходом `incomplete-mapping` с полным списком пропусков,
+    // и следующий раунд получает его целиком.
+    const message = `${INCOMPLETE}: ревью одобрило смысл, но итог не называет ${gaps.length} ${plural(gaps.length)}: ${gaps.join(', ')}`;
     h.store.change('contract.review', (s) => {
       const a = s.contractAttempts?.find((x) => x.artifact === approval.artifact);
       if (!a) return;
       a.approved = false;
+      a.outcome = 'incomplete-mapping';
+      a.gaps = gaps;
       a.findings = [...a.findings, { severity: 'blocking', message, rule: CONSOLIDATION }];
     });
-    throw new DomainError(
-      `Независимое ревью отклонено: ${message}. Артефакты: ${approval.artifact}`,
-    );
+    throw new DomainError(`${message}. Артефакты: ${approval.artifact}`);
   }
   // Решение относится к просмотренному снимку и к той же действующей
   // редакции: новая редакция документа за время ревью — повод начать заново.
