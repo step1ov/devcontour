@@ -134,7 +134,7 @@ export const BASE_WAIT_ACTION =
 
 /** Действие при удержанном переносе базы: подтверждает оператор в «Внимании». */
 export const HELD_BASE_ACTION =
-  'Перенос подтверждает оператор: «Подтвердить и запустить» в «Внимании» панели (на ручном маршруте — devcontour queue --start оператора); ведущий агент это ожидание и паузу сам не снимает';
+  'Перенос подтверждает оператор: «Подтвердить и запустить» в «Внимании» панели (на ручном маршруте — запуск очереди самим оператором); ведущий агент это ожидание и паузу сам не снимает: попросите пользователя';
 
 /**
  * Удержанный перенос базы на остановленной очереди: причина ожидания
@@ -174,7 +174,12 @@ export function queueStopView(
 ): QueueStopView {
   if (!state.paused) return { paused: false };
   const agent = (options.approvalMode ?? 'agent') === 'agent';
-  const start = 'devcontour queue --start';
+  // В режиме агента подсказку читает и ведущий агент: запуск называется его
+  // командой (`queue_set` / `--by host`), а не командой человека, которая
+  // снимает и ожидание проверки базы (D54).
+  const start = agent
+    ? 'queue_set {"paused": false} (devcontour queue --start --by host)'
+    : 'devcontour queue --start';
   const reconfiguring = 'Ничего не требуется: операция изменения контракта снимет паузу сама';
   const since = state.pausedAt;
   // Самая свежая ошибка диспетчера после паузы: более старая относится к
@@ -212,10 +217,19 @@ export function queueStopView(
         ? 'Цикл ведущего проверит базу gates и продолжит выдачу сам'
         : BASE_WAIT_ACTION
       : undefined;
+  const baseUpdate = agent
+    ? 'исправьте базу и выполните devcontour base-update --by host — ' +
+      (options.workflowActive
+        ? 'цикл ведущего проверит её снова'
+        : 'workflow доски (workflow_start) проверит её снова')
+    : undefined;
   const thenStart = agentWait
     ? ', затем снимите паузу queue_set {"paused": false} — очередь останется на ожидании проверки базы. ' +
       agentWait
-    : (wait ? ', проверьте базу gates, затем ' : ', затем ') + start;
+    : agent && wait
+      ? // Провал проверки базы под отказом: снятие паузы его не исправит.
+        ', затем ' + baseUpdate
+      : (wait ? ', проверьте базу gates, затем ' : ', затем ') + start;
   const explain = (): [text: string, action: string, failed: boolean] => {
     if (failures.includes('provider-auth'))
       return [
@@ -251,7 +265,7 @@ export function queueStopView(
               ? reason === 'operator'
                 ? (lead
                     ? 'Свою паузу ведущий снимает queue_set {"paused": false}: снимется только пауза, очередь останется на ожидании проверки базы. '
-                    : 'Паузу человека ведущий агент не снимает: её снимает пользователь («Подтвердить и запустить» в «Внимании» панели после проверки базы). ') +
+                    : 'Паузу человека снимает пользователь («Подтвердить и запустить» в «Внимании» панели после проверки базы); ведущий агент без его решения её не снимает — queue_set снял бы только паузу, ожидание проверки базы осталось бы. ') +
                   agentWait
                 : agentWait
               : 'Проверьте базу gates, затем выполните ' +
@@ -264,7 +278,9 @@ export function queueStopView(
       case 'operator':
         return [
           lead ? 'Выдача остановлена ведущим агентом (queue_set)' : 'Выдача остановлена человеком',
-          start,
+          agent && !lead
+            ? 'Паузу человека снимает пользователь («Запустить очередь» в панели); ведущий агент без его решения её не снимает'
+            : start,
           false,
         ];
       case 'shutdown':
@@ -286,8 +302,9 @@ export function queueStopView(
           ? [
               detail,
               /base-update/.test(detail)
-                ? 'Выполните devcontour base-update (ведущий агент — с --by host), затем проверьте базу и ' +
-                  start
+                ? agent
+                  ? 'Выполните devcontour base-update --by host — перенесённую базу проверит workflow доски (workflow_start, если задания нет); если коммиты не должны попасть в базу, уберите их с рабочей ветки — такт снимет остановку сам'
+                  : 'Выполните devcontour base-update, затем проверьте базу и ' + start
                 : 'Устраните причину и выполните ' + start,
               true,
             ]

@@ -470,7 +470,7 @@ export function withStaleBaseStop(
     approvalMode === 'agent' ? 'devcontour base-update --by host' : 'devcontour base-update';
   const chars = [
     ...redact(
-      `${stale} Выдачу снимет перенос базы: ${update} (или уберите коммиты с рабочей ветки — такт serve снимет остановку сам); harness run её не снимет`,
+      `${stale} Выдачу снимет перенос базы: ${update} (или уберите коммиты с рабочей ветки — такт serve снимет остановку сам, а базу, сдвинутую иначе, поставит на проверку base-check); harness run её не снимет`,
     ),
   ];
   const text =

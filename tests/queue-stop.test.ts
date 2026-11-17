@@ -22,8 +22,15 @@ import { cliCommand } from './cli-command.ts';
 const STALE =
   'TaskFailure: База прогонов отстала от рабочей ветки: main — devcontour/accepted без 1 коммитов. Выполните devcontour base-update, иначе исполнитель получит дерево без подготовленной работы.';
 const START = 'devcontour queue --start';
+/** Запуск в подсказке режима агента — команда ведущего, а не человека. */
+const LEAD_START = 'queue_set {"paused": false} (devcontour queue --start --by host)';
+/** Остановка «база отстала» в режиме агента: перенос базы ведущим, проверку ведёт workflow. */
+const AGENT_STALE =
+  'Выполните devcontour base-update --by host — перенесённую базу проверит workflow доски (workflow_start, если задания нет); если коммиты не должны попасть в базу, уберите их с рабочей ветки — такт снимет остановку сам';
 const MANUAL_OR_WORKFLOW =
-  'Если доска ведётся workflow — зарегистрируйте её через workflow_start; если вручную — devcontour queue --start; маршруты не смешивайте';
+  'Если доска ведётся workflow — зарегистрируйте её через workflow_start; если вручную — ' +
+  LEAD_START +
+  '; маршруты не смешивайте';
 
 /**
  * Сервер панели над fixture и чтение вида остановки из всех мест, где его
@@ -74,11 +81,7 @@ test('Остановка очереди одинакова во всех отв�
     assert.equal(runtime.reason, 'runtime');
     assert.equal(runtime.failed, true);
     assert.match(runtime.stopReason ?? '', /^База прогонов отстала от рабочей ветки/);
-    assert.equal(
-      runtime.action,
-      'Выполните devcontour base-update (ведущий агент — с --by host), затем проверьте базу и ' +
-        START,
-    );
+    assert.equal(runtime.action, AGENT_STALE);
 
     // Перенос базы: очередь ждёт проверки базы; причина — описание ожидания,
     // а не уже выполненный base-update.
@@ -101,7 +104,7 @@ test('Остановка очереди одинакова во всех отв�
     const operator = await p.read();
     assert.equal(operator.reason, 'operator');
     assert.equal(operator.stopReason, 'Выдача остановлена человеком');
-    assert.equal(operator.action, START);
+    assert.match(operator.action ?? '', /^Паузу человека снимает пользователь/);
 
     // Обратный случай: очередь идёт — ни причины, ни подсказки.
     f.h.pause(false);
@@ -125,7 +128,7 @@ test('Пауза человека перед переносом базы наз�
     assert.equal(view.reason, 'operator');
     assert.match(view.stopReason ?? '', /^База прогонов перенесена \(main\)/);
     // Режим агента: ведущему не предлагается команда, снимающая ожидание.
-    assert.match(view.action ?? '', /^Паузу человека ведущий агент не снимает: .*workflow_start/);
+    assert.match(view.action ?? '', /^Паузу человека снимает пользователь .*workflow_start/);
     assert.doesNotMatch(view.action ?? '', /queue --start — он снимет/);
     // Режим оператора: запуск человеком снимает и паузу, и ожидание.
     f.h.config.approvalMode = 'operator';
@@ -337,7 +340,7 @@ test('Подсказка учитывает ожидание базы при о�
   assert.equal(
     environment.action,
     'Цикл ведущего один раз повторит задачу сам; если отказ повторится — устраните неисправность окружения, затем ' +
-      START,
+      LEAD_START,
   );
   const environmentManual = queueStopView(
     { paused: true, pauseReason: 'runtime', pausedAt: now, pauseFailures: ['environment'] },
@@ -374,11 +377,7 @@ test('CLI queue без флага печатает причину и подск�
       assert.equal(view.paused, true);
       assert.equal(view.reason, 'runtime');
       assert.equal(view.stopReason, STALE.replace(/^TaskFailure: /, ''));
-      assert.equal(
-        view.action,
-        'Выполните devcontour base-update (ведущий агент — с --by host), затем проверьте базу и ' +
-          START,
-      );
+      assert.equal(view.action, AGENT_STALE);
       // Очередь идёт — причины нет.
       h.pause(false);
       const running = await command(cli, process.cwd());
@@ -618,4 +617,69 @@ test('Ожидание проверки базы в режиме агента: �
   } finally {
     f.cleanup();
   }
+});
+
+test('Режим агента: ни один вид остановки не называет команду человека queue --start', async () => {
+  const { BASE_HELD_DETAIL } = await import('../src/runner/base-check.ts');
+  const at = new Date().toISOString();
+  const errors = {
+    none: [],
+    stale: [{ id: 1, at, type: 'scheduler.error', data: { error: STALE } }],
+    other: [{ id: 2, at, type: 'scheduler.error', data: { error: 'Error: сбой такта' } }],
+  };
+  const waits = {
+    none: undefined,
+    plain: 'База прогонов перенесена (main): проверьте её гейтами и продолжите очередь',
+    failed: 'Проверка базы не пройдена: test. Исправьте базу',
+    held: `${BASE_HELD_DETAIL} (main:contracts/api.md): gates этой базы его не подтверждают`,
+  };
+  const reasons = [
+    undefined,
+    'operator',
+    'shutdown',
+    'base-check',
+    'reconfigure',
+    'runtime',
+  ] as const;
+  const failureSets = [[], ['provider-auth'], ['environment']] as const;
+  let checked = 0;
+  for (const pauseReason of reasons)
+    for (const failures of failureSets)
+      for (const [waitName, detail] of Object.entries(waits))
+        for (const [errorName, events] of Object.entries(errors))
+          for (const byLead of [false, true])
+            for (const pausedAt of [at, undefined])
+              for (const workflowActive of [false, true]) {
+                const view = queueStopView(
+                  {
+                    paused: true,
+                    ...(pauseReason ? { pauseReason } : {}),
+                    ...(pausedAt ? { pausedAt } : {}),
+                    ...(failures.length ? { pauseFailures: [...failures] } : {}),
+                    ...(detail ? { waits: [{ kind: 'base-check' as const, detail, at }] } : {}),
+                    ...(byLead && pausedAt
+                      ? { pauseActor: { by: 'lead' as const, at: pausedAt } }
+                      : {}),
+                  },
+                  events,
+                  { approvalMode: 'agent', workflowActive },
+                );
+                checked++;
+                assert.doesNotMatch(
+                  view.action ?? '',
+                  /devcontour queue --start(?! --by host)/,
+                  JSON.stringify({
+                    pauseReason,
+                    failures,
+                    waitName,
+                    errorName,
+                    byLead,
+                    pausedAt,
+                    workflowActive,
+                  }) +
+                    ': ' +
+                    view.action,
+                );
+              }
+  assert.ok(checked > 500);
 });

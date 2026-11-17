@@ -212,7 +212,11 @@ test('Экран этапа называет последнюю причину �
     }
     const stale = await read();
     assert.equal(stale?.stopReason, 'База прогонов отстала');
-    assert.equal(stale?.action, 'Устраните причину и выполните devcontour queue --start');
+    // Режим агента: запуск — команда ведущего, а не человека.
+    assert.equal(
+      stale?.action,
+      'Устраните причину и выполните queue_set {"paused": false} (devcontour queue --start --by host)',
+    );
     // Перенос базы устраняет причину: очередь ждёт проверки базы, а экран не
     // советует уже выполненный base-update.
     f.h.baseUpdated([{ repositoryId: 'main', from: 'a', to: 'b' }]);
@@ -234,7 +238,7 @@ test('Экран этапа называет последнюю причину �
       'Выдача остановлена человеком',
       'пауза оператора не выдаёт прежний сбой за причину',
     );
-    assert.equal(operator?.action, 'devcontour queue --start');
+    assert.match(operator?.action ?? '', /^Паузу человека снимает пользователь/);
   } finally {
     await app.close();
     await scheduler.stop();
