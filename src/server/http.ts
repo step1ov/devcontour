@@ -927,6 +927,9 @@ export async function serve(
   });
   origin = `http://127.0.0.1:${(server.address() as AddressInfo).port}`;
   startEngine();
+  // Готовая конфигурация подключается сразу: первый такт интервала — только
+  // через секунду, и каждый запуск сервера ждал бы его впустую.
+  void connect();
   const connectionTimer = options.bootstrap
     ? setInterval(() => {
         void connect();
