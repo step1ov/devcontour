@@ -914,6 +914,21 @@ async function main() {
     );
     return;
   }
+  if (operation === 'storage-step-down') {
+    // D53: перед откатом на версию без строк аренды — после остановки очереди.
+    const down = new Store(
+      join(root, 'state.sqlite'),
+      config.storage === 'component' ? repositories(config) : undefined,
+    );
+    try {
+      // Живую роль controller и действующие аренды проверяет та же транзакция.
+      const moved = down.stepDownLeases();
+      console.log(JSON.stringify({ status: 'stepped-down', attempts: moved }));
+    } finally {
+      down.close();
+    }
+    return;
+  }
   const store = new Store(
     join(root, 'state.sqlite'),
     config.storage === 'component' ? repositories(config) : undefined,

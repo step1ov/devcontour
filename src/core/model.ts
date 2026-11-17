@@ -665,7 +665,14 @@ export interface Run {
   phase: TaskStatus;
   startedAt: string;
   finishedAt?: string;
+  /**
+   * Срок владения. У активной попытки этой версии в документе — метка
+   * `ROW_LEASE` (-1), срок держит строка `leases` (D53); чтение через `Store`
+   * накладывает срок строки.
+   */
   leaseUntil: number;
+  /** Версия движка, выдавшего попытку (поле harness). */
+  engineVersion?: string;
   worktree?: string;
   baseSha?: string;
   candidateSha?: string;

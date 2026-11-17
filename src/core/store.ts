@@ -143,6 +143,72 @@ export function effectiveLeader(
 }
 
 /**
+ * Аренда попыток — строки таблицы `leases` (D53), в той же базе, что
+ * документ попытки: в компонентном хранении — в базе компонента, и запись
+ * документа и строки фиксируется атомарно (журнал DELETE с ATTACH).
+ * Продление меняет одну строку; документ не читается и не пишется.
+ */
+const leasesTable = (schema: string) =>
+  `CREATE TABLE IF NOT EXISTS ${schema}.leases (kind TEXT NOT NULL, id TEXT NOT NULL, token TEXT NOT NULL, owner TEXT NOT NULL, engine TEXT NOT NULL, until INTEGER NOT NULL, PRIMARY KEY(kind, id))`;
+
+/**
+ * Метка попытки, чей срок держит строка: `leaseUntil` активной попытки в
+ * документе равен -1. Прежние версии разбирают попытку строгой схемой harness
+ * (`leaseUntil` не меньше 0) и отказывают до любой записи — не продлевают и
+ * не истекают попытку по сроку документа, который больше не продлевается.
+ * Флаг вида `heldInRow` здесь не годится: проекция попытки прежней версии
+ * берёт только известные ей поля и молча отбросила бы его.
+ */
+export const ROW_LEASE = -1;
+
+/** Строка аренды попытки и схема базы, где она лежит. */
+export interface AttemptLeaseRow {
+  id: string;
+  token: string;
+  owner: string;
+  engine: string;
+  until: number;
+  schema: string;
+}
+
+type RunState = DevContourState['runs'][number];
+
+/** Срок попытки по строке: только активная попытка с тем же token; иначе аренды нет. */
+function rowTerm(run: RunState, rows: ReadonlyMap<string, AttemptLeaseRow>) {
+  const row = run.status === 'active' ? rows.get(run.id) : undefined;
+  return row && row.token === run.token ? row.until : 0;
+}
+
+/** Наложить сроки строк на попытки с меткой — в изменяемом состоянии. */
+function applyLeases(state: DevContourState, rows: ReadonlyMap<string, AttemptLeaseRow>) {
+  for (const run of state.runs)
+    if (run.leaseUntil === ROW_LEASE) run.leaseUntil = rowTerm(run, rows);
+}
+
+/** Попытки с меткой в замороженном документе (по индексу) — один раз на документ. */
+const heldIndexes = new WeakMap<DevContourState, number[]>();
+function heldOf(base: DevContourState) {
+  let found = heldIndexes.get(base);
+  if (!found) {
+    found = [];
+    base.runs.forEach((r, i) => {
+      if (r.leaseUntil === ROW_LEASE) found!.push(i);
+    });
+    heldIndexes.set(base, found);
+  }
+  return found;
+}
+
+/** Аренда активной попытки до транзакции: по ней решается, что писать в строки. */
+interface LeaseSnapshot {
+  held: boolean;
+  token: string;
+  owner: string;
+  engine: string;
+  until: number;
+}
+
+/**
  * Изменение документа в транзакции. Документ копируется для записи только
  * при первом обращении к `edit()`: транзакция, которая лишь читает (выдача на
  * паузе, проверка истёкших попыток), не разбирает и не сериализует всё
@@ -511,11 +577,202 @@ export class Store {
     const leader = effectiveLeader(state.leader, controllerRow(this.db));
     if (leader) state.leader = structuredClone(leader);
     else delete state.leader;
+    applyLeases(state, this.leaseRows());
     return state;
   }
   private overlay?: { base: DevContourState; leader: string; value: DevContourState };
   private frozenUnlocked(): Readonly<DevContourState> {
-    return this.withRole(this.frozenDocument());
+    return this.withRole(this.withLeases(this.frozenDocument()));
+  }
+  private leaseOverlay?: { base: DevContourState; key: string; value: DevContourState };
+  /**
+   * Документ `base` со сроками попыток из строк, прочитанных сейчас (D53):
+   * как роль controller из её строки. Попытки без метки — как в документе.
+   */
+  private withLeases(
+    base: DevContourState,
+    known?: ReadonlyMap<string, AttemptLeaseRow>,
+  ): DevContourState {
+    const held = heldOf(base);
+    if (!held.length) return base;
+    const rows = known ?? this.leaseRows();
+    const terms = held.map((i) => rowTerm(base.runs[i], rows));
+    const key = terms.join(',');
+    if (this.leaseOverlay?.base === base && this.leaseOverlay.key === key)
+      return this.leaseOverlay.value;
+    const runs = base.runs.slice();
+    held.forEach((i, n) => (runs[i] = { ...runs[i], leaseUntil: terms[n] }));
+    const value = deepFreeze({ ...base, runs });
+    this.leaseOverlay = { base, key, value };
+    return value;
+  }
+  /** Схемы баз: coordinator и базы компонентов. */
+  private schemas() {
+    return ['main', ...(this.components?.locations.map((l) => l.schema) ?? [])];
+  }
+  private hasLeaseTable(schema: string) {
+    return !!this.db
+      .prepare(`SELECT 1 FROM ${schema}.sqlite_master WHERE type='table' AND name='leases'`)
+      .get();
+  }
+  /** Строки аренды попыток всех баз по ID попытки. */
+  leaseRows(): Map<string, AttemptLeaseRow> {
+    const rows = new Map<string, AttemptLeaseRow>();
+    for (const schema of this.schemas()) {
+      if (!this.hasLeaseTable(schema)) continue;
+      for (const row of this.db
+        .prepare(
+          `SELECT id, token, owner, engine, until FROM ${schema}.leases WHERE kind='attempt'`,
+        )
+        .all() as unknown as Omit<AttemptLeaseRow, 'schema'>[])
+        rows.set(row.id, { ...row, schema });
+    }
+    return rows;
+  }
+  /** Строка аренды одной попытки — без чтения документа. */
+  attemptLeaseRow(id: string): AttemptLeaseRow | undefined {
+    for (const schema of this.schemas()) {
+      if (!this.hasLeaseTable(schema)) continue;
+      const row = this.db
+        .prepare(
+          `SELECT id, token, owner, engine, until FROM ${schema}.leases WHERE kind='attempt' AND id=?`,
+        )
+        .get(id) as Omit<AttemptLeaseRow, 'schema'> | undefined;
+      if (row) return { ...row, schema };
+    }
+    return undefined;
+  }
+  /**
+   * Условное продление строки аренды попытки (D53): срок становится `until`,
+   * только если token, владелец и версия движка совпадают, а срок ещё не
+   * истёк (`until > now`). Документ не читается и не пишется; растёт только
+   * счётчик сроков. Только в транзакции.
+   */
+  renewAttemptLease(
+    id: string,
+    token: string,
+    owner: string,
+    engine: string,
+    until: number,
+    now: number,
+  ): boolean {
+    if (!this.transaction) throw new Error('Продление аренды требует открытой транзакции');
+    // Документ, который эта версия не читает (например, записанный более
+    // новой), — отказ до записи и у продления. Разбор только при смене
+    // версии данных: центральное хранение берёт документ из кэша версии
+    // (`document`), компонентное разбирает его, если с прошлой проверки
+    // базу меняли. Продления одного процесса документ не разбирают.
+    if (!this.components) this.document().frozen();
+    else {
+      // Ключ — версия main и `data_version` каждой базы компонента: запись
+      // другого соединения только в базу компонента (сегодня так не пишет
+      // никто — любая запись документа переписывает и main.state, и
+      // main.revision) тоже ведёт к разбору.
+      const key = [
+        this.versionKey(),
+        ...this.schemas()
+          .slice(1)
+          .map(
+            (schema) =>
+              (this.db.prepare(`PRAGMA ${schema}.data_version`).get() as { data_version: number })
+                .data_version,
+          ),
+      ].join(':');
+      if (key !== this.leaseCheckedKey) {
+        this.storedState();
+        this.leaseCheckedKey = key;
+      }
+    }
+    for (const schema of this.schemas()) {
+      if (!this.hasLeaseTable(schema)) continue;
+      const changed = this.db
+        .prepare(
+          `UPDATE ${schema}.leases SET until=? WHERE kind='attempt' AND id=? AND token=? AND owner=? AND engine=? AND until>?`,
+        )
+        .run(until, id, token, owner, engine, now).changes;
+      // Счётчик сроков не растёт: он входит в ключ кэша документа, и каждое
+      // продление заставило бы следующее чтение разбирать документ заново.
+      // Срок попытки накладывается из строки при каждом чтении.
+      if (changed === 1) return true;
+    }
+    return false;
+  }
+  /** Ключ версии, на которой продление последний раз проверило документ (компоненты). */
+  private leaseCheckedKey?: string;
+  /**
+   * База строки аренды попытки: база её задачи (как у документа попытки,
+   * `ComponentStorage.owner`). Если бы владелец задачи менялся при идущей
+   * попытке, строка осталась бы и в прежней базе. Это недостижимо: правка
+   * задачи с идущей попыткой отклоняется, а владелец попытки — её задача.
+   */
+  private leaseSchema(run: RunState, state: DevContourState) {
+    if (!this.components) return 'main';
+    const owner = state.tasks.find(
+      (t) => t.id === run.taskId && t.scope !== 'workspace',
+    )?.repositoryId;
+    return owner ? this.components.schema(owner) : 'main';
+  }
+  private putLeaseRow(run: RunState, state: DevContourState) {
+    const schema = this.leaseSchema(run, state);
+    this.db.exec(leasesTable(schema));
+    this.db
+      .prepare(`INSERT OR REPLACE INTO ${schema}.leases VALUES('attempt', ?, ?, ?, ?, ?)`)
+      .run(run.id, run.token, run.owner, run.engineVersion ?? '', run.leaseUntil);
+  }
+  private deleteLeaseRow(id: string) {
+    for (const schema of this.schemas())
+      if (this.hasLeaseTable(schema))
+        this.db.prepare(`DELETE FROM ${schema}.leases WHERE kind='attempt' AND id=?`).run(id);
+  }
+  /** Документ как записан (без наложений) — для миграции и шага вниз. */
+  private storedState(): DevContourState {
+    const row = this.db.prepare('SELECT data FROM main.state WHERE id=1').get() as { data: string };
+    return this.parseDocument(row.data).state;
+  }
+  private writeStored(state: DevContourState) {
+    if (this.components) this.components.write(state);
+    else this.db.prepare('UPDATE main.state SET data=? WHERE id=1').run(JSON.stringify(state));
+  }
+  /**
+   * Шаг вниз перед откатом на версию без строк аренды (D53): срок строки
+   * копируется в документ, метки и строки снимаются одной транзакцией. Без
+   * него прежняя версия отказывала бы навсегда. Выполняется после остановки
+   * очереди. Возвращает число попыток, чей срок перенесён в документ.
+   * Следующая запись документа этой версией при активных попытках снова
+   * перенесёт их сроки в строки.
+   */
+  stepDownLeases(at = Date.now()): number {
+    return this.atomic(() => {
+      const state = this.storedState();
+      const rows = this.leaseRows();
+      // Проверка и шаг вниз — одна транзакция: serve, запущенный между ними,
+      // не прошёл бы незамеченным. Живая роль controller или ещё действующая
+      // аренда попытки (процесс этой версии ведёт попытку и без роли) —
+      // отказ до записи.
+      const leader = effectiveLeader(state.leader, controllerRow(this.db));
+      if (leader && leader.leaseUntil > at)
+        throw new Error(
+          `Очередь ведёт controller ${leader.owner}: остановите serve перед шагом вниз`,
+        );
+      const live = [...rows.values()].filter((r) => r.until > at).map((r) => r.id);
+      if (live.length)
+        throw new Error(
+          `Попытки ещё под арендой (${live.join(', ')}): остановите процесс, который их ведёт, и дождитесь истечения срока`,
+        );
+      let moved = 0;
+      for (const run of state.runs)
+        if (run.leaseUntil === ROW_LEASE) {
+          run.leaseUntil = rowTerm(run, rows);
+          moved++;
+        }
+      if (moved) this.writeStored(state);
+      for (const schema of this.schemas())
+        if (this.hasLeaseTable(schema))
+          this.db.prepare(`DELETE FROM ${schema}.leases WHERE kind='attempt'`).run();
+      // Документ переписан: кэши читателей (панель) перечитывают его.
+      if (moved || rows.size) this.bump('data');
+      return moved;
+    });
   }
   /** Замороженный документ без наложенной роли controller (в нём может быть её метка). */
   private frozenDocument(): DevContourState {
@@ -564,6 +821,7 @@ export class Store {
     const leader = effectiveLeader(state.leader, controllerRow(this.db));
     if (leader) state.leader = leader;
     else delete state.leader;
+    applyLeases(state, this.leaseRows());
     return { state };
   }
   /**
@@ -675,6 +933,14 @@ export class Store {
    * не переписывает.
    */
   update<T>(type: string, action: (draft: Draft) => T): T {
+    return this.lazyUpdate(type, (draft) => action(draft()));
+  }
+  /**
+   * То же изменение, но документ открывается только при первом вызове
+   * `draft()`. Транзакция, которая его не открыла (продление аренды строкой),
+   * документ не разбирает, не пишет и событий журнала не пишет.
+   */
+  lazyUpdate<T>(type: string, action: (draft: () => Draft) => T): T {
     // Вложенное изменение записало бы документ и событие журнала, а внешнее
     // при фиксации переписало бы документ своей копией: изменение пропало
     // бы, событие о нём осталось. Отказ — до любой записи.
@@ -686,34 +952,8 @@ export class Store {
           'изменение после её фиксации',
       );
     return this.atomic(() => {
-      const row = controllerRow(this.db);
-      let before: string;
-      let documentLeader: Leader | undefined;
-      let draft: Draft;
-      if (this.components) {
-        const raw = this.db.prepare('SELECT data FROM main.state WHERE id=1').get() as {
-          data: string;
-        };
-        const { state } = this.parseDocument(raw.data);
-        before = JSON.stringify(state);
-        documentLeader = state.leader;
-        draft = new Draft(
-          () => state,
-          () => state,
-          effectiveLeader(documentLeader, row),
-        );
-        draft.edit();
-      } else {
-        const doc = this.document();
-        before = doc.text;
-        documentLeader = doc.frozen().leader;
-        draft = new Draft(
-          doc.frozen,
-          () => this.parseDocument(doc.text).state,
-          effectiveLeader(documentLeader, row),
-        );
-      }
-      const leaderBefore = JSON.stringify(draft.leader ?? null);
+      let open: ReturnType<Store['openDraft']> | undefined;
+      const draft = () => (open ??= this.openDraft()).draft;
       let result: T;
       this.editing = true;
       try {
@@ -721,71 +961,191 @@ export class Store {
       } finally {
         this.editing = false;
       }
-      const leader = draft.leader;
-      const leaderChanged = JSON.stringify(leader ?? null) !== leaderBefore;
-      // В документ идёт метка роли (`rowMarker`), сама роль — в строку. Роль
-      // не менялась — роль документа остаётся как есть (и роль прежней
-      // версии тоже); сменилась — документ переписывается, только если
-      // меняется метка: получение и снятие роли, перенос роли прежней версии.
-      const marker = leaderChanged ? rowMarker(leader, documentLeader) : documentLeader;
-      if (JSON.stringify(marker ?? null) !== JSON.stringify(documentLeader ?? null)) draft.edit();
-      const withoutLeader = <R>(state: DevContourState, fn: () => R): R => {
-        if (marker) state.leader = marker;
-        else delete state.leader;
-        try {
-          return fn();
-        } finally {
-          if (leader) state.leader = leader;
-          else delete state.leader;
-        }
-      };
-      let documentChanged = false;
-      if (draft.edited) {
-        const state = draft.edit();
-        const after = withoutLeader(state, () => JSON.stringify(state));
-        if (after !== before) {
-          documentChanged = true;
-          if (this.components) {
-            const components = this.components;
-            withoutLeader(state, () => components.write(state));
-          } else {
-            this.db.prepare('UPDATE main.state SET data=? WHERE id=1').run(after);
-            this.written = { text: after };
-          }
-        }
-      }
-      const rowChanged =
-        leaderChanged && JSON.stringify(leader ?? null) !== JSON.stringify(row ?? null);
-      if (rowChanged) this.db.exec(CONTROLLER_TABLE);
-      if (rowChanged)
-        this.db
-          .prepare('INSERT OR REPLACE INTO main.controller (id,data) VALUES(1,?)')
-          .run(leader ? JSON.stringify(leader) : null);
-      if (!documentChanged && !rowChanged) return result;
-      // Heartbeat продлевает только сроки владения (lease): ревизия данных от
-      // них не растёт, иначе каждый опрос панели видел бы «изменение». Сроки
-      // в документе (попытки, операции) ведёт отдельный счётчик — по нему кэш
-      // узнаёт, что они продлены. Продление одной роли controller — только
-      // её строка: документ и кэши с ним не меняются, а роль читается из
-      // строки при каждом чтении.
-      if (documentChanged) this.bump(type === 'heartbeat' ? 'lease' : 'data');
-      else if (type !== 'heartbeat') this.bump('lease');
-      if (type !== 'heartbeat') {
-        const at = new Date().toISOString();
-        const inserted = this.db
-          .prepare('INSERT INTO main.events(at,type,data) VALUES(?,?,?)')
-          .run(at, type, this.components ? 'null' : JSON.stringify(result ?? null));
-        this.components?.event(
-          Number(inserted.lastInsertRowid),
-          at,
-          type,
-          result ?? null,
-          draft.edit(),
-        );
-        this.projectionPending = true;
-      }
-      return result;
+      return open ? this.closeDraft(open, type, result) : result;
     });
+  }
+  /** Начало изменения: документ транзакции (`Draft`) со сроками и ролью из строк. */
+  private openDraft() {
+    const row = controllerRow(this.db);
+    const rows = this.leaseRows();
+    let before: string;
+    let documentLeader: Leader | undefined;
+    let draft: Draft;
+    // Аренда активных попыток до изменения: метка документа и срок строки.
+    const leases = new Map<string, LeaseSnapshot>();
+    const snapshot = (stored: DevContourState) => {
+      for (const run of stored.runs)
+        if (run.status === 'active')
+          leases.set(run.id, {
+            held: run.leaseUntil === ROW_LEASE,
+            token: run.token,
+            owner: run.owner,
+            engine: run.engineVersion ?? '',
+            until: run.leaseUntil === ROW_LEASE ? rowTerm(run, rows) : run.leaseUntil,
+          });
+    };
+    if (this.components) {
+      const raw = this.db.prepare('SELECT data FROM main.state WHERE id=1').get() as {
+        data: string;
+      };
+      const { state } = this.parseDocument(raw.data);
+      before = JSON.stringify(state);
+      documentLeader = state.leader;
+      snapshot(state);
+      applyLeases(state, rows);
+      draft = new Draft(
+        () => state,
+        () => state,
+        effectiveLeader(documentLeader, row),
+      );
+      draft.edit();
+    } else {
+      const doc = this.document();
+      before = doc.text;
+      documentLeader = doc.frozen().leader;
+      snapshot(doc.frozen());
+      // Строки прочитаны один раз на транзакцию: документ транзакции не
+      // перечитывает их на каждом обращении.
+      let overlaid: DevContourState | undefined;
+      draft = new Draft(
+        () => (overlaid ??= this.withLeases(doc.frozen(), rows)),
+        () => {
+          const state = this.parseDocument(doc.text).state;
+          applyLeases(state, rows);
+          return state;
+        },
+        effectiveLeader(documentLeader, row),
+      );
+    }
+    return {
+      draft,
+      row,
+      before,
+      documentLeader,
+      leases,
+      leaderBefore: JSON.stringify(draft.leader ?? null),
+    };
+  }
+  /** Конец изменения: документ с метками, строки роли и аренды, событие журнала. */
+  private closeDraft<T>(open: ReturnType<Store['openDraft']>, type: string, result: T): T {
+    const { draft, row, before, documentLeader, leases } = open;
+    const leader = draft.leader;
+    const leaderChanged = JSON.stringify(leader ?? null) !== open.leaderBefore;
+    // В документ идёт метка роли (`rowMarker`), сама роль — в строку. Роль
+    // не менялась — роль документа остаётся как есть (и роль прежней
+    // версии тоже); сменилась — документ переписывается, только если
+    // меняется метка: получение и снятие роли, перенос роли прежней версии.
+    const marker = leaderChanged ? rowMarker(leader, documentLeader) : documentLeader;
+    if (JSON.stringify(marker ?? null) !== JSON.stringify(documentLeader ?? null)) draft.edit();
+    // Аренда попыток (D53): активная попытка этой версии держит срок в
+    // строке, документ — метку. Строка пишется, когда попытка стала активной
+    // или сменились token, владелец, версия движка или срок; удаляется, когда
+    // попытка перестала быть активной. Попытка прежней версии без метки,
+    // которую изменение не трогало, остаётся как есть.
+    const held: RunState[] = [];
+    const writes: RunState[] = [];
+    // Активные попытки прежней версии (срок в документе), которых изменение
+    // не трогало: их переносит первая запись документа этой версией.
+    const legacy: RunState[] = [];
+    const deletes: string[] = [];
+    if (draft.edited) {
+      const state = draft.edit();
+      const present = new Set<string>();
+      for (const run of state.runs) {
+        present.add(run.id);
+        const was = leases.get(run.id);
+        if (run.status !== 'active') {
+          if (was?.held) deletes.push(run.id);
+          continue;
+        }
+        if (was && !was.held && was.token === run.token && was.until === run.leaseUntil) {
+          legacy.push(run);
+          continue;
+        }
+        held.push(run);
+        if (
+          !was?.held ||
+          was.token !== run.token ||
+          was.owner !== run.owner ||
+          was.engine !== (run.engineVersion ?? '') ||
+          was.until !== run.leaseUntil
+        )
+          writes.push(run);
+      }
+      for (const [id, was] of leases) if (was.held && !present.has(id)) deletes.push(id);
+    }
+    const withMarkers = <R>(state: DevContourState, fn: () => R): R => {
+      if (marker) state.leader = marker;
+      else delete state.leader;
+      const terms = held.map((r) => r.leaseUntil);
+      for (const run of held) run.leaseUntil = ROW_LEASE;
+      try {
+        return fn();
+      } finally {
+        if (leader) state.leader = leader;
+        else delete state.leader;
+        held.forEach((run, i) => (run.leaseUntil = terms[i]!));
+      }
+    };
+    let documentChanged = false;
+    if (draft.edited) {
+      const state = draft.edit();
+      let after = withMarkers(state, () => JSON.stringify(state));
+      // Миграция D53 — первой записью документа этой версией: сроки всех
+      // активных попыток прежней версии переходят в строки той же
+      // транзакцией, что ставит их метки. Иначе процесс прежней версии
+      // успел бы продлить срок в документе между двумя шагами. Ошибка
+      // откатывает обе части. Открытие и чтение базы её не меняют.
+      if (after !== before && legacy.length) {
+        held.push(...legacy);
+        writes.push(...legacy);
+        after = withMarkers(state, () => JSON.stringify(state));
+      }
+      if (after !== before) {
+        documentChanged = true;
+        if (this.components) {
+          const components = this.components;
+          withMarkers(state, () => components.write(state));
+        } else {
+          this.db.prepare('UPDATE main.state SET data=? WHERE id=1').run(after);
+          this.written = { text: after };
+        }
+      }
+      for (const run of writes) this.putLeaseRow(run, state);
+      for (const id of deletes) this.deleteLeaseRow(id);
+    }
+    const leasesChanged = writes.length > 0 || deletes.length > 0;
+    const rowChanged =
+      leaderChanged && JSON.stringify(leader ?? null) !== JSON.stringify(row ?? null);
+    if (rowChanged) this.db.exec(CONTROLLER_TABLE);
+    if (rowChanged)
+      this.db
+        .prepare('INSERT OR REPLACE INTO main.controller (id,data) VALUES(1,?)')
+        .run(leader ? JSON.stringify(leader) : null);
+    if (!documentChanged && !rowChanged && !leasesChanged) return result;
+    // Heartbeat продлевает только сроки владения (lease): ревизия данных от
+    // них не растёт, иначе каждый опрос панели видел бы «изменение». Сроки
+    // в документе (операции) ведёт отдельный счётчик — по нему кэш узнаёт,
+    // что они продлены. Продление одной роли controller — только её строка:
+    // документ и кэши с ним не меняются, а роль читается из строки при
+    // каждом чтении. Строки аренды попыток — тоже счётчик сроков.
+    if (documentChanged) this.bump(type === 'heartbeat' ? 'lease' : 'data');
+    else if (type !== 'heartbeat' || leasesChanged) this.bump('lease');
+    if (type !== 'heartbeat') {
+      const at = new Date().toISOString();
+      const inserted = this.db
+        .prepare('INSERT INTO main.events(at,type,data) VALUES(?,?,?)')
+        .run(at, type, this.components ? 'null' : JSON.stringify(result ?? null));
+      this.components?.event(
+        Number(inserted.lastInsertRowid),
+        at,
+        type,
+        result ?? null,
+        draft.edit(),
+      );
+      this.projectionPending = true;
+    }
+    return result;
   }
   /**
    * Событие журнала в открытой транзакции, когда документ не изменился:
@@ -1335,7 +1695,12 @@ export class Store {
           state: this.frozenDocument(),
         };
       const { revision, lease, state } = this.cached!;
-      return { revision, lease, snapshotAt: this.readStartedAt, state: this.withRole(state) };
+      return {
+        revision,
+        lease,
+        snapshotAt: this.readStartedAt,
+        state: this.withRole(this.withLeases(state)),
+      };
     });
   }
   /** Согласованное чтение нескольких значений из одного снимка БД. */
