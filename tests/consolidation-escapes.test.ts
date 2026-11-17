@@ -123,3 +123,31 @@ test('F49 R3-2: the contract-change operation view lists merged and reference id
     await s.remove();
   }
 });
+
+test('F49 R4-1: a short entry text found elsewhere is not the entry', () => {
+  const o1 = '# S\n\n## Rules\n\nREQ-1. Payments by card.\n\nREQ-9. Optional.\n';
+  const n1 =
+    '# S\n\n## Rules\n\nREQ-1. Payments by card; the receipt is optional. Card data per REQ-9.\n';
+  assert.deepEqual(mappingGaps(o1, n1, 'Rules, REQ-1 → Rules\nREQ-9 → reference'), [
+    'REQ-9 (в новом тексте не определено)',
+  ]);
+});
+
+test('F49 R4-1: part of a word is not the entry text ("yes" in "eyes")', () => {
+  const o2 = '# S\n\nREQ-1. Payments.\n\nREQ-2. Yes.\n';
+  const n2 = '# S\n\nREQ-1. Payments; eyes only (REQ-2).\n';
+  assert.deepEqual(mappingGaps(o2, n2, 'S, REQ-1 → S\nREQ-2 → reference'), [
+    'REQ-2 (в новом тексте не определено)',
+  ]);
+});
+
+test('F49 R4-1: removing REQ-1 does not cut REQ-12 when comparing entry text', () => {
+  const o3 =
+    '# S\n\nREQ-1. Payments.\n\n## Decisions\n\n- DEC-004: storage per REQ-12 rules apply to every refund.\n';
+  const n3 =
+    '# S\n\nREQ-1. Payments.\n\n## Decisions\n\nStorage per REQ-12 rules apply to every refund (DEC-004).\n';
+  assert.deepEqual(
+    mappingGaps(o3, n3, 'S, REQ-1 → S\nDecisions → Decisions\nDEC-004 → reference'),
+    [],
+  );
+});

@@ -68,6 +68,18 @@ export function ruleTokens(text: string) {
   return tokens(text, RULE_TOKEN);
 }
 
+/**
+ * Слова текста для сравнения записей: ID правил целиком (`REQ-12` — одно
+ * слово, а не `REQ-1` и `2`), прочие слова в нижнем регистре, без разметки
+ * и пунктуации.
+ */
+export function ruleWords(text: string) {
+  const ids = new Set(ruleTokens(text));
+  return (
+    text.match(new RegExp(`${BEFORE}(?:${RULE_BODY})${AFTER}|[\\p{L}\\p{N}]+`, 'gu')) ?? []
+  ).map((w) => (ids.has(w) ? { word: w, id: true } : { word: w.toLowerCase(), id: false }));
+}
+
 /** Разметка Markdown, которая не меняет слово: `**REQ-1**`, `` `REQ-1` ``. */
 const MARKUP = /[`*_]/g;
 /** Номер раздела перед текстом заголовка: `4.`, `2.1`, `10.`. */

@@ -23,6 +23,7 @@ import {
   definitionSites,
   definitions,
   headingLabel,
+  ruleWords,
   headings,
   ruleTokens,
   sections,
@@ -163,17 +164,10 @@ export function mappingCheck(previous: string, next: string, summary: string) {
       : parts.filter((p) => p.ids.has(id));
   };
   const sites = definitionSites(previous);
-  const flat = prose(next);
+  const after = ruleWords(next);
   const survives = (id: string) => {
     const site = sites.get(id);
-    return (
-      !!site &&
-      site.strength < 3 &&
-      site.blocks.some((b) => {
-        const own = prose(b);
-        return !!own && flat.includes(own);
-      })
-    );
+    return !!site && site.strength < 3 && site.blocks.some((b) => entrySurvives(id, b, after));
   };
   const covered = { ids: new Set<string>(), heads: new Set<string>() };
   const merges: { id: string; into: string }[] = [];
@@ -263,15 +257,41 @@ export function mappingGaps(previous: string, next: string, summary: string) {
   return mappingCheck(previous, next, summary).gaps;
 }
 
-/** Текст без ID, разметки и пунктуации, в нижнем регистре: сравнение блоков. */
-function prose(text: string) {
-  let out = ` ${text} `;
-  for (const id of ruleTokens(text)) out = out.split(id).join(' ');
-  return out
-    .replace(/[\p{P}\p{S}]/gu, ' ')
-    .replace(/\s+/g, ' ')
-    .trim()
-    .toLowerCase();
+/** Минимум текста записи, который узнаётся без своего ID рядом. */
+const ENTRY_WORDS = 4;
+const ENTRY_CHARS = 24;
+/** Есть ли `part` в `whole` подряд, целыми словами. */
+const contiguous = (whole: string[], part: string[]) =>
+  part.length > 0 && whole.some((_, i) => part.every((w, j) => whole[i + j] === w));
+
+/**
+ * Остался ли текст записи `block` (без ID) в новом тексте `after`: целыми
+ * словами подряд. Короткий текст (меньше четырёх слов и 24 знаков) узнаётся
+ * только рядом со своим ID: «optional» где-то в тексте — не запись
+ * `REQ-9. Optional.`, а `Chosen storage (DEC-004)` — запись
+ * `- DEC-004: chosen storage.`.
+ */
+function entrySurvives(id: string, block: string, after: ReturnType<typeof ruleWords>) {
+  const own = ruleWords(block)
+    .filter((w) => !w.id)
+    .map((w) => w.word);
+  if (!own.length) return false;
+  const plain = after.filter((w) => !w.id).map((w) => w.word);
+  if (own.length >= ENTRY_WORDS || own.join(' ').length >= ENTRY_CHARS)
+    return contiguous(plain, own);
+  // Рядом с ID: ближайшие слова до или после него; другие ID между ними
+  // пропускаются (`Chosen storage (DEC-004, DEC-005)`).
+  const text = own.join(' ');
+  return after.some((w, i) => {
+    if (!w.id || w.word !== id) return false;
+    const near = (side: typeof after) => side.filter((x) => !x.id).map((x) => x.word);
+    return (
+      near(after.slice(0, i)).slice(-own.length).join(' ') === text ||
+      near(after.slice(i + 1))
+        .slice(0, own.length)
+        .join(' ') === text
+    );
+  });
 }
 
 /** «пропуск», «пропуска», «пропусков» по числу. */

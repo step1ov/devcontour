@@ -427,6 +427,9 @@ function leaseStale(state: Readonly<DevContourState>, readAt: number) {
   return leaseOperations(state).some((o) => o.leaseUntil <= now && o.leaseUntil > readAt);
 }
 
+/** Сколько слитых и отображённых ссылкой ID попытки показывает сводка. */
+const MAPPING = 20;
+
 /**
  * Периодическая сводка. `revision` — номер данных, которые клиент уже
  * показывает для той же области (доска, задача, вид): если данные не
@@ -608,8 +611,11 @@ function buildSummary(
       ...clip(a),
       findingsCount: findings.length,
       ...(gaps ? { gapCount: gaps.length } : {}),
-      ...(merged?.length ? { merged } : {}),
-      ...(demoted?.length ? { demoted } : {}),
+      // Слияния и ссылки сверки отображения — первые MAPPING и общее число.
+      ...(merged?.length ? { merged: merged.slice(0, MAPPING), mergedCount: merged.length } : {}),
+      ...(demoted?.length
+        ? { demoted: demoted.slice(0, MAPPING), demotedCount: demoted.length }
+        : {}),
     })),
     contractAttemptCount: attempts.length,
     paused: state.paused,
