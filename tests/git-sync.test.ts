@@ -536,7 +536,10 @@ test('CLI exposes sync, status and assignment against an explicit workspace', ()
           cwd: new URL('../', import.meta.url).pathname,
           encoding: 'utf8',
           stdio: ['ignore', 'pipe', 'pipe'],
-          timeout: 30000,
+          // Предел ловит зависание, а не медленную машину: вызов идёт ~0,6 с,
+          // но под полной проверкой при загрузке 60–80 первый вызов не
+          // укладывался в 30 с (две проверки подряд).
+          timeout: 120_000,
         }),
       );
     assert.equal(cli('sync', '--member', 'alice').status, 'synchronized');
