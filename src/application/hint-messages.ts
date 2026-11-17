@@ -86,6 +86,8 @@ export interface HintParamMap {
    * Такт очереди остановил выдачу: база прогонов отстала от рабочей ветки
    * (`staleBaseStop`); `reason` — причина остановки. Пакет harness видит лишь
    * паузу без причины и назвал бы её ожиданием «следующего harness run».
+   * Шаг только режима `agent` (в режиме `operator` `host.next` — `operator`),
+   * поэтому текст называет `--by host` без условия.
    */
   'stale-base': { reason: string };
   /** Открытый follow-up исполнителя. */

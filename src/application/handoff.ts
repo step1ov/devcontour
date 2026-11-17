@@ -462,11 +462,15 @@ export function withStaleBaseStop(
   pack: HandoffPack,
   stale: string | undefined,
   redact: (text: string) => string = (text) => text,
+  /** Режим согласований: `--by host` — флаг ведущего агента режима `agent`. */
+  approvalMode: 'agent' | 'operator' = 'agent',
 ): HandoffPack {
   if (!stale) return pack;
+  const update =
+    approvalMode === 'agent' ? 'devcontour base-update --by host' : 'devcontour base-update';
   const chars = [
     ...redact(
-      `${stale} Выдачу снимет перенос базы ведущим: devcontour base-update --by host (или уберите коммиты с рабочей ветки — такт serve снимет остановку сам); harness run её не снимет`,
+      `${stale} Выдачу снимет перенос базы: ${update} (или уберите коммиты с рабочей ветки — такт serve снимет остановку сам); harness run её не снимет`,
     ),
   ];
   const text =
@@ -1355,6 +1359,7 @@ export function devcontourHandoffWithin(
           ),
           stale,
           options?.redact,
+          h.config.approvalMode ?? 'agent',
         );
       // Короткая форма из журнала и панели (`B-xxxxxxxx`) — однозначный
       // префикс полного id; неоднозначный называет кандидатов.
