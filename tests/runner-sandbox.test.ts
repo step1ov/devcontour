@@ -108,15 +108,22 @@ test(
     // PID процесса хоста, в командной строке которого есть метка: потомок
     // помечен ею в argv, и его видно до конца проверки — лог проверки
     // пишется только после её завершения.
+    // Отказ ps — провал теста: иначе «помеченных не осталось» проходило бы
+    // без проверки.
     const running = (token: string) =>
-      new Promise<number | undefined>((done) =>
-        execFile('ps', ['-axww', '-o', 'pid=,command='], { maxBuffer: 64_000_000 }, (_e, out) => {
-          const line = String(out ?? '')
-            .split('\n')
-            .find((l) => l.includes(token));
+      new Promise<number | undefined>((done, fail) =>
+        execFile('ps', ['-axww', '-o', 'pid=,command='], { maxBuffer: 64_000_000 }, (e, out) => {
+          if (e) return fail(new Error(`ps: ${e.message}`));
+          const line = out.split('\n').find((l) => l.includes(token));
           done(line ? Number(line.trim().split(/\s+/)[0]) : undefined);
         }),
       );
+    // Помеченных меткой процессов нет (ожидание, пока init подберёт убитых).
+    const gone = async (token: string) => {
+      for (let i = 0; i < 100 && (await running(token)) !== undefined; i++)
+        await new Promise((r) => setTimeout(r, 20));
+      return (await running(token)) === undefined;
+    };
     // Один исход на свежей копии демо: выполняется только корневая задача
     // доски — зависящие от неё отменены, иначе каждая повторила бы тот же
     // сценарий ещё по разу. Возвращает PID потомка из лога проверки или
@@ -151,8 +158,10 @@ test(
         f.h.config.gates[0].command = [process.execPath, '-e', spawnOrphan + tail];
         f.h.config.gates[0].timeoutMs = timeoutMs;
         // Отмену идущая попытка замечает на очередном heartbeat (треть
-        // leaseMs): при 30 с по умолчанию отмена шла до 10 с.
-        if (outcome === 'cancel') f.h.config.leaseMs = 5000;
+        // leaseMs): при 30 с по умолчанию отмена шла до 10 с. 15 с — heartbeat
+        // раз в 5 с; истечь попытка может, только если heartbeat опоздал на
+        // 10 с, и тогда исход — не «cancelled», и тест провален, а не пройден.
+        if (outcome === 'cancel') f.h.config.leaseMs = 15_000;
         reapprove(f.h);
         const open = f.store.read().tasks.filter((t) => t.status !== 'done');
         const root = open.filter((t) => !t.dependsOn?.length);
@@ -170,8 +179,17 @@ test(
             await new Promise((r) => setTimeout(r, 100));
           f.h.cancel(root[0].id);
         }
+        const cancelAt = Date.now();
         await draining;
-        if (outcome === 'cancel') assert.ok(cancelled, 'cancel: потомок запущен до отмены');
+        if (outcome === 'cancel') {
+          assert.ok(cancelled, 'cancel: потомок запущен до отмены');
+          // Проверку остановила отмена, а не её таймаут (120 с): иначе и
+          // таймаут убил бы потомка, и исход проверял бы не отмену.
+          assert.ok(
+            Date.now() - cancelAt < 30_000,
+            `cancel: проверка остановлена за ${Date.now() - cancelAt} мс после отмены`,
+          );
+        }
         await scheduler.stop();
         const ran = new Set(
           f.store
@@ -184,19 +202,52 @@ test(
         // удалены, а лог остаётся в артефактах.
         const run = f.store.read().runs.at(-1)!;
         assert.equal(run.taskId, root[0].id, `${outcome}: последний прогон — корневой задачи`);
+        // Исход попытки — тот, что проверяется: иначе потомка мог убить
+        // другой путь очистки (таймаут, истечение аренды).
+        const task = f.store.read().tasks.find((t) => t.id === run.taskId)!;
+        const gate = run.evidence.filter(
+          (e) => e.gate === f.h.config.gates[0].id && e.phase === 'candidate',
+        );
+        if (outcome === 'cancel') {
+          assert.equal(run.status, 'cancelled', run.error);
+          assert.equal(run.failureKind, 'cancelled', run.error);
+          assert.equal(task.status, 'cancelled', task.failure);
+        } else if (outcome === 'timeout') {
+          assert.equal(run.status, 'failed');
+          assert.equal(run.failureKind, 'gate', run.error);
+          assert.ok(gate.length > 0, 'timeout: evidence проверки записано');
+          for (const e of gate) {
+            assert.equal(e.passed, false);
+            assert.match(e.summary, new RegExp(`превысила timeout: предел ${timeoutMs / 1000} с`));
+          }
+        } else if (outcome === 'crash') {
+          assert.equal(run.status, 'failed');
+          assert.equal(run.failureKind, 'gate', run.error);
+          assert.deepEqual(
+            gate.map((e) => [e.passed, e.exitCode]),
+            [[false, 2]],
+            'crash: проверка упала с кодом 2',
+          );
+        } else {
+          assert.equal(run.status, 'succeeded', run.error);
+          assert.equal(task.status, 'done', task.failure);
+          assert.deepEqual(
+            gate.map((e) => [e.passed, e.exitCode]),
+            [[true, 0]],
+            `${outcome}: проверка прошла`,
+          );
+        }
         const log = await readFile(
           join(f.root, 'artifacts', run.id, 'candidate', f.h.config.gates[0].id + '.log'),
           'utf8',
         );
         const pid = Number(/ORPHAN-PID:(\d+)/.exec(log)?.[1]);
+        // Потомок, запущенный уже после таймаута, в лог не попал: его не
+        // должно остаться и тогда — повтор не скрывает утечку первой попытки.
+        assert.equal(await gone(token), true, `${outcome}: помеченных потомков не осталось`);
         if (!(pid > 0)) return undefined;
         if (cancelled !== undefined) assert.equal(pid, cancelled, 'cancel: в логе тот же потомок');
         assert.equal(await dead(pid), true, `${outcome}: отсоединившийся потомок ${pid} завершён`);
-        assert.equal(
-          await running(token),
-          undefined,
-          `${outcome}: помеченных потомков не осталось`,
-        );
         return pid;
       } finally {
         await f.cleanup();
@@ -206,7 +257,10 @@ test(
     // метки) и потомок, унаследовавший stdout/stderr, из-за которого close не
     // наступал, и очистка не начиналась.
     for (const outcome of ['cancel', 'crash', 'success', 'clean-env', 'inherited-pipes'] as const)
-      assert.ok(((await attempt(outcome, 60_000)) ?? 0) > 0, `${outcome}: потомок был запущен`);
+      assert.ok(
+        ((await attempt(outcome, outcome === 'cancel' ? 120_000 : 60_000)) ?? 0) > 0,
+        `${outcome}: потомок был запущен`,
+      );
     // Таймаут отсчитывается от запуска команды, и подождать потомка до него
     // нельзя. Короткий предел обычно застаёт потомка запущенным; если под
     // нагрузкой node не успел стартовать, исход ничего не доказал и
