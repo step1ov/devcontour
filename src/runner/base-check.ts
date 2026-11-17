@@ -327,6 +327,12 @@ export async function baseMoveReview(
   // независимым ревью: их снимает цикл, с доказательством в `base.checked`.
   const reviewed: ReviewedContractDocument[] = [];
   for (const m of baseMovesOf(state) ?? []) {
+    // Диапазон неизвестен: пустой diff не доказывает, что приёмка и
+    // настройка не тронуты, — перенос подтверждает оператор.
+    if (m.unknown) {
+      held.push(`${m.repositoryId}:(диапазон переноса неизвестен)`);
+      continue;
+    }
     const to = bases.find((b) => b.repositoryId === m.repositoryId)?.sha;
     if (!to) continue;
     const entries = await sensitiveBaseEntries(h, dataRoot, state, m.repositoryId, m.from, to);

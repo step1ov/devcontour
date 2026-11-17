@@ -957,11 +957,16 @@ export function waitBaseCheck(s: DevContourState, updated: BaseMove[], detail: s
   const previous = baseMovesOf(s) ?? [];
   const bases = [
     ...previous.filter((p) => !updated.some((u) => u.repositoryId === p.repositoryId)),
-    ...updated.map((u) => ({
-      repositoryId: u.repositoryId,
-      from: previous.find((p) => p.repositoryId === u.repositoryId)?.from ?? u.from,
-      to: u.to,
-    })),
+    ...updated.map((u) => {
+      const prior = previous.find((p) => p.repositoryId === u.repositoryId);
+      return {
+        repositoryId: u.repositoryId,
+        from: prior?.from ?? u.from,
+        to: u.to,
+        // Неизвестное начало диапазона остаётся неизвестным.
+        ...((prior ? prior.unknown : u.unknown) ? { unknown: true as const } : {}),
+      };
+    }),
   ];
   s.baseMoves = { at, bases };
   s.waits = [

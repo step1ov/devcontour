@@ -3,7 +3,7 @@
 // операции изменения контракта (F40). Иного пути снять эту остановку нет.
 import type { DevContour } from '../core/service.ts';
 import { waitBaseCheck } from '../core/service.ts';
-import type { DevContourState } from '../core/model.ts';
+import type { BaseMove, DevContourState } from '../core/model.ts';
 import { repositories } from '../core/repositories.ts';
 import { staleBaseStop } from '../core/work-status.ts';
 import { holdSensitiveBaseMove } from './base-check.ts';
@@ -67,8 +67,12 @@ export type StaleBaseOutcome =
  *   (D42) записывается сразу; дальше — gates базы или подтверждение
  *   оператора.
  * - Вершина не записана (остановка прежней версии, компонент добавлен после
- *   остановки) — перенос неизвестен: то же ожидание `base-check` на текущей
- *   вершине, gates базы исполняются. Остановка не становится тупиком.
+ *   остановки) — диапазон переноса неизвестен: то же ожидание `base-check`,
+ *   но удержанное до подтверждения оператора (`unknown`, D42). Пустой
+ *   диапазон gates сняли бы, не узнав, трогал ли перенос приёмку; последняя
+ *   проверенная база как начало ненадёжна (записи проверки базы прежних
+ *   версий, переписанная история). Остановка не становится тупиком: её
+ *   снимает «Подтвердить и запустить».
  *
  * `performed` — сдвиги, сделанные самим вызывающим по своему доказательству
  * (шаг `base` операции изменения контракта): компонент, чья база сдвинута
@@ -97,7 +101,7 @@ export async function settleStaleBaseStop(
   const targets = (cause?.data as { targets?: Record<string, string> } | undefined)?.targets;
   const { tips, drift } = await (options.read ?? (() => readBases(h)))();
   if (drift.length) return 'lagging';
-  const moved: { repositoryId: string; from: string; to: string }[] = [];
+  const moved: BaseMove[] = [];
   for (const [repositoryId, to] of Object.entries(tips)) {
     const recorded = targets?.[repositoryId];
     if (recorded === to) continue;
@@ -108,8 +112,13 @@ export async function settleStaleBaseStop(
       )
     )
       continue;
-    // Неизвестная вершина: диапазона нет, gates исполняются на текущей.
-    moved.push({ repositoryId, from: recorded ?? to, to });
+    // Неизвестная вершина: диапазона нет. Перенос удерживается до
+    // подтверждения оператора (`unknown`), а не снимается одними gates.
+    moved.push(
+      recorded
+        ? { repositoryId, from: recorded, to }
+        : { repositoryId, from: to, to, unknown: true },
+    );
   }
   const same = (s: DevContourState) =>
     s.paused &&
