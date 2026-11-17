@@ -4,7 +4,8 @@
  */
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
-import { mkdirSync, mkdtempSync, realpathSync } from 'node:fs';
+import { execFileSync } from 'node:child_process';
+import { mkdirSync, mkdtempSync, realpathSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { DatabaseSync } from 'node:sqlite';
@@ -20,6 +21,9 @@ import { DevContourExecutionStore } from '../src/harness/store.ts';
 import { attemptOf } from '../src/harness/projection.ts';
 import { specDigest } from '../src/core/service.ts';
 import type { DevContourState, Task } from '../src/core/model.ts';
+import { command } from '../src/runner/process.ts';
+import { cliCommand } from './cli-command.ts';
+import { config } from './helpers.ts';
 
 const temp = () => realpathSync(mkdtempSync(join(tmpdir(), 'devcontour-lease-row-')));
 const refused = (code: string) => (e: unknown) => e instanceof HarnessError && e.code === code;
@@ -179,7 +183,11 @@ for (const layout of ['central', 'component'] as const) {
     const after = stored(dir, layout);
     assert.equal(after.data, before.data, 'документ не переписан');
     assert.equal(store.version().revision, version.revision, 'ревизия данных прежняя');
-    assert.ok(store.version().lease > version.lease, 'растёт только счётчик сроков');
+    assert.equal(
+      store.version().lease,
+      version.lease,
+      'и счётчик сроков: он входит в ключ кэша документа',
+    );
     assert.equal(store.eventCount(), events, 'продление не пишет событий');
     assert.equal(after.rows[0].until, clock.now + policy.leaseMs);
     assert.equal(
@@ -283,7 +291,8 @@ for (const layout of ['central', 'component'] as const) {
     const a = engine.claim('controller-1')!;
     clock.now += 20_000;
     engine.heartbeat(a.id, a.token);
-    assert.equal(store.stepDownLeases(), 1);
+    // Шаг вниз — после остановки: роль и аренда уже истекли.
+    assert.equal(store.stepDownLeases(clock.now + policy.leaseMs * 2), 1);
     const down = stored(dir, layout);
     assert.deepEqual(down.rows, []);
     assert.equal(down.state.runs[0].leaseUntil, clock.now + policy.leaseMs);
@@ -324,4 +333,157 @@ test('миграция с ошибкой откатывает и строки, �
   );
   store.close();
   assert.equal(stored(dir, 'central').data, before, 'ни изменения, ни метки — документ как был');
+});
+
+/** Счётчик разборов документа `Store` (центральное хранение). */
+function countParses() {
+  const proto = Store.prototype as unknown as { parseDocument: (text: string) => unknown };
+  const original = proto.parseDocument;
+  let count = 0;
+  proto.parseDocument = function (this: unknown, text: string) {
+    count++;
+    return original.call(this, text);
+  };
+  return {
+    get count() {
+      return count;
+    },
+    restore: () => (proto.parseDocument = original),
+  };
+}
+
+test('продление не заставляет следующее чтение разбирать документ заново', () => {
+  // Ловит F46 «повторный разбор при следующем чтении»: продление, которое
+  // меняет ключ кэша документа (счётчик сроков), — и каждый такт очереди
+  // после него разбирал бы документ в десятки мегабайт.
+  const dir = temp();
+  const { store, adapter, engine, clock } = engineOver(dir, 'central');
+  const a = engine.claim('controller-1')!;
+  engine.heartbeat(a.id, a.token); // полная проверка: документ в кэше версии
+  store.view();
+  store.readShared();
+  const parses = countParses();
+  try {
+    for (let i = 0; i < 3; i++) {
+      clock.now += 10_000;
+      engine.heartbeat(a.id, a.token);
+      store.view();
+      store.readShared();
+      adapter.read((v) => v.attempt(a.id));
+    }
+    assert.equal(parses.count, 0, 'продления и чтения после них документ не разбирали');
+  } finally {
+    parses.restore();
+  }
+  assert.equal(
+    store.view().runs.find((r) => r.id === a.id)?.leaseUntil,
+    clock.now + policy.leaseMs,
+    'и видят продлённый срок',
+  );
+  adapter.close();
+});
+
+test('отмена попытки изменением продукта: следующее продление отказывает', () => {
+  // Ловит: строка аренды, пережившая конец попытки, записанный не движком,
+  // а изменением продукта (`Store.change`), — отменённая попытка
+  // продлевалась бы.
+  const dir = temp();
+  const { store, adapter, engine, clock } = engineOver(dir, 'central');
+  const a = engine.claim('controller-1')!;
+  engine.heartbeat(a.id, a.token);
+  store.change('task.cancelled', (s) => {
+    const run = s.runs.find((r) => r.id === a.id)!;
+    run.status = 'cancelled';
+    run.finishedAt = new Date(clock.now).toISOString();
+    return { runId: a.id };
+  });
+  assert.deepEqual(stored(dir, 'central').rows, [], 'строка удалена той же транзакцией');
+  clock.now += 1_000;
+  assert.throws(() => engine.heartbeat(a.id, a.token), refused('LEASE_STALE'));
+  adapter.close();
+});
+
+test('запись, не изменившая документ, не переносит сроки прежней версии', () => {
+  // Ловит: миграцию без записи документа — метка без изменения, которое
+  // её несёт, или запись базы прежней версии транзакцией, ничего не менявшей.
+  const dir = temp();
+  const { adapter, engine } = engineOver(dir, 'central');
+  const a = engine.claim('controller-1')!;
+  adapter.close();
+  const db = new DatabaseSync(join(dir, 'state.sqlite'));
+  const state = JSON.parse(
+    (db.prepare('SELECT data FROM state WHERE id=1').get() as { data: string }).data,
+  ) as DevContourState;
+  state.runs[0].leaseUntil = a.leaseUntil;
+  db.prepare('UPDATE state SET data=? WHERE id=1').run(JSON.stringify(state));
+  db.exec('DROP TABLE leases');
+  db.close();
+  const before = stored(dir, 'central').data;
+  const store = new Store(join(dir, 'state.sqlite'));
+  store.change('board.renamed', (s) => {
+    s.boards[0].title = s.boards[0].title; // то же значение
+    return {};
+  });
+  store.close();
+  const after = stored(dir, 'central');
+  assert.equal(after.data, before, 'документ прежний');
+  assert.deepEqual(after.rows, [], 'строк нет');
+});
+
+test('продление отказывает на документе, который эта версия не читает', () => {
+  // Ловит: продление строкой без проверки формата — более новая версия,
+  // переписавшая документ, не остановила бы продления этой.
+  const dir = temp();
+  const { adapter, engine, clock } = engineOver(dir, 'central');
+  const a = engine.claim('controller-1')!;
+  const db = new DatabaseSync(join(dir, 'state.sqlite'));
+  const state = JSON.parse(
+    (db.prepare('SELECT data FROM state WHERE id=1').get() as { data: string }).data,
+  ) as Record<string, unknown>;
+  db.prepare('UPDATE state SET data=? WHERE id=1').run(JSON.stringify({ ...state, version: 2 }));
+  db.close();
+  const row = () => stored(dir, 'central').rows[0]?.until;
+  const before = row();
+  clock.now += 1_000;
+  assert.throws(() => engine.heartbeat(a.id, a.token), /Unsupported state version/);
+  assert.equal(row(), before, 'строка не продлена');
+  adapter.close();
+});
+
+test('шаг вниз отказывает при живой роли controller и действующей аренде', () => {
+  // Ловит: шаг вниз под работающим serve (проверка и шаг — разные
+  // транзакции) — процесс этой версии продолжил бы попытку, чьей строки
+  // больше нет, а прежняя версия получила бы живую попытку.
+  const dir = temp();
+  const { store, adapter, engine, clock } = engineOver(dir, 'central');
+  engine.claim('controller-1');
+  let before = stored(dir, 'central').data;
+  assert.throws(() => store.stepDownLeases(clock.now), /остановите serve/);
+  assert.equal(stored(dir, 'central').data, before, 'отказ ничего не записал');
+  engine.release('controller-1');
+  before = stored(dir, 'central').data;
+  assert.throws(() => store.stepDownLeases(clock.now), /под арендой/);
+  assert.equal(stored(dir, 'central').data, before, 'отказ ничего не записал');
+  assert.equal(stored(dir, 'central').rows.length, 1);
+  adapter.close();
+});
+
+test('CLI storage-step-down отказывает, пока controller жив', async () => {
+  // Ловит: команду, которая снимает строки под работающим serve.
+  const root = temp();
+  const repo = join(root, 'repo');
+  const data = join(root, 'data');
+  mkdirSync(repo);
+  mkdirSync(data);
+  execFileSync('git', ['init', '-q', '-b', 'main', repo]);
+  writeFileSync(join(data, 'config.json'), JSON.stringify(config({ repository: repo })));
+  const store = new Store(join(data, 'state.sqlite'));
+  store.update('controller.acquired', (draft) => {
+    draft.leader = { owner: 'serve-1', leaseUntil: Date.now() + 60_000 };
+    return {};
+  });
+  store.close();
+  const result = await command([...cliCommand(), 'storage-step-down', '--data', data], root);
+  assert.notEqual(result.code, 0, result.stdout);
+  assert.match(result.stderr, /остановите serve/);
 });

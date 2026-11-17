@@ -921,11 +921,7 @@ async function main() {
       config.storage === 'component' ? repositories(config) : undefined,
     );
     try {
-      const leader = down.read().leader;
-      if (leader && leader.leaseUntil > Date.now())
-        throw new Error(
-          `Очередь ведёт controller ${leader.owner}: остановите serve перед шагом вниз`,
-        );
+      // Живую роль controller и действующие аренды проверяет та же транзакция.
       const moved = down.stepDownLeases();
       console.log(JSON.stringify({ status: 'stepped-down', attempts: moved }));
     } finally {

@@ -657,6 +657,19 @@ export class Store {
     now: number,
   ): boolean {
     if (!this.transaction) throw new Error('Продление аренды требует открытой транзакции');
+    // Документ, который эта версия не читает (например, записанный более
+    // новой), — отказ до записи и у продления. Разбор только при смене
+    // версии данных: центральное хранение берёт документ из кэша версии
+    // (`document`), компонентное разбирает его, если с прошлой проверки
+    // базу меняли. Продления одного процесса документ не разбирают.
+    if (!this.components) this.document().frozen();
+    else {
+      const key = this.versionKey();
+      if (key !== this.leaseCheckedKey) {
+        this.storedState();
+        this.leaseCheckedKey = key;
+      }
+    }
     for (const schema of this.schemas()) {
       if (!this.hasLeaseTable(schema)) continue;
       const changed = this.db
@@ -664,14 +677,21 @@ export class Store {
           `UPDATE ${schema}.leases SET until=? WHERE kind='attempt' AND id=? AND token=? AND owner=? AND engine=? AND until>?`,
         )
         .run(until, id, token, owner, engine, now).changes;
-      if (changed === 1) {
-        this.bump('lease');
-        return true;
-      }
+      // Счётчик сроков не растёт: он входит в ключ кэша документа, и каждое
+      // продление заставило бы следующее чтение разбирать документ заново.
+      // Срок попытки накладывается из строки при каждом чтении.
+      if (changed === 1) return true;
     }
     return false;
   }
-  /** База строки аренды попытки: база её задачи (как у документа попытки). */
+  /** Ключ версии, на которой продление последний раз проверило документ (компоненты). */
+  private leaseCheckedKey?: string;
+  /**
+   * База строки аренды попытки: база её задачи (как у документа попытки,
+   * `ComponentStorage.owner`). Если бы владелец задачи менялся при идущей
+   * попытке, строка осталась бы и в прежней базе. Это недостижимо: правка
+   * задачи с идущей попыткой отклоняется, а владелец попытки — её задача.
+   */
   private leaseSchema(run: RunState, state: DevContourState) {
     if (!this.components) return 'main';
     const owner = state.tasks.find(
@@ -708,10 +728,24 @@ export class Store {
    * Следующая запись документа этой версией при активных попытках снова
    * перенесёт их сроки в строки.
    */
-  stepDownLeases(): number {
+  stepDownLeases(at = Date.now()): number {
     return this.atomic(() => {
       const state = this.storedState();
       const rows = this.leaseRows();
+      // Проверка и шаг вниз — одна транзакция: serve, запущенный между ними,
+      // не прошёл бы незамеченным. Живая роль controller или ещё действующая
+      // аренда попытки (процесс этой версии ведёт попытку и без роли) —
+      // отказ до записи.
+      const leader = effectiveLeader(state.leader, controllerRow(this.db));
+      if (leader && leader.leaseUntil > at)
+        throw new Error(
+          `Очередь ведёт controller ${leader.owner}: остановите serve перед шагом вниз`,
+        );
+      const live = [...rows.values()].filter((r) => r.until > at).map((r) => r.id);
+      if (live.length)
+        throw new Error(
+          `Попытки ещё под арендой (${live.join(', ')}): остановите процесс, который их ведёт, и дождитесь истечения срока`,
+        );
       let moved = 0;
       for (const run of state.runs)
         if (run.leaseUntil === ROW_LEASE) {
@@ -722,7 +756,8 @@ export class Store {
       for (const schema of this.schemas())
         if (this.hasLeaseTable(schema))
           this.db.prepare(`DELETE FROM ${schema}.leases WHERE kind='attempt'`).run();
-      if (moved || rows.size) this.bump('lease');
+      // Документ переписан: кэши читателей (панель) перечитывают его.
+      if (moved || rows.size) this.bump('data');
       return moved;
     });
   }
