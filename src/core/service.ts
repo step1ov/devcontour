@@ -597,16 +597,41 @@ function activeRevision(s: DevContourState, id: string) {
  * гейты и принятый SHA. Гейты в specDigest не входят — они часть политики, —
  * но ревьюер их видел, и их смена меняет то, на что опирается план.
  */
-export const dependencyDigest = (t: Task) =>
-  digest({ spec: specDigest(t), status: t.status, gates: t.gates, resultSha: t.resultSha });
+/**
+ * Исход внешней зависимости, на который опирается ревью плана: ход ещё не
+ * завершённой задачи (draft → ready → … → integrating) смысла плана не
+ * меняет, провал и отмена — меняют (F56).
+ */
+const outcome = (t: Task) =>
+  t.status === 'done' || t.status === 'failed' || t.status === 'cancelled' ? t.status : 'pending';
+/**
+ * Смысловые данные внешней зависимости, показанной ревью плана.
+ * `asPending` — та же задача до завершения: так сверка узнаёт, что
+ * зависимость лишь дошла до `done` по прежней постановке (см. `pinnedHolds`).
+ */
+export const dependencyDigest = (t: Task, asPending = false) =>
+  digest({
+    spec: specDigest(t),
+    outcome: asPending ? 'pending' : outcome(t),
+    gates: t.gates,
+    resultSha: asPending ? undefined : t.resultSha,
+  });
 /** Смысловые данные задачи, показанной ревью плана как контекст. */
-export const contextDigest = (t: Task) =>
+export const contextDigest = (t: Task, asPending = false) =>
   digest({
     spec: specDigest(t),
     gates: t.gates,
-    resultSha: t.resultSha,
+    resultSha: asPending ? undefined : t.resultSha,
     cancelled: t.status === 'cancelled',
   });
+/**
+ * Закреплённое ревью плана состояние задачи всё ещё верно (F56): совпадает
+ * с нынешним или задача с тех пор только завершилась (`done`) по той же
+ * постановке и гейтам. Утверждение строилось на её будущем результате;
+ * выбрасывать оплаченное ревью из-за ожидаемого завершения незачем.
+ */
+const pinnedHolds = (pinned: string, t: Task, of: (t: Task, asPending?: boolean) => string) =>
+  of(t) === pinned || (t.status === 'done' && of(t, true) === pinned);
 /**
  * Задача принятой ревизии неизменяема: следующий этап и корректировка несут
  * её как принятую работу. Вернуть её в работу (reopen, retry) значило бы
@@ -1738,10 +1763,10 @@ export class DevContour {
         (expected.revision !== r.number ||
           (expected.reason !== undefined && expected.reason !== r.reason) ||
           Object.entries(expected.dependencies ?? {}).some(
-            ([id, pinned]) => dependencyDigest(task(s, id)) !== pinned,
+            ([id, pinned]) => !pinnedHolds(pinned, task(s, id), dependencyDigest),
           ) ||
           Object.entries(expected.context ?? {}).some(
-            ([id, pinned]) => contextDigest(task(s, id)) !== pinned,
+            ([id, pinned]) => !pinnedHolds(pinned, task(s, id), contextDigest),
           ) ||
           Object.entries(expected.policies ?? {}).some(
             ([id, pinned]) => this.policyDigest(id) !== pinned,

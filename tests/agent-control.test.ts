@@ -516,6 +516,52 @@ test('Смена только гейтов показанной зависимо
   }
 });
 
+// F56: зависимость, лишь дошедшая до done по прежней постановке, утверждение
+// не отменяет; провал или отмена зависимости — отменяет.
+for (const [end, holds] of [
+  ['done', true],
+  ['failed', false],
+  ['cancelled', false],
+] as const)
+  test(`Внешняя зависимость стала ${end} во время ревью — утверждение ${holds ? 'остаётся' : 'отменяется'} (F56)`, async () => {
+    const f = fixture();
+    try {
+      f.h.config.mode = 'local';
+      const { boardId } = f.h.importPlan({
+        title: 'Release',
+        description: 'Цель',
+        tasks: [
+          { ...input('Schema fix'), key: 'a', dependsOn: [], contracts: [] },
+          { ...input('Engine work'), key: 'b', dependsOn: ['a'], contracts: [] },
+        ],
+      });
+      const [schema, engine] = f.store.read().tasks;
+      const review = reviewPlan(
+        f.h,
+        f.root,
+        boardId,
+        'codex',
+        runtimes(() =>
+          f.store.change('test.dependency-finished', (s) => {
+            const t = s.tasks.find((x) => x.id === schema.id)!;
+            t.status = end;
+            if (end === 'done') t.resultSha = 'a'.repeat(40);
+          }),
+        ),
+        () => {},
+        [engine.id],
+      );
+      if (holds) await review;
+      else await assert.rejects(review, /План изменился/);
+      assert.equal(
+        f.store.read().tasks.find((t) => t.id === engine.id)!.status,
+        holds ? 'ready' : 'draft',
+      );
+    } finally {
+      f.cleanup();
+    }
+  });
+
 test('Смена цели этапа во время ревью отменяет утверждение', async () => {
   const f = fixture();
   try {
