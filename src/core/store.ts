@@ -664,7 +664,20 @@ export class Store {
     // базу меняли. Продления одного процесса документ не разбирают.
     if (!this.components) this.document().frozen();
     else {
-      const key = this.versionKey();
+      // Ключ — версия main и `data_version` каждой базы компонента: запись
+      // другого соединения только в базу компонента (сегодня так не пишет
+      // никто — любая запись документа переписывает и main.state, и
+      // main.revision) тоже ведёт к разбору.
+      const key = [
+        this.versionKey(),
+        ...this.schemas()
+          .slice(1)
+          .map(
+            (schema) =>
+              (this.db.prepare(`PRAGMA ${schema}.data_version`).get() as { data_version: number })
+                .data_version,
+          ),
+      ].join(':');
       if (key !== this.leaseCheckedKey) {
         this.storedState();
         this.leaseCheckedKey = key;

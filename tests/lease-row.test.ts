@@ -430,25 +430,41 @@ test('запись, не изменившая документ, не перен�
   assert.deepEqual(after.rows, [], 'строк нет');
 });
 
-test('продление отказывает на документе, который эта версия не читает', () => {
-  // Ловит: продление строкой без проверки формата — более новая версия,
-  // переписавшая документ, не остановила бы продления этой.
-  const dir = temp();
-  const { adapter, engine, clock } = engineOver(dir, 'central');
-  const a = engine.claim('controller-1')!;
-  const db = new DatabaseSync(join(dir, 'state.sqlite'));
-  const state = JSON.parse(
-    (db.prepare('SELECT data FROM state WHERE id=1').get() as { data: string }).data,
-  ) as Record<string, unknown>;
-  db.prepare('UPDATE state SET data=? WHERE id=1').run(JSON.stringify({ ...state, version: 2 }));
-  db.close();
-  const row = () => stored(dir, 'central').rows[0]?.until;
-  const before = row();
-  clock.now += 1_000;
-  assert.throws(() => engine.heartbeat(a.id, a.token), /Unsupported state version/);
-  assert.equal(row(), before, 'строка не продлена');
-  adapter.close();
-});
+for (const [layout, target] of [
+  ['central', 'main'],
+  ['component', 'main'],
+  ['component', 'component'],
+] as const)
+  test(`${layout}: продление строкой отказывает на документе (${target}), который эта версия не читает`, () => {
+    // Ловит: продление строкой без проверки формата — более новая версия,
+    // переписавшая документ после того, как продления пошли быстрым путём
+    // (без полной проверки), не остановила бы их. Сначала два продления:
+    // полная проверка и быстрый путь; затем документ меняет другое
+    // соединение, и следующее продление (снова быстрый путь: ревизия данных
+    // та же, срок полной проверки не прошёл) обязано отказать.
+    const dir = temp();
+    const { adapter, engine, clock } = engineOver(dir, layout);
+    const a = engine.claim('controller-1')!;
+    engine.heartbeat(a.id, a.token);
+    clock.now += 1_000;
+    engine.heartbeat(a.id, a.token);
+    const file =
+      target === 'component'
+        ? runFile(dir, 'component')
+        : join(dir, layout === 'central' ? 'state.sqlite' : 'coordinator.sqlite');
+    const db = new DatabaseSync(file);
+    const state = JSON.parse(
+      (db.prepare('SELECT data FROM state WHERE id=1').get() as { data: string }).data,
+    ) as Record<string, unknown>;
+    db.prepare('UPDATE state SET data=? WHERE id=1').run(JSON.stringify({ ...state, version: 2 }));
+    db.close();
+    const row = () => stored(dir, layout).rows[0]?.until;
+    const before = row();
+    clock.now += 1_000;
+    assert.throws(() => engine.heartbeat(a.id, a.token), /Unsupported state version/);
+    assert.equal(row(), before, 'строка не продлена');
+    adapter.close();
+  });
 
 test('шаг вниз отказывает при живой роли controller и действующей аренде', () => {
   // Ловит: шаг вниз под работающим serve (проверка и шаг — разные
