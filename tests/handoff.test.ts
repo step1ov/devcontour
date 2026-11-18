@@ -1961,3 +1961,65 @@ test('session_handoff: остановка «база прогонов отста
     f.cleanup();
   }
 });
+
+test('session_handoff: упавшее задание доски, все задачи которой отменены, — не шаг; шаг — действующее задание другой доски', () => {
+  for (const order of ['fail-then-cancel', 'cancel-then-fail'] as const)
+    for (const findings of [false, true]) {
+      const f = fixture();
+      try {
+        const flow = new LeadWorkflow(f.h);
+        // Доска, план которой заменён другой доской: черновики отменены ведущим.
+        const dead = f.h.createBoard('Replaced plan', '', 'main');
+        const drafts = ['First draft', 'Second draft'].map(
+          (t) => f.h.addTask(dead.id, input(t)).id,
+        );
+        const deadJob = flow.start({
+          kind: 'board',
+          id: dead.id,
+          authorRuntime: 'codex',
+          maxAttempts: 3,
+        });
+        const cancel = () => {
+          for (const id of drafts) f.h.cancel(id, 'Replaced by another board', 'host');
+        };
+        if (order === 'cancel-then-fail') cancel();
+        flow.fail(flow.claim(deadJob.key, deadJob.owner)!, 'plan review runtime unavailable');
+        if (order === 'fail-then-cancel') cancel();
+        // Давняя доска находок: решение о плане вне текущей работы.
+        let finding: string | undefined;
+        if (findings) {
+          const board = f.h.createBoard('Findings', '', 'main');
+          f.h.addTask(board.id, input('Old approved task'));
+          f.h.approve(board.id);
+          finding = f.h.addTask(board.id, input('Finding')).id;
+        }
+        // Доска, заменившая прежнюю, с действующим заданием.
+        const live = f.h.createBoard('Replacement', '', 'main');
+        f.h.addTask(live.id, input('Replacement task'));
+        f.h.approve(live.id);
+        const liveJob = flow.start({
+          kind: 'board',
+          id: live.id,
+          authorRuntime: 'codex',
+          maxAttempts: 3,
+        });
+        const label = `${order}, findings ${findings}`;
+        const value = devcontourHandoff(f.h);
+        assert.deepEqual(value.host.liveBoards, [live.id], label);
+        if (finding) {
+          assert.equal(value.pack.next.action, 'review-plan', label);
+          assert.equal(value.pack.next.workId, finding, label);
+        }
+        const next = value.host.next;
+        assert.notEqual(next?.boardId, dead.id, label + ': ' + JSON.stringify(next));
+        assert.notEqual(next?.action, 'workflow_retry', label);
+        assert.equal(next?.boardId, live.id, label + ': ' + JSON.stringify(next));
+        assert.equal(next?.job?.key, liveJob.key, label);
+        // Ожидание действующего задания (снимает начальную паузу или ведёт стадию).
+        assert.equal(next?.action, 'wait', label);
+        assert.doesNotMatch(next.detail, new RegExp(deadJob.key), label);
+      } finally {
+        f.cleanup();
+      }
+    }
+});

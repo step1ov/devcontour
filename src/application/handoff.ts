@@ -688,6 +688,27 @@ function boardDraft(boardId: string, ctx: HostContext): HostNextDraft | undefine
       params: { stage },
     };
   }
+  const job = jobs.find((j) => ctx.current(j));
+  const error = job?.error ? { error: job.error } : {};
+  // Все задачи ревизии отменены (план брошен или заменён другой доской):
+  // повтор задания, его старт или вход доски ничего не продвинут — цикл лишь
+  // попробовал бы принять доску, которую принять нельзя. Шаг остаётся только
+  // у задания, стоящего на задаче, отменённой после выдачи (D46): его
+  // законные пути — повтор задачи или новая ревизия доски.
+  if (done?.tasks.length && done.tasks.every((t) => t.status === 'cancelled')) {
+    if (job?.status !== 'failed') return undefined;
+    const { outlook: loop } = loopAhead(h, state, { ...asLead(job), status: 'queued' });
+    const cancelled = cancelledStop(boardId, ctx, job, loop, error);
+    if (!cancelled || job.attempts < job.maxAttempts) return cancelled;
+    return {
+      action: 'decide',
+      decision: 'job',
+      boardId,
+      job: jobRef(job),
+      code: 'job-exhausted',
+      params: error,
+    };
+  }
   const refused = ctx.inputError(boardId);
   if (refused)
     return {
@@ -696,8 +717,6 @@ function boardDraft(boardId: string, ctx: HostContext): HostNextDraft | undefine
       code: 'input-refused',
       params: { reason: refused },
     };
-  const job = jobs.find((j) => ctx.current(j));
-  const error = job?.error ? { error: job.error } : {};
   if (job?.status === 'failed') {
     // Повтор задания — тот же такт цикла по состоянию сейчас.
     const { outlook: loop } = loopAhead(h, state, { ...asLead(job), status: 'queued' });
@@ -1067,7 +1086,9 @@ function hostNext(ctx: HostContext): HandoffHostNext | undefined {
   // остановку, и черновик ранней доски заслонял блокеры живой работы: ответ
   // на вопрос исполнителя, который ждёт применения, и упавшее задание доски.
   // Они — раньше решения о плане.
-  if (step?.decision === 'plan') return liveBlocker(ctx) ?? step;
+  // Действующее задание другой доски — тоже раньше: решение о плане не
+  // срочнее работы других досок (`rank`), и шаг называет, что идёт сейчас.
+  if (step?.decision === 'plan') return liveBlocker(ctx) ?? liveJobStep(ctx, step.boardId) ?? step;
   // Перенос ответа — раньше шагов очереди и ожидания (`rank` больше 0): они
   // выдали бы задачу без ответа. Решения о задании, вопросы и режим
   // оператора — прежде переноса.
@@ -1089,6 +1110,22 @@ function hostNext(ctx: HostContext): HandoffHostNext | undefined {
   )
     return carry;
   return step ?? followUpNext(ctx);
+}
+
+/**
+ * Шаг действующего задания доски в области пакета, кроме доски `except`:
+ * ожидание его стадии или решение по нему — что ведущему делать сейчас,
+ * пока решение о плане другой доски (о будущем объёме) ждёт.
+ */
+function liveJobStep(ctx: HostContext, except: string | undefined): HandoffHostNext | undefined {
+  const { pack } = ctx;
+  const boards = [...new Set(ctx.jobs.filter(ctx.live).map((j) => j.id))].filter(
+    (id) => id !== except && (!pack.graphId || id === pack.graphId),
+  );
+  return boards
+    .map((id) => boardStep(id, ctx))
+    .filter((x): x is HandoffHostNext => !!x && x.decision !== 'plan' && !!x.job)
+    .sort((a, b) => rank(a) - rank(b))[0];
 }
 
 /**
