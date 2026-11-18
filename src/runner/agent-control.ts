@@ -3,7 +3,7 @@ import { attemptNumbers } from '../core/attempt-numbers.ts';
 import { clipAtBoundary } from '../core/clip.ts';
 import { reviewExecutionOf, toDomain } from '../harness/execution.ts';
 import { runtimeAdapters } from '../harness/adapters.ts';
-import { carriedTaskIds } from '../core/work-status.ts';
+import { carriedTaskIds, shutdownInterrupted } from '../core/work-status.ts';
 import { boardOwner } from '../core/sync-state.ts';
 import { mkdir, writeFile, readFile, realpath } from 'node:fs/promises';
 import { dirname, join, resolve, sep } from 'node:path';
@@ -31,6 +31,7 @@ import {
   CONTRACT_CONTENT_WARN,
   DomainError,
   relativePath,
+  type Run,
 } from '../core/model.ts';
 import { adapters, type AgentAdapter } from './adapters.ts';
 import { declaredRoles, repositories, repository, requiresContract } from '../core/repositories.ts';
@@ -948,6 +949,14 @@ type HistoryTask = {
  * `ATTEMPT_HISTORY_MAX_CHARS`: сверх него сначала отбрасываются тексты
  * отказов, затем ранние попытки (`truncated`).
  */
+/** Попытка в истории ревьюеру: прерванная остановкой сервера — `interrupted`, без класса. */
+type HistoryRun = {
+  number: number;
+  attempt: number;
+  status: Run['status'] | 'interrupted';
+  failureKind?: Run['failureKind'];
+  error?: string;
+};
 export function attemptHistory(
   state: ReturnType<DevContour['store']['read']>,
   drafts: HistoryTask[],
@@ -966,11 +975,14 @@ export function attemptHistory(
     ...(t.restartBlocked ? { restartBlocked: t.restartBlocked } : {}),
     runs: runsOf(t.id)
       .slice(-keep)
-      .map((r) => ({
+      .map((r): HistoryRun => ({
         number: numbers.get(r.id)!,
         attempt: r.attempt,
-        status: r.status,
-        ...(r.failureKind ? { failureKind: r.failureKind } : {}),
+        // Прерванная остановкой сервера — не провал (класс `environment` не
+        // про постановку): ревьюер видит её как прерванную.
+        ...(shutdownInterrupted(r)
+          ? { status: 'interrupted' as const }
+          : { status: r.status, ...(r.failureKind ? { failureKind: r.failureKind } : {}) }),
         ...(withText && r.error ? { error: r.error.slice(0, 300) } : {}),
       })),
   });

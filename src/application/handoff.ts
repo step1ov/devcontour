@@ -41,7 +41,13 @@ import {
   type LoopOutlook,
 } from '../runner/lead-outlook.ts';
 import { repositories } from '../core/repositories.ts';
-import { heldBaseOf, leadLiftsPause, pausedByLead, staleBaseStop } from '../core/work-status.ts';
+import {
+  heldBaseOf,
+  leadLiftsPause,
+  pausedByLead,
+  shutdownInterrupted,
+  staleBaseStop,
+} from '../core/work-status.ts';
 import { executionOf, toDomain } from '../harness/execution.ts';
 import { resolveIdPrefix } from '../core/id-prefix.ts';
 import type { DevContourExecutionStore } from '../harness/store.ts';
@@ -379,6 +385,38 @@ export function withoutIdleControllerStop(pack: HandoffPack): HandoffPack {
   // Остановку отбросил предел пакета: она — среди `truncated.stops`.
   if (!pack.truncated.stops) return pack;
   return { ...pack, truncated: { ...pack.truncated, stops: pack.truncated.stops - 1 } };
+}
+
+/**
+ * Попытки, прерванные штатной остановкой controller (`shutdownInterrupted`),
+ * пакет harness перечисляет среди провалов: они хранятся как `failed`
+ * (класс `environment`). Это не провал — попытка не засчитана, задача снова
+ * в очереди, — и ведущий не должен разбирать её как отказ. Счёт отброшенных
+ * пределом провалов уменьшается на прерванные, которых в списке не было.
+ */
+export function withoutShutdownFailures(
+  pack: HandoffPack,
+  runs: readonly Pick<DevContourState['runs'][number], 'id' | 'status' | 'interrupted'>[],
+): HandoffPack {
+  const interrupted = new Set(runs.filter(shutdownInterrupted).map((r) => r.id));
+  if (!interrupted.size) return pack;
+  const failures = pack.failures.filter((f) => !interrupted.has(f.runId));
+  const shown = pack.failures.length - failures.length;
+  const hidden = Math.max(0, interrupted.size - shown);
+  if (!shown && !hidden) return pack;
+  const truncated = pack.truncated.failures
+    ? { ...pack.truncated, failures: Math.max(0, pack.truncated.failures - hidden) }
+    : pack.truncated;
+  return { ...pack, failures, truncated };
+}
+
+/** Попытки задач пакета: всего workspace или одной доски (граф пакета — доска). */
+function scopedRuns(state: DevContourState, graphId?: string) {
+  if (graphId === undefined) return state.runs;
+  const ids = new Set(
+    state.boards.find((b) => b.id === graphId)?.revisions.flatMap((r) => r.taskIds) ?? [],
+  );
+  return state.runs.filter((r) => ids.has(r.taskId));
 }
 
 /** Предел строки факта пакета harness (`HANDOFF_LIMITS.text`). */
@@ -1405,7 +1443,10 @@ export function devcontourHandoffWithin(
       const packOf = (options: Parameters<typeof handoffPack>[1]) =>
         withStaleBaseStop(
           withHeldBaseStop(
-            withoutIdleControllerStop(handoffPack(packSource, options)),
+            withoutShutdownFailures(
+              withoutIdleControllerStop(handoffPack(packSource, options)),
+              scopedRuns(state, options?.graphId),
+            ),
             state,
             options?.redact,
             full.queueStop,

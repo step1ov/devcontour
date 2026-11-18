@@ -51,7 +51,7 @@ import { inputReviewRounds } from '../harness/input-host.ts';
 import { DiscussionService } from './discussion.ts';
 import { taskOwner } from '../core/sync-state.ts';
 import { baseWaitOf, queueStopOf, quietAttempts, quietOperations } from './queue-stop.ts';
-import { heldBaseOf, pausedByLead } from '../core/work-status.ts';
+import { heldBaseOf, pausedByLead, shutdownInterrupted } from '../core/work-status.ts';
 import type { DevContour } from '../core/service.ts';
 import type { Store } from '../core/store.ts';
 import type { DevContourState, Task } from '../core/model.ts';
@@ -2410,7 +2410,8 @@ workSource.history = (ctx) => {
     for (const id of ids) resetsOf.set(id, [...(resetsOf.get(id) ?? []), e.at]);
   }
   return runs.flatMap((run): Resolved[] => {
-    if (run.status !== 'failed') return [];
+    // Прерванная остановкой сервера попытка — не сбой и карточкой не была.
+    if (run.status !== 'failed' || shutdownInterrupted(run)) return [];
     const task = ctx.state.tasks.find((t) => t.id === run.taskId);
     if (!task) return [];
     // Следующая попытка — по порядку выдачи: счётчик после перезапуска (D47)
@@ -2442,7 +2443,9 @@ workSource.history = (ctx) => {
     const mark = occurrenceMarkOf(marks[`work:${task.id}`], run.id);
     const marked = !!mark;
     const last =
-      ctx.state.runs.findLast((r) => r.taskId === task.id && r.status === 'failed')?.id === run.id;
+      ctx.state.runs.findLast(
+        (r) => r.taskId === task.id && r.status === 'failed' && !shutdownInterrupted(r),
+      )?.id === run.id;
     if (!marked && !(last && (accepted || cancelled))) return [];
     return [
       {
