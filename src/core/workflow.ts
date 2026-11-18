@@ -232,7 +232,7 @@ export function effectiveWriteArea(
   return [
     ...new Set(
       own.flatMap((path) =>
-        withinPaths(path, roleScope) ? [path] : roleScope.filter((p) => withinPaths(p, [path])),
+        insideFolded(path, roleScope) ? [path] : roleScope.filter((p) => insideFolded(p, [path])),
       ),
     ),
   ];
@@ -314,7 +314,7 @@ export function validateTaskContext(
     const area = effectiveWriteArea(config, task);
     for (const g of repository(config, task.repositoryId).generators ?? []) {
       const tools = g.tool.filter((t) => !area || area.some((a) => pathsOverlap(a, t)));
-      const foreign = g.outputs.filter((out) => !withinPaths(out, roleScope));
+      const foreign = g.outputs.filter((out) => !insideFolded(out, roleScope));
       if (tools.length && foreign.length)
         throw new DomainError(
           `Задача может изменить инструмент генератора ${g.id} (${tools.join(', ')}), а его выходы ` +
@@ -420,6 +420,17 @@ export function roleScopeAdvice(
   );
 }
 
+/**
+ * `withinPaths` без учёта регистра — как `pathsOverlap` harness: правила
+ * генераторов сравнивают пути одинаково, иначе выход `Apps/Mobile/…` при
+ * области роли `apps/mobile/` считался бы чужим (файловая система macOS
+ * регистр не различает).
+ */
+const insideFolded = (path: string, prefixes: string[]) =>
+  withinPaths(
+    path.toLowerCase(),
+    prefixes.map((p) => p.toLowerCase()),
+  );
 export const withinPaths = (path: string, prefixes: string[]) =>
   prefixes.some(
     (prefix) => path === prefix || path.startsWith(prefix.endsWith('/') ? prefix : prefix + '/'),

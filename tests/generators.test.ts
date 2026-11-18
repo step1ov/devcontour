@@ -4,20 +4,24 @@
 // плана и сквозной сценарий на реальном Git. Модели не вызываются.
 import { after, test } from 'node:test';
 import assert from 'node:assert/strict';
-import { mkdir, writeFile } from 'node:fs/promises';
+import { mkdir, mkdtemp, readFile, realpath, rm, writeFile } from 'node:fs/promises';
+import { tmpdir } from 'node:os';
 import { readFileSync } from 'node:fs';
 import { execFileSync } from 'node:child_process';
 import { join } from 'node:path';
-import { executionDigest } from 'devcontour-harness';
+import { Engine, executionDigest } from 'devcontour-harness';
 import { closePrevious, config, fixture, input } from './helpers.ts';
 import { demoPool, testDemo } from './demo-pool.ts';
-import { configSchema, repositorySchema, type Config } from '../src/core/model.ts';
-import { DevContour } from '../src/core/service.ts';
+import { configSchema, type Config } from '../src/core/model.ts';
+import { DevContour, loadedDigest } from '../src/core/service.ts';
+import { DevContourExecutionStore } from '../src/harness/store.ts';
+import { devcontourHost, projectionOptions } from '../src/harness/host.ts';
 import { Store } from '../src/core/store.ts';
 import { validateTaskContext, validateWorkflow } from '../src/core/workflow.ts';
 import { approvalPolicyDigest, policyFromConfig } from '../src/harness/policy.ts';
 import { reviewPlan } from '../src/runner/agent-control.ts';
 import { loadConfig } from '../src/runner/config.ts';
+import { setupWorkspace } from '../src/runner/workspace-setup.ts';
 import { Scheduler } from '../src/runner/scheduler.ts';
 import { updateBase } from '../src/runner/base-update.ts';
 import { git } from '../src/runner/process.ts';
@@ -139,6 +143,14 @@ test('Постановка: задача, чья область записи з�
   validateTaskContext(c, task('admin', ['apps/admin/data/']));
   // Владелец выходов правит инструмент — выходы в его области.
   validateTaskContext(c, task('mobile', ['scripts/']));
+  // Регистр путей не делает выходы владельца чужими.
+  validateTaskContext(
+    withComponent(
+      { generators: [{ ...shared, outputs: ['Apps/Mobile/src/generated/catalog.ts'] }] },
+      { roles: c.roles },
+    ),
+    task('mobile', ['scripts/']),
+  );
   // Роль без области пишет весь репозиторий: выходы в её области.
   validateTaskContext(c, task('lead'));
   // История (импорт sync) не перепроверяется по генераторам, объявленным позже.
@@ -267,40 +279,60 @@ writeFileSync(process.env.DEVCONTOUR_REPORT_PATH, '<testsuite><testcase name="ca
 test('Реальный Git: правка данных роли admin даёт коммит с перестроенным выходом в области mobile, общий gate зелёный', async () => {
   const seed = await demos.acquire();
   const { root } = seed;
-  const loaded = loadConfig(join(root, 'config.json'));
-  const repo = loaded.repository;
-  // Процесс фиксирует происхождение конфигурации при создании; дальше тест
-  // меняет загруженный объект, как conditional-gates.
-  const store = new Store(join(root, 'state.sqlite'));
-  const h = new DevContour(store, loaded);
+  const configPath = join(root, 'config.json');
+  const demo = loadConfig(configPath);
+  const repo = demo.repository;
   await mkdir(join(repo, 'apps/admin/data'), { recursive: true });
   await mkdir(join(repo, 'apps/mobile/scripts'), { recursive: true });
   await writeFile(join(repo, DATA), JSON.stringify([{ id: 'a', title: 'Alpha' }]) + '\n');
   await writeFile(join(repo, TOOL), GENERATOR);
   await writeFile(join(repo, 'unit.mjs'), CHECK);
+  // Генераторы — поле верхнего уровня файла компонента, как у встроенного
+  // размещения: загрузчик переносит поля файла в запись компонента.
+  const gates = [{ ...unit, command: [process.execPath, 'unit.mjs'], timeoutMs: 60_000 }];
+  await writeFile(
+    join(repo, 'devcontour.component.json'),
+    JSON.stringify(
+      {
+        name: demo.name,
+        targetBranch: demo.targetBranch,
+        gates,
+        protectedPaths: [...demo.protectedPaths, 'unit.mjs'],
+        generators: [{ ...catalog, command: [process.execPath, TOOL] }],
+      },
+      null,
+      2,
+    ),
+  );
   await git(repo, 'add', '.');
-  await git(repo, 'commit', '-m', 'Catalog data, generator and check');
+  await git(repo, 'commit', '-m', 'Catalog data, generator, check and component file');
   // Выход закоммичен в согласии с данными: базовый SHA зелёный.
   execNode(repo, TOOL);
   await git(repo, 'add', '.');
   await git(repo, 'commit', '-m', 'Generated catalog');
-  await git(repo, 'update-ref', 'refs/heads/' + loaded.targetBranch, 'HEAD');
-  const c = loaded;
-  const gates = [{ ...unit, command: [process.execPath, 'unit.mjs'], timeoutMs: 60_000 }];
-  c.roles = roles;
-  c.gates = gates;
-  c.repositories = [
-    repositorySchema.parse({
-      id: 'main',
-      name: loaded.name,
-      path: repo,
-      targetBranch: loaded.targetBranch,
-      gates,
-      protectedPaths: [...loaded.protectedPaths, 'unit.mjs'],
-      generators: [{ ...catalog, command: [process.execPath, TOOL] }],
-    }),
-  ];
-  validateWorkflow(c);
+  await git(repo, 'update-ref', 'refs/heads/' + demo.targetBranch, 'HEAD');
+  const raw = JSON.parse(readFileSync(configPath, 'utf8')) as Record<string, unknown>;
+  await writeFile(
+    configPath,
+    JSON.stringify(
+      {
+        ...raw,
+        roles,
+        gates,
+        repositories: [{ id: 'main', path: repo, configFile: 'devcontour.component.json' }],
+      },
+      null,
+      2,
+    ),
+  );
+  const c = loadConfig(configPath);
+  assert.deepEqual(
+    c.repositories[0].generators?.map((g) => g.id),
+    ['catalog'],
+    'генераторы пришли из файла компонента',
+  );
+  const store = new Store(join(root, 'state.sqlite'));
+  const h = new DevContour(store, c);
   try {
     store.change('fixture.reset', (s) => {
       s.tasks = [];
@@ -373,3 +405,143 @@ function execNode(cwd: string, script: string) {
   // Генератор в seed — тот же скрипт, что исполнит controller.
   execFileSync(process.execPath, [script], { cwd });
 }
+
+test('Выдача: задача, утверждённая до генератора с её инструментом, не выдаётся; причина видна блокером', () => {
+  const f = fixture();
+  try {
+    const shared = { ...catalog, tool: ['scripts/gen-catalog.mjs'] };
+    f.h.config = withComponent(
+      {},
+      {
+        checkoutRoot: f.h.config.checkoutRoot,
+        repository: f.h.config.repository,
+        roles: {
+          admin: { runtime: 'demo', writePaths: ['apps/admin/', 'scripts/'] },
+          mobile: { runtime: 'demo', writePaths: ['apps/mobile/'] },
+        },
+      },
+    );
+    const { boardId } = f.h.importPlan({
+      title: 'Catalog tooling',
+      description: 'Скрипт каталога',
+      tasks: [
+        {
+          ...input('Catalog script'),
+          role: 'admin',
+          key: 'tool',
+          writePaths: ['scripts/'],
+          gates: ['unit'],
+          contracts: [],
+        },
+      ],
+    });
+    f.h.approve(boardId);
+    const [task] = f.store.read().tasks;
+    // Генератор объявлен после утверждения.
+    f.h.config.repositories[0].generators = [{ ...shared, timeoutMs: 120000 }];
+    const store = new DevContourExecutionStore(f.h.store, projectionOptions(f.h));
+    const engine = new Engine({
+      host: devcontourHost(f.h, store),
+      policy: policyFromConfig(f.h.config),
+      policyIdentity: loadedDigest(f.h.config),
+    });
+    engine.lead('controller');
+    engine.resume();
+    assert.equal(engine.claim('controller'), undefined, 'задача не выдана');
+    const blockers = engine.read((v) => engine.blockers(v.work(task.id)!, v));
+    assert.deepEqual(
+      blockers.map((b) => b.code),
+      ['APPROVAL_STALE', 'NOT_READY'],
+    );
+    assert.match(blockers[1].message, /инструмент генератора catalog/);
+    // Повторное утверждение проверяет постановку тем же правилом: задачу
+    // нужно переставить (роль или область записи), а не согласовать заново.
+    assert.throws(() => validateTaskContext(f.h.config, task), /инструмент генератора catalog/);
+  } finally {
+    f.cleanup();
+  }
+});
+
+test('workspace-init: generators реестра доходят до файлов компонентов и загруженной конфигурации', async () => {
+  const base = await realpath(await mkdtemp(join(tmpdir(), 'devcontour-generators-setup-')));
+  try {
+    const repo = (name: string) => join(base, name);
+    for (const name of ['admin-app', 'mobile-app']) {
+      await mkdir(join(repo(name), 'profiles'), { recursive: true });
+      await writeFile(
+        join(repo(name), 'profiles/main.json'),
+        JSON.stringify({ id: 'checks', version: '1.0.0', gates: [unit] }),
+      );
+    }
+    // Компонент с файлом: поле реестра, которого в файле нет, дописывается в файл.
+    await writeFile(
+      join(repo('mobile-app'), 'devcontour.component.json'),
+      JSON.stringify({ name: 'Mobile', kind: 'product' }),
+    );
+    for (const name of ['admin-app', 'mobile-app']) {
+      await git(repo(name), 'init', '-b', 'main');
+      await git(repo(name), 'add', '.');
+      await git(
+        repo(name),
+        '-c',
+        'user.name=Fixture',
+        '-c',
+        'user.email=fixture@example.invalid',
+        'commit',
+        '-m',
+        'Profile',
+      );
+    }
+    const control = join(base, 'control');
+    await mkdir(control);
+    const registry = join(control, 'workspace.json');
+    await writeFile(
+      registry,
+      JSON.stringify({
+        version: 1,
+        name: 'Generators',
+        repositories: [
+          {
+            id: 'admin',
+            name: 'Admin',
+            path: repo('admin-app'),
+            profile: './profiles/main.json',
+            generators: [catalog],
+          },
+          {
+            id: 'mobile',
+            name: 'Mobile',
+            path: repo('mobile-app'),
+            profile: './profiles/main.json',
+            configFile: 'devcontour.component.json',
+            generators: [catalog],
+          },
+        ],
+      }),
+    );
+    const result = await setupWorkspace(registry);
+    // Установка дописывает и значения профиля (gates, protectedPaths); здесь важны generators.
+    const added = ('added' in result ? result.added : undefined) ?? [];
+    assert.deepEqual(
+      added.map((a) => a.repositoryId),
+      ['mobile'],
+    );
+    assert.ok(added[0].keys.includes('generators'), added[0].keys.join(', '));
+    // Хранение по компонентам: config.json держит ссылки, поля — файлы компонентов
+    // (у admin его создаёт установка, у mobile дописывает недостающее).
+    for (const name of ['admin-app', 'mobile-app']) {
+      const file = JSON.parse(
+        await readFile(join(repo(name), 'devcontour.component.json'), 'utf8'),
+      ) as { generators?: unknown };
+      assert.deepEqual(file.generators, [{ ...catalog, timeoutMs: 120000 }], name);
+    }
+    const loaded = loadConfig(result.config);
+    for (const id of ['admin', 'mobile'])
+      assert.deepEqual(loaded.repositories.find((r) => r.id === id)?.generators, [
+        { ...catalog, timeoutMs: 120000 },
+      ]);
+  } finally {
+    // Только свой временный каталог.
+    await rm(base, { recursive: true, force: true });
+  }
+});
