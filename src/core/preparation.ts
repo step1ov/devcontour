@@ -90,7 +90,23 @@ function productScope(content: ProductBrief) {
 function sameScope(c: ProductChange, digest: string, product: ProductChange['product'][number]) {
   if (digest === product.digest) return true;
   const earlier = c.product.find((v) => v.digest === digest && v.status === 'approved');
-  return Boolean(earlier) && productScope(earlier!.content) === productScope(product.content);
+  return Boolean(earlier) && scopeOf(earlier!) === scopeOf(product);
+}
+/**
+ * Объём утверждённой редакции по её digest. Digest — хэш изменения, номера
+ * и содержания, а утверждённая редакция не меняется, поэтому объём
+ * вычисляется один раз: проверка привязки идёт для каждой задачи на каждом
+ * такте очереди, и полный хэш постановки занимал заметную долю простоя (F57).
+ */
+const scopes = new Map<string, string>();
+function scopeOf(version: ProductChange['product'][number]) {
+  let scope = scopes.get(version.digest);
+  if (scope === undefined) {
+    scope = productScope(version.content);
+    if (scopes.size >= 256) scopes.clear();
+    scopes.set(version.digest, scope);
+  }
+  return scope;
 }
 export type ReleaseDiff = {
   /**

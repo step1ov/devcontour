@@ -318,7 +318,10 @@ export class LeadRunner {
    */
   private async recoverProperties(job: WorkflowJob, taskIds: string[], signal: AbortSignal) {
     // Решение по эпизоду — общее правило цикла (`recoveryStep`); здесь
-    // только его исполнение.
+    // только его исполнение. Без эпизодов у задач работы (обычный такт)
+    // изменяемая копия состояния не нужна: её разбор на каждом такте
+    // занимал заметную долю простоя (F57).
+    if (!this.h.store.view().tasks.some((t) => t.recovery && taskIds.includes(t.id))) return false;
     const step = recoveryStep(this.h, this.h.store.read(), job, taskIds);
     if (!step) return false;
     const { task } = step;
