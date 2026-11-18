@@ -181,7 +181,18 @@ export class LeadRunner {
    * (`idleWait`); то, чего отпечаток не видит (Git, время), стадия
    * проверит не позже предела паузы.
    */
-  private waitPrint(job: WorkflowJob, errors: () => ReturnType<typeof tickErrors>) {
+  /** Блокирующие вопросы исполнителя по задачам: id задачи → id вопросов. */
+  private blockingQuestions() {
+    const byWork = new Map<string, string[]>();
+    for (const r of executionOf(this.h).engine.inputRequests())
+      if (blocksWork(r)) byWork.set(r.workId, [...(byWork.get(r.workId) ?? []), r.id]);
+    return byWork;
+  }
+  private waitPrint(
+    job: WorkflowJob,
+    errors: () => ReturnType<typeof tickErrors>,
+    questions: () => ReadonlyMap<string, readonly string[]> = () => this.blockingQuestions(),
+  ) {
     const s = this.h.store.view();
     const now = Date.now();
     const changeSet =
@@ -201,11 +212,12 @@ export class LeadRunner {
       job.startedAt,
       // Блокирующие вопросы исполнителя по задачам: снятие или замена
       // вопроса (input_cancel, input_supersede) полей задачи не меняет, а
-      // повтор и остановку задания решает (F61).
-      executionOf(this.h)
-        .engine.inputRequests()
-        .filter((r) => ids.has(r.workId) && blocksWork(r))
-        .map((r) => [r.workId, r.id]),
+      // повтор и остановку задания решает (F61). Решение о повторе читает
+      // вопросы только упавших задач (`repairDecision`), поэтому и запросы
+      // читаются только при упавшей задаче — один раз за такт.
+      s.tasks
+        .filter((t) => ids.has(t.id) && t.status === 'failed')
+        .map((t) => [t.id, questions().get(t.id) ?? []]),
       s.paused,
       s.pauseReason,
       s.pausedAt,
@@ -260,6 +272,9 @@ export class LeadRunner {
     // Сбои такта читаются один раз за такт и только если нужны отпечатку.
     let errors: ReturnType<typeof tickErrors> | undefined;
     const errorsOnce = () => (errors ??= tickErrors(this.h));
+    // Вопросы исполнителя — так же: один раз за такт и только по запросу отпечатка.
+    let questions: ReturnType<LeadRunner['blockingQuestions']> | undefined;
+    const questionsOnce = () => (questions ??= this.blockingQuestions());
     // Задания, которых больше нет в списке (удалены, заменены), не держат
     // своих пауз ожидания.
     const listed = new Set<string>();
@@ -279,7 +294,8 @@ export class LeadRunner {
         // Отпечаток — до исполнения: всё, что изменила сама стадия, снова
         // захватывает её на следующем такте.
         const idle = this.idle.get(saved.key);
-        const print = saved.status === 'queued' ? this.waitPrint(saved, errorsOnce) : undefined;
+        const print =
+          saved.status === 'queued' ? this.waitPrint(saved, errorsOnce, questionsOnce) : undefined;
         if (print !== undefined && idle?.print === print && performance.now() < idle.notBefore)
           continue;
         // Снимок для решения о бессрочной паузе — тот же, что у отпечатка.

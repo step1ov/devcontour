@@ -398,7 +398,8 @@ export function withoutIdleControllerStop(pack: HandoffPack): HandoffPack {
  * постоянная harness без параметра) до этого фильтра, поэтому серия
  * прерываний может вытеснить настоящие провалы из списка — они остаются
  * только в счёте `truncated.failures`. Исправление — в harness: не
- * считать прерванные остановкой попытки провалами при сборке пакета.
+ * считать прерванные остановкой попытки провалами при сборке пакета
+ * (todo/roadmap/2026-10-26-harness-shared-follow-up.md, раздел 10).
  */
 export function withoutShutdownFailures(
   pack: HandoffPack,

@@ -103,6 +103,15 @@ test('F61: на паузе очереди ожидающая стадия дос
     const { flow, job, runner, claims } = await waitingBoard(f);
     runner.idleWait = { initialMs: 100, maxMs: 200 };
     f.h.pause(true, 'operator', 'lead');
+    // Без упавших задач отпечаток не читает вопросы исполнителя: их чтение
+    // разбирает все записанные запросы и растёт с журналом.
+    const probe = runner as unknown as { blockingQuestions(): unknown };
+    let reads = 0;
+    const blockingQuestions = probe.blockingQuestions.bind(runner);
+    probe.blockingQuestions = () => {
+      reads++;
+      return blockingQuestions();
+    };
     // Первый такт после паузы — перемена отпечатка: один захват.
     await runner.tick();
     const claimed = claims();
@@ -113,6 +122,8 @@ test('F61: на паузе очереди ожидающая стадия дос
       await runner.tick();
     }
     assert.equal(claims(), claimed, 'пауза очереди: без захватов и после предела паузы');
+    assert.equal(reads, 0, 'отпечаток без упавших задач не читает вопросы исполнителя');
+    probe.blockingQuestions = blockingQuestions;
     assert.equal(f.store.revision(), revision, 'ревизия данных не росла');
     assert.deepEqual(panelSummary(f.h, f.root, { revision: summary.revision }), {
       revision: summary.revision,
