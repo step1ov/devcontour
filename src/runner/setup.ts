@@ -122,6 +122,12 @@ export const DEFAULT_RUN_TIMEOUT_MS = 900_000;
 export const MAX_DERIVED_RUN_TIMEOUT_MS = 7_200_000;
 /** Срок gate без `timeoutMs` — умолчание схемы. */
 const DEFAULT_GATE_TIMEOUT_MS = 120_000;
+/**
+ * Повторов самой долгой проверки в оценке фазы интеграции: повтор проверки,
+ * упавшей на интеграции и прошедшей на кандидате, и ещё один после падения
+ * самого исполнителя тестов (движок исполняет его на интеграции, F68).
+ */
+export const INTEGRATION_RECHECKS = 2;
 
 export interface RunTimeoutChoice {
   ms: number;
@@ -133,8 +139,8 @@ export interface RunTimeoutChoice {
   /** Сумма действующих сроков проверок (каждая не короче нижнего предела). */
   gatesMs: number;
   /**
-   * Оценка фазы интеграции: шаги подготовки, все проверки по очереди и один
-   * повтор самой долгой проверки. Проверки потребителей не учтены.
+   * Оценка фазы интеграции: шаги подготовки, все проверки по очереди и два
+   * повтора самой долгой проверки. Проверки потребителей не учтены.
    */
   phaseMs: number;
   reason: string;
@@ -158,16 +164,16 @@ export function gateTimeoutSum(gates: readonly { timeoutMs?: unknown }[], floorM
 /**
  * Срок фазы попытки (`runTimeoutMs`) для конфигурации setup. Каждая фаза
  * попытки ограничена этим сроком, и самая долгая из них — интеграция: шаги
- * подготовки (prepare, запуск окружения), все gates по очереди, один повтор
- * проверки, упавшей на интеграции и прошедшей на кандидате, и проверки
- * потребителей. Длинные реальные проверки (установка зависимостей,
+ * подготовки (prepare, запуск окружения), все gates по очереди, повтор
+ * проверки, упавшей на интеграции и прошедшей на кандидате, ещё один повтор
+ * после падения исполнителя тестов и проверки потребителей. Длинные реальные проверки (установка зависимостей,
  * typecheck и тесты монорепозитория) не укладывались в прежние постоянные
  * 15 минут.
  *
  * Уже заданное значение сохраняется: сохранённая конфигурация workspace
  * (setup её не перезаписывает) или `runTimeoutMs` профиля. Иначе срок —
  * оценка фазы интеграции (сроки шагов подготовки, сумма сроков gates и
- * повтор самого долгого gate; проверки потребителей setup не знает) с
+ * два повтора самого долгого gate; проверки потребителей setup не знает) с
  * запасом 25%, не меньше 2 минут, до минуты; не меньше 15 минут и не больше
  * 2 часов. Тот же срок ограничивает вызовы моделей и срок ревью: большой
  * срок позже прерывает зависший вызов — причина это называет.
@@ -182,10 +188,11 @@ export function chooseRunTimeout(input: {
 }): RunTimeoutChoice {
   const floor = input.floorMs ?? 0;
   const gatesMs = gateTimeoutSum(input.gates, floor);
-  const recheckMs = Math.max(
+  const longestMs = Math.max(
     0,
     ...input.gates.map((g) => Math.max(timeoutOf(g, DEFAULT_GATE_TIMEOUT_MS), floor)),
   );
+  const recheckMs = longestMs * INTEGRATION_RECHECKS;
   const stepsMs = (input.steps ?? []).reduce(
     (sum, s) => sum + timeoutOf(s, DEFAULT_GATE_TIMEOUT_MS),
     0,
@@ -194,7 +201,7 @@ export function chooseRunTimeout(input: {
   const estimate =
     `оценка фазы интеграции ${minutes(phaseMs)}: ` +
     (stepsMs ? `подготовка ${minutes(stepsMs)}, ` : '') +
-    `проверки по очереди ${minutes(gatesMs)} и повтор самой долгой ${minutes(recheckMs)}; проверки потребителей не учтены`;
+    `проверки по очереди ${minutes(gatesMs)} и два повтора самой долгой ${minutes(recheckMs)}; проверки потребителей не учтены`;
   const shortfall = (ms: number) =>
     phaseMs > ms ? `; ${estimate} — больше этого срока, поднимите runTimeoutMs` : '';
   const models = (ms: number) =>

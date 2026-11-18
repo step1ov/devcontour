@@ -389,8 +389,9 @@ test('срок фазы попытки: умолчание, оценка фаз�
   assert.equal(small.ms, DEFAULT_RUN_TIMEOUT_MS);
   // 60 с (поднят предел) + 60 с + 120 с (умолчание схемы).
   assert.equal(small.gatesMs, 240000);
-  // Фаза интеграции: проверки и повтор самой долгой (120 с).
-  assert.equal(small.phaseMs, 360000);
+  // Фаза интеграции: проверки и два повтора самой долгой (2 × 120 с):
+  // повтор упавшей на интеграции и повтор после падения исполнителя тестов.
+  assert.equal(small.phaseMs, 480000);
   assert.match(small.reason, /умолчание: оценка фазы интеграции/);
   // Долгие проверки: оценка фазы с запасом 25%, до минуты, не меньше умолчания.
   const long = chooseRunTimeout({
@@ -399,35 +400,35 @@ test('срок фазы попытки: умолчание, оценка фаз�
   });
   assert.equal(long.source, 'gates');
   assert.equal(long.gatesMs, 1500000);
-  assert.equal(long.phaseMs, 2100000);
-  // 35 мин + 8,75 мин → 44 мин.
-  assert.equal(long.ms, 2_640_000);
+  assert.equal(long.phaseMs, 2700000);
+  // 45 мин + 11,25 мин → 57 мин.
+  assert.equal(long.ms, 3_420_000);
   assert.match(
     long.reason,
-    /оценка фазы интеграции 35 мин: проверки по очереди 25 мин и повтор самой долгой 10 мин; проверки потребителей не учтены; запас 9 мин/,
+    /оценка фазы интеграции 45 мин: проверки по очереди 25 мин и два повтора самой долгой 20 мин; проверки потребителей не учтены; запас 12 мин/,
   );
   // Большой срок позже прерывает зависший вызов модели: причина это называет.
   assert.match(
     long.reason,
-    /ограничивает вызовы моделей и ревью: зависший вызов прервётся через 44 мин/,
+    /ограничивает вызовы моделей и ревью: зависший вызов прервётся через 57 мин/,
   );
-  // Одна доминирующая проверка: её повтор на интеграции тоже должен уместиться.
+  // Одна доминирующая проверка: оба её повтора на интеграции тоже должны уместиться.
   const dominant = chooseRunTimeout({
     gates: [{ timeoutMs: 1_800_000 }, { timeoutMs: 60000 }, { timeoutMs: 60000 }],
     floorMs: DEFAULT_GATE_TIMEOUT_FLOOR_MS,
   });
   assert.equal(dominant.gatesMs, 1_920_000);
-  assert.equal(dominant.phaseMs, 3_720_000);
-  // 62 мин + 15,5 мин → 78 мин; без повтора было бы 40 мин, и повтор
-  // 30-минутной проверки оборвался бы сроком фазы.
-  assert.equal(dominant.ms, 4_680_000);
-  assert.ok(dominant.ms > dominant.gatesMs + 1_800_000);
+  assert.equal(dominant.phaseMs, 5_520_000);
+  // 92 мин + 23 мин → 115 мин; с одним повтором было бы 78 мин, и второй
+  // повтор 30-минутной проверки оборвался бы сроком фазы.
+  assert.equal(dominant.ms, 6_900_000);
+  assert.ok(dominant.ms > dominant.gatesMs + 2 * 1_800_000);
   // Известные сроки шагов подготовки входят в оценку.
   const prepared = chooseRunTimeout({
     gates: [{ timeoutMs: 600000 }],
     steps: [{ timeoutMs: 300000 }, {}],
   });
-  assert.equal(prepared.phaseMs, 420000 + 1_200_000);
+  assert.equal(prepared.phaseMs, 420000 + 1_800_000);
   assert.match(prepared.reason, /подготовка 7 мин/);
   // Предел вывода — два часа.
   const capped = chooseRunTimeout({ gates: [{ timeoutMs: 6_000_000 }, { timeoutMs: 3_000_000 }] });
@@ -443,7 +444,7 @@ test('срок фазы попытки: умолчание, оценка фаз�
     { ms: existing.ms, source: existing.source },
     { ms: 1_000_000, source: 'existing' },
   );
-  assert.match(existing.reason, /сохранён.*оценка фазы интеграции 60 мин.*поднимите runTimeoutMs/);
+  assert.match(existing.reason, /сохранён.*оценка фазы интеграции 90 мин.*поднимите runTimeoutMs/);
   const profile = chooseRunTimeout({ gates: [{ timeoutMs: 60000 }], profileMs: 1_200_000 });
   assert.deepEqual(
     { ms: profile.ms, source: profile.source },
@@ -596,16 +597,16 @@ test('быстрый setup пишет срок фазы по проверкам 
       };
       const plan = await planSetup(input);
       assert.equal(plan.refusal, undefined);
-      // Проверки 35 мин и повтор самой долгой 15 мин: 50 мин + 12,5 → 63 мин.
+      // Проверки 35 мин и два повтора самой долгой 2 × 15 мин: 65 мин + 16,25 → 82 мин.
       assert.equal(plan.runTimeout.gatesMs, 2_100_000);
-      assert.equal(plan.runTimeout.phaseMs, 3_000_000);
+      assert.equal(plan.runTimeout.phaseMs, 3_900_000);
       assert.deepEqual(
         { ms: plan.runTimeout.ms, source: plan.runTimeout.source },
-        { ms: 3_780_000, source: 'gates' },
+        { ms: 4_920_000, source: 'gates' },
       );
       await setupProject(input);
       const configPath = join(root, '.devcontour-local/config.json');
-      assert.equal(loadConfig(configPath).runTimeoutMs, 3_780_000);
+      assert.equal(loadConfig(configPath).runTimeoutMs, 4_920_000);
       // Оператор задал свой срок: повторный setup его сохраняет и называет.
       const raw = JSON.parse(readFileSync(configPath, 'utf8')) as Record<string, unknown>;
       raw.runTimeoutMs = 3_000_000;
@@ -643,7 +644,7 @@ test('срок фазы — по проверкам сохранённого ф�
         'devcontour.component.json': JSON.stringify(longComponent, null, 2) + '\n',
       });
       chooseWorkspaceMode(root, 'embedded');
-      // Предложение короткое, но действует файл компонента: его 31 мин и повтор 30 мин.
+      // Предложение короткое, но действует файл компонента: его 31 мин и два повтора по 30 мин.
       const plan = await planSetup({
         repository: root,
         workspace: root,
@@ -657,7 +658,7 @@ test('срок фазы — по проверкам сохранённого ф�
         ['package-policy', 'root-test'],
       );
       assert.equal(plan.runTimeout.gatesMs, 1_860_000);
-      assert.equal(plan.runTimeout.phaseMs, 3_660_000);
+      assert.equal(plan.runTimeout.phaseMs, 5_460_000);
       assert.equal(plan.runTimeout.source, 'gates');
     } finally {
       rmSync(root, { recursive: true, force: true });
