@@ -278,6 +278,7 @@ export function completion(
         checks,
         property,
         notApplicable,
+        reusedEvidence,
       }) => ({
         kind,
         phase,
@@ -302,6 +303,11 @@ export function completion(
             }
           : {}),
         ...(kind === 'not-applicable' && notApplicable ? { notApplicable } : {}),
+        // Взято из кандидата (`integrationReuse`): сведение для другого клона,
+        // только у собственной прошедшей проверки интеграции.
+        ...(reusedEvidence && kind === 'test' && phase === 'integration' && !consumer && passed
+          ? { reused: { sha: reusedEvidence.sha, tree: reusedEvidence.tree } }
+          : {}),
       }),
     ),
     ...(run.consumers?.length
@@ -523,6 +529,15 @@ export function validateReceipt(
   // PASS записи receipt — успешный код выхода: код переносит только receipt.
   if (receipt.checks.some((c) => c.passed && c.exitCode !== 0))
     throw new Error(`Receipt ${t.id}: PASS с ненулевым кодом выхода`);
+  // Отметка «взято из кандидата» — сведение, но несогласованное отклоняется:
+  // SHA кандидата и результата receipt. Дерево сверяет с Git этого клона
+  // синхронизация (`assertReusedTrees`, runner): домен процессов не запускает.
+  if (
+    receipt.checks.some(
+      (c) => c.reused && (c.reused.sha !== receipt.candidateSha || c.sha !== receipt.resultSha),
+    )
+  )
+    throw new Error(`Receipt ${t.id}: отметка reused не соответствует SHA кандидата и результата`);
   const problems = receiptProblems(h, receipt, t, contracts, suites, {
     dependencies: !receipt.dependencies,
     consumers: !!receipt.consumers?.length && observed.includes(false),

@@ -2,6 +2,7 @@ import {
   NOT_APPLICABLE_LABEL,
   evidenceVerdict,
   notApplicableLine,
+  REUSED_LABEL,
   type NotApplicableSummary,
 } from '../core/evidence-verdict.ts';
 import { useEffect, useRef, useState } from 'react';
@@ -70,6 +71,8 @@ interface CheckEntry {
   kind: 'test' | 'review' | 'not-applicable';
   passed: boolean;
   notApplicable?: NotApplicableSummary;
+  /** Запись интеграции взята из кандидата (`reusedEvidence`): gate не исполнялся. */
+  reused?: true;
   sha: string;
   summary: string;
 }
@@ -536,6 +539,7 @@ function Checks({ label, entries }: { label: string; entries: CheckEntry[] }) {
                 {notApplicableLine(e.notApplicable)}
               </span>
             )}
+            {e.reused && <span className="text-muted-foreground text-xs">{REUSED_LABEL}</span>}
           </li>
         ))}
       </ul>

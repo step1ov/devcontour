@@ -81,6 +81,14 @@ export const receiptSchema = z.strictObject({
             .optional(),
           /** Почему условный gate не исполнялся: определение, шаблоны и сравненный diff. */
           notApplicable: gateApplicabilitySchema.optional(),
+          /**
+           * Сведение: собственная проверка интеграции взята из прошедшей
+           * записи кандидата при том же дереве (`integrationReuse`) — SHA
+           * кандидата и общее дерево. Получатель сверяет дерево со своим
+           * деревом result SHA; в проверку получателя harness как
+           * `reusedEvidence` не переносится. Нет поля — gate исполнен.
+           */
+          reused: z.strictObject({ sha, tree: sha }).optional(),
         })
         // Запись неприменимости — только со своим основанием и никогда не PASS;
         // основание у записи другого вида — несогласованный receipt.
@@ -90,6 +98,12 @@ export const receiptSchema = z.strictObject({
               ? !!c.notApplicable && !c.passed && !c.consumer
               : !c.notApplicable,
           { error: 'Запись not-applicable — только с notApplicable, не PASS и не потребителя' },
+        )
+        .refine(
+          (c) =>
+            !c.reused ||
+            (c.kind === 'test' && c.phase === 'integration' && !c.consumer && c.passed),
+          { error: 'Отметка reused — только у собственной прошедшей проверки интеграции' },
         ),
     )
     .min(4),

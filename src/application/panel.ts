@@ -78,6 +78,8 @@ export type PanelEvidence = Pick<Evidence, 'id' | 'gate' | 'phase' | 'kind' | 'p
   summary: string;
   /** Условный gate не исполнялся: шаблоны и сравненный diff (`kind: 'not-applicable'`). */
   notApplicable?: NotApplicableSummary;
+  /** Запись интеграции взята из кандидата (`reusedEvidence`): gate не исполнялся. */
+  reused?: true;
 };
 export type PanelRun = Pick<
   Run,
@@ -152,6 +154,7 @@ function runLine(run: Run, boardId: string | undefined, now: number): PanelRun {
       ...(e.kind === 'not-applicable' && e.notApplicable
         ? { notApplicable: notApplicableSummary(e.notApplicable) }
         : {}),
+      ...(e.reusedEvidence ? { reused: true as const } : {}),
     })),
   };
 }
@@ -738,6 +741,8 @@ function progressOf(state: DevContourState, inputs: ReadonlyMap<string, string>)
       passed: number;
       failed: number;
       notApplicable: number;
+      /** Записи интеграции, взятые из кандидата: PASS без исполнения, не запуск. */
+      reused: number;
       tasks: Set<string>;
       phases: Set<string>;
     }
@@ -749,6 +754,7 @@ function progressOf(state: DevContourState, inputs: ReadonlyMap<string, string>)
       passed: 0,
       failed: 0,
       notApplicable: 0,
+      reused: 0,
       tasks: new Set<string>(),
       phases: new Set<string>(),
     };
@@ -765,7 +771,9 @@ function progressOf(state: DevContourState, inputs: ReadonlyMap<string, string>)
       if (e.kind !== 'test') continue;
       covered.add(run.taskId);
       const row = rowOf(e.gate);
-      row[e.passed ? 'passed' : 'failed'] += 1;
+      // Взятая из кандидата запись покрывает задачу, но запуском не считается.
+      if (e.reusedEvidence) row.reused += 1;
+      else row[e.passed ? 'passed' : 'failed'] += 1;
       row.tasks.add(run.taskId);
       row.phases.add(e.phase);
       gates.set(e.gate, row);
@@ -796,6 +804,7 @@ function progressOf(state: DevContourState, inputs: ReadonlyMap<string, string>)
         passed: g.passed,
         failed: g.failed,
         ...(g.notApplicable ? { notApplicable: g.notApplicable } : {}),
+        ...(g.reused ? { reused: g.reused } : {}),
         tasks: g.tasks.size,
         phases: [...g.phases],
       })),
