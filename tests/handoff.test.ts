@@ -1941,7 +1941,7 @@ test('session_handoff: пауза ведущего называет ведуще
     const stop = pack.stops.find((x) => x.queue)!;
     assert.ok(stop, JSON.stringify(pack.stops));
     assert.equal(stop.actor, 'lead');
-    assert.match(stop.message, /ведущим агентом/);
+    assert.match(stop.message, /Паузу поставил ведущий агент \(queue_set\)/);
     assert.match(stop.message, /Жду ревью контракта оплаты/);
     assert.match(stop.message, /queue_set \{"paused": false\}/);
     assert.equal(pack.next.actor, 'lead');
@@ -1953,6 +1953,23 @@ test('session_handoff: пауза ведущего называет ведуще
     assert.equal(host.next?.action, 'queue_set');
     assert.deepEqual(host.next?.params, { by: 'lead', reason: 'Жду ревью контракта оплаты' });
     assert.match(host.next?.detail ?? '', /Жду ревью контракта оплаты/);
+    // Пауза отказа runtime: текст движка (класс отказа) сохраняется, заменена
+    // только команда harness.
+    f.h.pause(false);
+    tick();
+    f.store.change('fixture', (st) => {
+      st.paused = true;
+      st.pauseReason = 'runtime';
+      st.pauseFailures = ['environment'];
+      st.pausedAt = new Date().toISOString();
+      return {};
+    });
+    const runtime = at().pack;
+    assert.doesNotMatch(texts(runtime), /harness resume/);
+    assert.match(
+      texts(runtime),
+      /класса environment; после исправления — queue_set \{\\"paused\\": false\}/,
+    );
     // Пауза человека: остаётся за пользователем, но тексты называют команды
     // DevContour, а не harness resume.
     f.h.pause(true);

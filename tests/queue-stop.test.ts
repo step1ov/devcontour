@@ -517,6 +517,35 @@ test('Пауза ведущего агента через queue_set хранит
     await assert.rejects(
       agent.run({ operation: 'queue_set', input: { paused: false, reason: 'Причина' } }),
     );
+    // Причина — текст ведущего: значение секрета контура не сохраняется и не
+    // возвращается.
+    f.h.pause(false);
+    const secret = 'dc-pause-secret-value';
+    process.env.DC_PAUSE_SECRET = secret;
+    try {
+      (f.h.config as unknown as Record<string, unknown>).environment = {
+        inherit: ['DC_PAUSE_SECRET'],
+      };
+      const masked = (await agent.run({
+        operation: 'queue_set',
+        input: { paused: true, reason: `Токен ${secret} истёк` },
+      })) as { reason?: string; queue: QueueStopView };
+      assert.doesNotMatch(f.h.store.read().pauseActor?.reason ?? '', new RegExp(secret));
+      assert.match(f.h.store.read().pauseActor?.reason ?? '', /Токен .+ истёк/);
+      assert.doesNotMatch(JSON.stringify(masked), new RegExp(secret));
+    } finally {
+      delete process.env.DC_PAUSE_SECRET;
+      delete (f.h.config as unknown as Record<string, unknown>).environment;
+    }
+    // Пауза ведущего поверх паузы человека не записана — и причина не
+    // повторяется в ответе.
+    f.h.pause(true);
+    const kept = (await agent.run({
+      operation: 'queue_set',
+      input: { paused: true, reason: 'Не записанная причина' },
+    })) as { reason?: string };
+    assert.equal(kept.reason, undefined);
+    assert.equal(f.h.store.read().pauseActor, undefined);
     // Новая пауза ведущего без причины прежнюю причину не наследует.
     f.h.pause(false);
     await agent.run({ operation: 'queue_set', input: { paused: true } });

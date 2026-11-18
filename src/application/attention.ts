@@ -920,10 +920,15 @@ const queueSource: AttentionSourceRule = {
     if (!pause) return [];
     const view = queueStopOf(h, s, h.store.latestEvents(['scheduler.error'], 50));
     const access = (s.pauseFailures ?? []).some((f) => accessFailures.has(f));
-    // Свою паузу (без ожидания проверки базы под ней) ведущий снимает сам:
-    // карточка его, а не оператора (harness называет любую паузу `operator`
-    // паузой человека).
-    const operator = pause.actor === 'user' && !leadLiftsPause(s);
+    // Свою паузу (без ожидания проверки базы под ней) ведущий в режиме
+    // агента снимает сам: карточка его, а не оператора (harness называет
+    // любую паузу `operator` паузой человека). В режиме оператора ведущий
+    // очередь не ведёт — карточка оператора с запуском очереди, иначе паузу
+    // не снял бы никто. Доменные действия — только у карточек оператора; в
+    // режиме агента человек запускает очередь общей кнопкой очереди панели («Запустить очередь»).
+    const operator =
+      pause.actor === 'user' &&
+      !((h.config.approvalMode ?? 'agent') === 'agent' && leadLiftsPause(s));
     const base = foldedBaseWait(h, s);
     return [
       {

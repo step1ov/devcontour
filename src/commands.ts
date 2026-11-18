@@ -26,7 +26,7 @@ import {
 import { repository as selectedRepository, repository } from './core/repositories.ts';
 import { DatabaseSync } from 'node:sqlite';
 import { fileURLToPath } from 'node:url';
-import { AgentService, capabilities } from './application/agent.ts';
+import { AgentService, capabilities, leadReason } from './application/agent.ts';
 import { markLeadActivity } from './runner/lead-activity.ts';
 import { serveMcp } from './server/mcp.ts';
 import { readAgentJson } from './runner/json-file.ts';
@@ -1365,7 +1365,12 @@ async function main() {
         if (!args.includes('--start') && !args.includes('--pause')) result = queueStopOf(h);
         else if (args.includes('--pause'))
           result = {
-            ...h.pause(true, 'operator', actorOf() === 'host' ? 'lead' : 'operator', note),
+            ...h.pause(
+              true,
+              'operator',
+              actorOf() === 'host' ? 'lead' : 'operator',
+              note === undefined ? undefined : leadReason(h, note),
+            ),
             ...queueStopOf(h),
           };
         else {

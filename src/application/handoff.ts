@@ -48,9 +48,7 @@ import {
   pausedByLead,
   shutdownInterrupted,
   staleBaseStop,
-  type QueueStopView,
 } from '../core/work-status.ts';
-import { queueStopOf } from './queue-stop.ts';
 import { executionOf, toDomain } from '../harness/execution.ts';
 import { ContractChanges } from '../runner/contract-change.ts';
 import { resolveIdPrefix } from '../core/id-prefix.ts';
@@ -557,46 +555,92 @@ export function withStaleBaseStop(
 /** Команда harness, которой пакет называет снятие паузы выдачи. */
 const HARNESS_RESUME = 'harness resume';
 
+/** Команда ведущего, снимающая паузу выдачи (режим агента). */
+const LEAD_RESUME = 'queue_set {"paused": false} (devcontour queue --start --by host)';
+
 /**
- * Пауза выдачи в пакете harness. Движок называет любую паузу `operator`
- * паузой человека (`actor: user`), а её снятие — командой harness
- * (`harness resume`), которой в DevContour нет. Тексты пакета с этой командой
- * (очередь, остановка выдачи, `next` пакета и поручений) получают вид
- * остановки очереди DevContour (`queueStopView`: причина и кто снимает) —
- * тот же, что у `queue`, панели и центра внимания. Паузу ведущего агента
- * (`queue_set`) без удержанного переноса базы снимает сам ведущий: эти
- * записи называют его (`actor: lead`), его причину (`queue_set {"reason"}`)
- * и команду DevContour; `next.command` не называется. Пауза человека
- * остаётся за пользователем, `next.command` — как прежде (`commands`
- * пакета поясняет его). Текст — под маской и в пределе строки пакета:
- * причина идёт последней, команду предел не режет.
+ * Чем в DevContour снимается пауза, которую пакет harness называет командой
+ * `harness resume`, — короткая фраза на месте команды. Удержанный перенос
+ * базы подтверждает оператор; в режиме оператора очередь запускает человек;
+ * паузу ведущего и паузу отказа runtime — команда ведущего; паузу человека —
+ * решение пользователя; прочие (остановка, начальная) — задание доски или
+ * команда ведущего.
+ */
+export function resumePhrase(
+  pause: {
+    lead: boolean;
+    held: boolean;
+    reason?: string;
+    approvalMode?: 'agent' | 'operator';
+  },
+  locale: HintLocale = 'en',
+) {
+  const ru = locale === 'ru';
+  if (pause.held)
+    return ru
+      ? 'подтверждение переноса базы оператором («Подтвердить и запустить» во «Внимании» панели)'
+      : "the operator's confirmation of the base move («Подтвердить и запустить» in the panel's attention center)";
+  if ((pause.approvalMode ?? 'agent') === 'operator')
+    // operator-only: в режиме оператора очередь запускает человек.
+    return ru
+      ? 'запуск очереди оператором (devcontour queue --start)'
+      : "the operator's queue start (devcontour queue --start)";
+  if (pause.lead || pause.reason === 'runtime') return LEAD_RESUME;
+  if (pause.reason === 'operator')
+    return ru
+      ? 'решение пользователя («Запустить очередь» в панели)'
+      : "the user's decision («Запустить очередь» in the panel)";
+  return ru
+    ? `задание доски (workflow_start) или ${LEAD_RESUME}`
+    : `the board job (workflow_start) or ${LEAD_RESUME}`;
+}
+
+/**
+ * Пауза выдачи в пакете harness. Движок называет снятие любой паузы
+ * командой harness (`harness resume`), которой в DevContour нет: в текстах
+ * пакета (очередь, остановка выдачи, `next` пакета и поручений) заменяется
+ * только эта команда — фразой `resumePhrase`; остальной текст движка
+ * (причина, класс отказа) остаётся. Паузу ведущего агента (`queue_set`) без
+ * удержанного переноса базы снимает сам ведущий, а движок называет любую
+ * паузу `operator` паузой человека (`actor: user`): эти записи называют
+ * ведущего (`actor: lead`) и его причину (`queue_set {"reason"}`, в конце —
+ * её режет предел строки, а не команду); `next.command` не называется.
+ * Пауза человека остаётся за пользователем, `next.command` — как прежде
+ * (`commands` пакета поясняет его). Текст — под маской и в пределе строки
+ * пакета.
  */
 export function withQueuePauseText(
   pack: HandoffPack,
-  view: QueueStopView | undefined,
+  phrase: string | undefined,
   lead: { note?: string } | undefined,
   redact: (text: string) => string = (text) => text,
 ): HandoffPack {
-  if (!view?.paused || !view.action) return pack;
-  const action = view.action.charAt(0).toLowerCase() + view.action.slice(1);
-  const head = lead ? 'Выдача остановлена ведущим агентом (queue_set)' : view.stopReason;
-  const chars = [
-    ...redact(
-      `${head}. Продолжение — ${action}.` + (lead?.note ? ` Причина паузы: ${lead.note}` : ''),
-    ),
-  ];
-  const text =
-    chars.length > PACK_TEXT_CHARS
+  if (!phrase) return pack;
+  const clip = (text: string) => {
+    const chars = [...redact(text)];
+    return chars.length > PACK_TEXT_CHARS
       ? chars.slice(0, PACK_TEXT_CHARS - 1).join('') + '…'
       : chars.join('');
+  };
+  const replace = (t: string) => t.split(HARNESS_RESUME).join(phrase);
   const harness = (t: string | undefined) => !!t && t.includes(HARNESS_RESUME);
+  const own = (t: string | undefined) =>
+    clip(
+      (t ? replace(t) : `Продолжение — ${phrase}.`) +
+        ' Паузу поставил ведущий агент (queue_set)' +
+        (lead?.note ? `: ${lead.note}` : '.'),
+    );
   const resumes = (x: { actor?: string | null; action?: string }) =>
     x.actor === 'user' && x.action === 'resume-queue';
   const toLead = <T extends { actor?: string | null; command?: unknown }>(
     x: T,
     field: 'detail' | 'message',
   ): T => {
-    const out = { ...x, actor: 'lead', [field]: text } as T;
+    const out = {
+      ...x,
+      actor: 'lead',
+      [field]: own((x as Record<string, unknown>)[field] as string | undefined),
+    } as T;
     delete out.command;
     return out;
   };
@@ -604,27 +648,27 @@ export function withQueuePauseText(
     lead && resumes(pack.queue)
       ? toLead({ ...pack.queue }, 'detail')
       : harness(pack.queue.detail)
-        ? { ...pack.queue, detail: text }
+        ? { ...pack.queue, detail: clip(replace(pack.queue.detail!)) }
         : pack.queue;
   const stops = pack.stops.map((x) =>
     lead && x.queue && resumes(x)
       ? toLead(x, 'message')
       : harness(x.message)
-        ? { ...x, message: text }
+        ? { ...x, message: clip(replace(x.message)) }
         : x,
   );
   const works = pack.works.map((w) =>
     lead && resumes(w.next)
       ? { ...w, next: toLead(w.next, 'detail') }
       : harness(w.next.detail)
-        ? { ...w, next: { ...w.next, detail: text } }
+        ? { ...w, next: { ...w.next, detail: clip(replace(w.next.detail!)) } }
         : w,
   );
   const next =
     lead && resumes(pack.next)
       ? toLead(pack.next, 'detail')
       : harness(pack.next.detail)
-        ? { ...pack.next, detail: text }
+        ? { ...pack.next, detail: clip(replace(pack.next.detail!)) }
         : pack.next;
   return { ...pack, queue, stops, works, next };
 }
@@ -1598,16 +1642,29 @@ export function devcontourHandoffWithin(
       const full: { queueStop?: HandoffPack['stops'][number] } = {};
       const errors = h.store.latestEvents(['scheduler.error'], 50);
       const stale = staleBaseStop(state, errors);
-      // Вид остановки очереди того же снимка: им пакет называет паузу вместо
+      // Чем снимается пауза того же снимка: им пакет называет паузу вместо
       // команды harness (`withQueuePauseText`).
-      const queueView = state.paused ? queueStopOf(h, state, errors) : undefined;
       const leadPause =
         pausedByLead(state) && !heldBaseOf(state)
           ? { ...(leadPauseNote(state) ? { note: leadPauseNote(state) } : {}) }
           : undefined;
+      const phrase = state.paused
+        ? resumePhrase(
+            {
+              lead: !!leadPause,
+              held: !!heldBaseOf(state),
+              reason: state.pauseReason ?? (state.pausedAt ? 'runtime' : undefined),
+              approvalMode: h.config.approvalMode,
+            },
+            hintLocaleOf(h.config),
+          )
+        : undefined;
       // На сколько байт тексты DevContour (`with…`) удлинили пакет последней
-      // сборки: предел пакета harness меряет пакет до них, поэтому подбор
-      // предела ответа вычитает и этот прирост.
+      // сборки: предел пакета harness меряет пакет до них, поэтому начальный
+      // предел подбора вычитает и этот прирост. Это приближение (прирост
+      // полного пакета, а урезанный пакет удлиняется не больше): оно лишь
+      // задаёт стартовую точку, а предел ответа гарантирует цикл подбора
+      // ниже, который меряет готовый ответ.
       let growth = 0;
       const packOf = (options: Parameters<typeof handoffPack>[1]) => {
         const raw = handoffPack(packSource, options);
@@ -1626,7 +1683,7 @@ export function devcontourHandoffWithin(
             options?.redact,
             h.config.approvalMode ?? 'agent',
           ),
-          queueView,
+          phrase,
           leadPause,
           options?.redact,
         );

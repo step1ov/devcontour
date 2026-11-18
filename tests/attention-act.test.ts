@@ -508,6 +508,15 @@ test('Пауза ведущего через queue_set: карточка выд�
     f.h.pause(true, 'operator', 'lead', 'Жду ответа владельца по схеме платежей');
     const why = byKey((await service.active()).items, 'queue')!;
     assert.match(why.reason, /Жду ответа владельца по схеме платежей/);
+    // В режиме оператора ведущий паузу не снимает: карточка оператора с его
+    // запуском очереди, иначе паузу ведущего не снял бы никто.
+    f.h.config.approvalMode = 'operator';
+    const manual = byKey((await service.active()).items, 'queue')!;
+    assert.equal(manual.actor, 'operator');
+    assert.ok(
+      manual.actions.some((a) => a.id === 'resume'),
+      JSON.stringify(manual.actions),
+    );
   } finally {
     f.cleanup();
   }

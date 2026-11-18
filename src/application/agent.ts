@@ -62,6 +62,8 @@ const id = z.string().regex(/^[A-Za-z0-9_-]{1,80}$/);
 
 /** Маска секретов контура — та же, что у пакета ведущего и центра внимания. */
 const redactOf = (h: DevContour) => handoffRedactor(h.config, executionOf(h).engine.policy);
+/** Причина паузы ведущего под маской секретов контура (`queue_set`, CLI `queue --reason`). */
+export const leadReason = (h: DevContour, text: string) => redactOf(h)(text);
 export { SERVER_STOPPING };
 export { oversized };
 export const agentInputs = {
@@ -902,8 +904,21 @@ export class AgentService {
         const value = agentInputs.queue_set.parse(input);
         if (!value.paused && this.options.stopping?.()) throw new DomainError(SERVER_STOPPING, 409);
         // Паузу записывает актёр вызова — ведущий агент, а не человек.
-        h.pause(value.paused, 'operator', 'lead', value.reason);
-        return { ...value, queue: queueStopOf(h), serverRequiredForExecution: true };
+        // Причина — текст ведущего: в хранилище и ответе — под маской
+        // секретов. Причину паузы, которой не было (пауза человека осталась
+        // его решением), ответ не повторяет.
+        const set = h.pause(
+          value.paused,
+          'operator',
+          'lead',
+          value.reason === undefined ? undefined : leadReason(h, value.reason),
+        );
+        return {
+          paused: value.paused,
+          ...('note' in set && set.note ? { reason: set.note } : {}),
+          queue: queueStopOf(h),
+          serverRequiredForExecution: true,
+        };
       }
       default:
         throw new DomainError('Неизвестная операция', 400);
