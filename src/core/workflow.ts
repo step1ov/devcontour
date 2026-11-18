@@ -104,6 +104,20 @@ export function validateWorkflow(config: Config) {
     if (!profile || profile.runtime !== binding.runtime)
       throw new DomainError('Неизвестный или несовместимый toolProfile: ' + binding.toolProfile);
   }
+  // Перенос evidence кандидата — поле политики harness целиком: компонент,
+  // объявивший его один, молча включил бы его и соседям.
+  if (config.repositories.length && config.integrationReuse)
+    throw new DomainError(
+      'integrationReuse задаётся в компонентах (devcontour.component.json или запись компонента), а не на верхнем уровне конфигурации с repositories',
+    );
+  const reusing = repos.filter((r) => r.integrationReuse);
+  if (reusing.length && reusing.length !== repos.length)
+    throw new DomainError(
+      `integrationReuse — поле политики всего workspace: задайте его во всех компонентах или ни в одном (задано: ${reusing.map((r) => r.id).join(', ')}; нет: ${repos
+        .filter((r) => !r.integrationReuse)
+        .map((r) => r.id)
+        .join(', ')})`,
+    );
   if (config.completionMode === 'remote') {
     if (repos.some((r) => !r.forge || !config.forgeConnections[r.forge.connection]))
       throw new DomainError(

@@ -9,6 +9,14 @@ export type EvidenceVerdict = 'passed' | 'failed' | 'not-applicable';
 
 export const NOT_APPLICABLE_LABEL = 'не применим (пути)';
 
+/**
+ * Запись интеграции, взятая из прошедшей записи кандидата при том же дереве
+ * (`integrationReuse`, поле `reusedEvidence`): PASS, но gate на интеграции не
+ * исполнялся — показ и счёт запусков её не выдают за исполненную. Текст — как
+ * у сводки записи harness.
+ */
+export const REUSED_LABEL = 'взято из кандидата';
+
 export const evidenceVerdict = (e: { kind?: string; passed: boolean }): EvidenceVerdict =>
   e.kind === 'not-applicable' ? 'not-applicable' : e.passed ? 'passed' : 'failed';
 

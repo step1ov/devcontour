@@ -425,6 +425,7 @@ export async function setupWorkspace(file: string, data?: string) {
       dependencyStore: r.dependencyStore,
       writerDependencies: r.writerDependencies,
       generators: r.generators,
+      integrationReuse: r.integrationReuse,
       preflight: r.preflight,
       forge: r.forge,
       path: await realpath(resolve(workspaceRoot, r.path)),

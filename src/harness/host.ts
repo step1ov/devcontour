@@ -44,7 +44,8 @@ import { maxRecordBytes } from '../core/sync-model.ts';
 import { completion, validateReceipt } from '../core/sync-state.ts';
 import { contents, taskContext } from '../runner/context.ts';
 import { effectiveChecks } from '../core/checks.ts';
-import { roleBinding } from '../core/repositories.ts';
+import { repository, roleBinding } from '../core/repositories.ts';
+import { git } from '../runner/process.ts';
 import type { UsageRecord } from '../core/usage.ts';
 import {
   activeRevision,
@@ -158,6 +159,11 @@ export function devcontourHost(h: DevContour, store: DevContourExecutionStore): 
   return {
     store,
     consumerVersion: CONSUMER_VERSION,
+    // Перенос evidence кандидата (`integrationReuse`): записи `reusedEvidence`
+    // и `attempt.gate.reusedFrom` хранятся как есть (схемы harness), получатель
+    // передаёт деревья своего Git (`receiverTrees`), панель показывает такие
+    // gates взятыми из кандидата и не считает их запусками.
+    capabilities: { integrationReuse: true },
     // Продолжение после ответа на вопрос исполнителя: снимок с ответом
     // активируется в задаче, а не в согласовании графа (DevContour согласует сам).
     input: devcontourInputHost(h, store),
@@ -518,6 +524,33 @@ export async function receiverContext(
 }
 
 /**
+ * Деревья кандидата и результата, вычисленные своим Git получателя
+ * (`ReceiverContext.trees`): нужны только результату с записями интеграции,
+ * взятыми из кандидата (`reusedEvidence`). Без таких записей Git не
+ * вызывается; коммита нет в репозитории получателя — деревьев нет, и такая
+ * запись не PASS (отказ называет причину), а не выдуманное равенство.
+ */
+export async function receiverTrees(
+  h: DevContour,
+  result: Pick<RunResult, 'repositoryId' | 'shas' | 'evidence'>,
+): Promise<{ candidate: string; result: string } | undefined> {
+  const shas = result.shas as { candidate?: string; result?: string };
+  if (!result.evidence.some((e) => e.reusedEvidence) || !shas.candidate || !shas.result)
+    return undefined;
+  const path = repository(h.config, result.repositoryId).path;
+  try {
+    const [candidate, merged] = await Promise.all(
+      [shas.candidate, shas.result].map((sha) =>
+        git(path, 'rev-parse', '--verify', '--quiet', `${sha}^{tree}`),
+      ),
+    );
+    return candidate && merged ? { candidate, result: merged } : undefined;
+  } catch {
+    return undefined;
+  }
+}
+
+/**
  * Получатель результата. Принятый результат DevContour уже записан в
  * задачу; доставка подтверждает его переносимость проверкой получателя и
  * отвечает receipt задачи. Изменённая постановка — конфликт с её текущей
@@ -538,7 +571,11 @@ export function devcontourResultSink(h: DevContour, store: DevContourExecutionSt
           'NOT_READY',
           `Результат ${result.runId} не принят задачей ${task.id}`,
         );
-      const problems = resultProblems(result, await receiverContext(h, store, task.id));
+      const trees = await receiverTrees(h, result);
+      const problems = resultProblems(result, {
+        ...(await receiverContext(h, store, task.id)),
+        ...(trees ? { trees } : {}),
+      });
       if (problems.length)
         throw new HarnessError(
           'INVALID_INPUT',

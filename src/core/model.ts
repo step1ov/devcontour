@@ -583,6 +583,12 @@ export interface Evidence {
    * применим ли gate. Нет поля — gate без `when` или запись прежней версии.
    */
   gateBasis?: string;
+  /**
+   * Запись интеграции взята из прошедшей записи кандидата при том же дереве
+   * (`integrationReuse`): gate на интеграции не исполнялся. Ссылка — ID записи
+   * кандидата, его SHA и общее дерево. Нет поля — gate исполнен.
+   */
+  reusedEvidence?: NonNullable<import('devcontour-harness').EvidenceRecord['reusedEvidence']>;
   /** Почему gate не исполнялся (`kind: 'not-applicable'`): шаблоны и сравненный diff. */
   notApplicable?: GateApplicability;
 }
@@ -1068,6 +1074,16 @@ export const repositorySchema = z.object({
    * даже когда они лежат в области записи другой роли. Поле без умолчания:
    * компонент без генераторов сохраняет digest политики.
    */
+  /**
+   * Перенос evidence кандидата на интеграцию (`integrationReuse` политики
+   * harness, только `identical-tree`): если дерево integration-коммита равно
+   * дереву кандидата (target не сдвинулся), gates, прошедшие на кандидате, на
+   * интеграции не исполняются — пишутся записью «взято из кандидата». Поле
+   * политики общее для workspace: задаётся во всех компонентах или ни в
+   * одном. Нет поля — каждый gate исполняется на интеграции, digest политики
+   * прежний.
+   */
+  integrationReuse: z.literal('identical-tree').optional(),
   generators: z.array(generatorSchema).max(MAX_GENERATORS).optional(),
   preflight: z.array(stepSchema).optional(),
   forge: forgeSchema.optional(),
@@ -1393,6 +1409,11 @@ export const configSchema = z.object({
   reviewer: reviewerBindingSchema,
   gates: gateList,
   gateGroups: gateGroups.optional(),
+  /**
+   * `integrationReuse` единственного компонента прежней формы конфигурации
+   * (без `repositories`); с компонентами — поле компонента.
+   */
+  integrationReuse: z.literal('identical-tree').optional(),
   protectedPaths: z
     .array(z.string().min(1))
     .default(['.github/', '.githooks/', 'devcontour.config.json']),

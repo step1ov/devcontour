@@ -47,6 +47,7 @@ import {
   NOT_APPLICABLE_LABEL,
   evidenceVerdict,
   notApplicableLine,
+  REUSED_LABEL,
   verdictWord,
 } from '../core/evidence-verdict.ts';
 import { Alert, AlertDescription } from '@/ui/alert.tsx';
@@ -351,6 +352,7 @@ function GateChips({ run }: { run: PanelRun }) {
               {verdict === 'passed' ? '✓' : verdict === 'not-applicable' ? '–' : '✗'} {e.gate}
               {e.phase === 'integration' ? ' · интеграция' : ''}
               {verdict === 'not-applicable' ? ` · ${NOT_APPLICABLE_LABEL}` : ''}
+              {e.reused ? ` · ${REUSED_LABEL}` : ''}
             </span>
           </Badge>
         );
@@ -372,12 +374,20 @@ function GateSummary({ run }: { run: PanelRun }) {
     // Неприменимые — отдельным счётом: ни в прошедшие, ни в упавшие.
     const skipped = items.filter((e) => evidenceVerdict(e) === 'not-applicable').length;
     const passed = items.length - failed - skipped;
+    // Взятые из кандидата — прошли, но не исполнялись: отдельным счётом.
+    const reused = items.filter((e) => e.reused).length;
     return (
       <span
         className={failed ? 'text-destructive' : passed ? 'text-success' : 'text-muted-foreground'}
       >
         {label} {failed ? `✗${failed}` : passed ? `✓${passed}` : ''}
         {skipped ? <span className="text-muted-foreground"> –{skipped}</span> : null}
+        {reused ? (
+          <span className="text-muted-foreground" title={REUSED_LABEL}>
+            {' '}
+            ↺{reused}
+          </span>
+        ) : null}
       </span>
     );
   };
@@ -389,7 +399,7 @@ function GateSummary({ run }: { run: PanelRun }) {
           const verdict = evidenceVerdict(e);
           return verdict === 'not-applicable'
             ? `– ${e.gate} · ${e.phase} · ${NOT_APPLICABLE_LABEL}`
-            : `${verdict === 'passed' ? '✓' : '✗'} ${e.gate} · ${e.phase}`;
+            : `${verdict === 'passed' ? '✓' : '✗'} ${e.gate} · ${e.phase}${e.reused ? ` · ${REUSED_LABEL}` : ''}`;
         })
         .join('\n')}
     >
@@ -3170,6 +3180,8 @@ export function App() {
                                     {e.reviewRound && ` · ${reviewRoundLine(e.reviewRound)}`}
                                     {e.kind === 'not-applicable' &&
                                       ` · ${notApplicableLine(e.notApplicable)}`}
+                                    {e.reusedEvidence &&
+                                      ` · ${REUSED_LABEL} ${e.reusedEvidence.sha.slice(0, 7)}`}
                                   </small>
                                 </span>
                               </button>

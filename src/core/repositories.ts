@@ -13,6 +13,7 @@ export function repositories(config: Config): Repository[] {
           targetBranch: config.targetBranch,
           gates: config.gates,
           ...(config.gateGroups ? { gateGroups: config.gateGroups } : {}),
+          ...(config.integrationReuse ? { integrationReuse: config.integrationReuse } : {}),
           lifecycle: config.lifecycle,
           prepare: config.prepare,
           protectedPaths: config.protectedPaths,
