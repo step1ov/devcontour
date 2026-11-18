@@ -35,6 +35,10 @@ import { updateBase } from '../src/runner/base-update.ts';
 import { git } from '../src/runner/process.ts';
 import { adapters, type AgentRequest } from '../src/runner/adapters.ts';
 import { panelRun, panelSummary } from '../src/application/panel.ts';
+import { completion, validateReceipt } from '../src/core/sync-state.ts';
+import { assertReusedTrees } from '../src/runner/git-sync.ts';
+import { receiptSchema } from '../src/core/sync-model.ts';
+import { receiptContext, receiptResult } from '../src/harness/receipt.ts';
 
 const unit = {
   id: 'unit',
@@ -54,9 +58,10 @@ const component = (id: string, extra: Record<string, unknown> = {}) => ({
 const withComponents = (...repositories: ReturnType<typeof component>[]): Config =>
   config({ roles, gates: [unit], repositories: repositories as never });
 
-test('integrationReuse компонента — поле политики только когда задано; digest без поля прежний (закреплён на 0.4.0-alpha.46)', () => {
+test('integrationReuse workspace — поле политики только когда задано; digest без поля прежний (закреплён на 0.4.0-alpha.46)', () => {
   const pinned = (extra: Record<string, unknown> = {}) =>
     configSchema.parse({
+      ...extra,
       version: 1,
       name: 'Pinned',
       repository: '/nonexistent/devcontour-pin/repo',
@@ -71,12 +76,11 @@ test('integrationReuse компонента — поле политики тол
           name: 'Monorepo',
           path: '/nonexistent/devcontour-pin/repo',
           gates: [unit],
-          ...extra,
         },
       ],
     });
   const plain = pinned();
-  assert.equal('integrationReuse' in plain.repositories[0], false);
+  assert.equal('integrationReuse' in plain, false);
   assert.equal('integrationReuse' in policyFromConfig(plain), false);
   // Те же значения, что до поля (0.4.0-alpha.46, без integrationReuse).
   assert.equal(
@@ -102,24 +106,19 @@ test('integrationReuse компонента — поле политики тол
   );
 });
 
-test('integrationReuse — во всех компонентах или ни в одном; на верхнем уровне при repositories — отказ', () => {
-  const both = withComponents(
-    component('main', { integrationReuse: 'identical-tree' }),
-    component('lib', { integrationReuse: 'identical-tree' }),
-  );
-  validateWorkflow(both);
-  assert.equal(policyFromConfig(both).integrationReuse, 'identical-tree');
-  const mixed = withComponents(
-    component('main', { integrationReuse: 'identical-tree' }),
-    component('lib'),
-  );
-  assert.throws(() => validateWorkflow(mixed), /во всех компонентах или ни в одном.*main.*lib/);
-  const top = { ...withComponents(component('main')), integrationReuse: 'identical-tree' as const };
-  assert.throws(() => validateWorkflow(top), /задаётся в компонентах/);
+test('integrationReuse — поле workspace: с компонентами и без; поле в записи компонента политику не меняет', () => {
+  const two = {
+    ...withComponents(component('main'), component('lib')),
+    integrationReuse: 'identical-tree' as const,
+  };
+  validateWorkflow(two);
+  assert.equal(policyFromConfig(two).integrationReuse, 'identical-tree');
+  const inComponent = withComponents(component('main', { integrationReuse: 'identical-tree' }));
+  assert.equal('integrationReuse' in policyFromConfig(inComponent), false);
 });
 
 test('Хост DevContour объявляет integrationReuse: движок с такой политикой создаётся; хост без объявления — INVALID_INPUT', () => {
-  const c = withComponents(component('main', { integrationReuse: 'identical-tree' }));
+  const c = { ...withComponents(component('main')), integrationReuse: 'identical-tree' as const };
   const store = new Store(':memory:');
   try {
     const h = new DevContour(store, c);
@@ -159,7 +158,7 @@ writeFileSync(process.env.DEVCONTOUR_REPORT_PATH, '<testsuite><testcase name="un
 
 /**
  * Реальный Git: компонент с gate `unit` в файле компонента, задача роли admin
- * правит данные. `reuse` — `integrationReuse` в файле компонента.
+ * правит данные. `reuse` — `integrationReuse` в config.json workspace.
  */
 async function reuseFixture(reuse: boolean) {
   const seed = await demos.acquire();
@@ -171,7 +170,6 @@ async function reuseFixture(reuse: boolean) {
   await writeFile(join(repo, 'apps/admin/data.txt'), 'alpha\n');
   await writeFile(join(repo, 'unit.mjs'), CHECK);
   const gates = [{ ...unit, command: [process.execPath, 'unit.mjs'], timeoutMs: 60_000 }];
-  // Поле верхнего уровня файла компонента, как у встроенного размещения.
   await writeFile(
     join(repo, 'devcontour.component.json'),
     JSON.stringify(
@@ -180,7 +178,6 @@ async function reuseFixture(reuse: boolean) {
         targetBranch: demo.targetBranch,
         gates,
         protectedPaths: [...demo.protectedPaths, 'unit.mjs'],
-        ...(reuse ? { integrationReuse: 'identical-tree' } : {}),
       },
       null,
       2,
@@ -198,6 +195,8 @@ async function reuseFixture(reuse: boolean) {
         roles,
         gates,
         repositories: [{ id: 'main', path: repo, configFile: 'devcontour.component.json' }],
+        // Поле workspace — верхний уровень config.json, как runTimeoutMs.
+        ...(reuse ? { integrationReuse: 'identical-tree' } : {}),
       },
       null,
       2,
@@ -388,6 +387,68 @@ test('Реальный Git: без integrationReuse gate интеграции и
     const row = view(f).progress.gates.find((g) => g.gate === 'unit')!;
     assert.equal(row.passed, 2);
     assert.equal('reused' in row, false);
+  } finally {
+    f.cleanup();
+  }
+});
+
+test('Receipt Git sync переносит отметку «взято из кандидата» сведением: получатель сверяет дерево result SHA, harness её не видит', async () => {
+  const f = await reuseFixture(true);
+  try {
+    const s = f.store.read();
+    const task = s.tasks.find((t) => t.id === f.run.taskId)!;
+    const receipt = receiptSchema.parse(completion(f.h, s, task));
+    const tree = await git(f.repo, 'rev-parse', `${task.resultSha}^{tree}`);
+    const marked = receipt.checks.filter((c) => c.reused);
+    assert.equal(marked.length, 1, JSON.stringify(receipt.checks));
+    assert.equal(marked[0].kind, 'test');
+    assert.equal(marked[0].phase, 'integration');
+    assert.deepEqual(marked[0].reused, { sha: f.run.candidateSha, tree });
+    // Получатель harness отметку не получает: запись — обычная проверка.
+    const context = receiptContext(f.h, task, s.contracts, () => undefined, {});
+    assert.equal(
+      receiptResult(receipt, context).evidence.some((e) => e.reusedEvidence),
+      false,
+    );
+    validateReceipt(f.h, receipt, task, s.contracts);
+    // Подменённое дерево или SHA кандидата — несогласованный receipt.
+    const forge = (reused: { sha: string; tree: string }) => ({
+      ...receipt,
+      checks: receipt.checks.map((c) => (c.reused ? { ...c, reused } : c)),
+    });
+    // Дерево сверяет синхронизация Git этого клона.
+    assertReusedTrees(f.repo, receipt);
+    assert.throws(
+      () => assertReusedTrees(f.repo, forge({ sha: f.run.candidateSha!, tree: 'e'.repeat(40) })),
+      /дерево reused/,
+    );
+    assert.throws(
+      () => validateReceipt(f.h, forge({ sha: 'd'.repeat(40), tree }), task, s.contracts),
+      /отметка reused/,
+    );
+    // Отметка у чужой записи (кандидат) схемой не принимается.
+    assert.throws(() =>
+      receiptSchema.parse({
+        ...receipt,
+        checks: receipt.checks.map((c) =>
+          c.phase === 'candidate' && c.kind === 'test' ? { ...c, reused: { sha: c.sha, tree } } : c,
+        ),
+      }),
+    );
+  } finally {
+    f.cleanup();
+  }
+});
+
+test('Receipt без integrationReuse отметки не несёт', async () => {
+  const f = await reuseFixture(false);
+  try {
+    const s = f.store.read();
+    const task = s.tasks.find((t) => t.id === f.run.taskId)!;
+    assert.equal(
+      completion(f.h, s, task).checks.some((c) => 'reused' in c),
+      false,
+    );
   } finally {
     f.cleanup();
   }

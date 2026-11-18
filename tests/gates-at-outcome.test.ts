@@ -5,6 +5,7 @@ import { after, test } from 'node:test';
 import assert from 'node:assert/strict';
 import { mkdtemp, rm, writeFile } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
+import { setTimeout as sleep } from 'node:timers/promises';
 import { join } from 'node:path';
 import type { Config } from '../src/core/model.ts';
 import { Store } from '../src/core/store.ts';
@@ -125,64 +126,92 @@ test('Проверка базы, прерванная сроком фазы: з�
   }
 });
 
+/** Ждать, пока `probe` не станет истинным (не дольше 60 с). */
+async function until(probe: () => boolean) {
+  const end = Date.now() + 60000;
+  while (!probe()) {
+    if (Date.now() > end) throw new Error('Не дождались состояния');
+    await sleep(100);
+  }
+}
+
 const demos = demoPool(testDemo);
 after(() => demos.close());
 
-test('Проверка доски, прерванная сроком фазы: отказ приёмки называет прерывание, событие и запись — interrupted, passed не выдаётся', async () => {
+/**
+ * Доска на учебном workspace с принятой задачей: gate `slow` задачи не
+ * исполняют, а в проверке доски (runId BC-…) он ждёт 20 с.
+ */
+async function slowBoard() {
   const seed = await demos.acquire();
   const { root } = seed;
   const config = loadConfig(join(root, 'config.json'));
   const store = new Store(join(root, 'state.sqlite'));
   const h = new DevContour(store, config);
-  try {
-    store.change('fixture.reset', (s) => {
-      s.tasks = [];
-      s.boards = [];
-      s.runs = [];
-    });
-    const gate = (id: string, script: string) => ({
-      id,
-      kind: 'test' as const,
-      command: [process.execPath, '-e', script],
-      timeoutMs: 60_000,
-      report: { type: 'junit' as const, path: `.reports/${id}.xml` },
-    });
-    // `slow` ждёт только в проверке доски (runId BC-…); задачи его не исполняют.
-    config.gates = [
-      gate('unit', sleeper(0, 'false')),
-      gate('slow', sleeper(20000, "String(process.env.DEVCONTOUR_RUN_ID).startsWith('BC-')")),
-    ];
-    const board = h.createBoard('Scoped release');
-    h.addTask(board.id, { ...input('Part A'), gates: ['unit'] });
-    h.approve(board.id);
-    const runtimes = {
-      ...adapters,
-      demo: {
-        name: 'demo' as const,
-        async execute(r: AgentRequest) {
-          if (r.review)
-            return {
-              data: { approved: true, summary: 'Looks fine', findings: [] },
-              log: 'fixture',
-              command: ['fixture'],
-            };
-          await writeFile(join(r.cwd, `part-${r.task.id}.txt`), r.task.title + '\n');
+  store.change('fixture.reset', (s) => {
+    s.tasks = [];
+    s.boards = [];
+    s.runs = [];
+  });
+  const gate = (id: string, script: string) => ({
+    id,
+    kind: 'test' as const,
+    command: [process.execPath, '-e', script],
+    timeoutMs: 60_000,
+    report: { type: 'junit' as const, path: `.reports/${id}.xml` },
+  });
+  // `slow` ждёт только в проверке доски (runId BC-…); задачи его не исполняют.
+  config.gates = [
+    gate('unit', sleeper(0, 'false')),
+    gate('slow', sleeper(20000, "String(process.env.DEVCONTOUR_RUN_ID).startsWith('BC-')")),
+  ];
+  const board = h.createBoard('Scoped release');
+  h.addTask(board.id, { ...input('Part A'), gates: ['unit'] });
+  h.approve(board.id);
+  const runtimes = {
+    ...adapters,
+    demo: {
+      name: 'demo' as const,
+      async execute(r: AgentRequest) {
+        if (r.review)
           return {
-            data: { completed: true, summary: 'Implemented' },
+            data: { approved: true, summary: 'Looks fine', findings: [] },
             log: 'fixture',
             command: ['fixture'],
           };
-        },
+        await writeFile(join(r.cwd, `part-${r.task.id}.txt`), r.task.title + '\n');
+        return {
+          data: { completed: true, summary: 'Implemented' },
+          log: 'fixture',
+          command: ['fixture'],
+        };
       },
-    };
-    const scheduler = new Scheduler(h, root, runtimes);
-    await scheduler.init();
-    await updateBase(config, root);
-    h.pause(false);
-    await scheduler.drain();
-    await scheduler.stop();
-    assert.ok(store.read().tasks.every((t) => t.status === 'done'));
-    const head = store.read().tasks[0].resultSha!;
+    },
+  };
+  const scheduler = new Scheduler(h, root, runtimes);
+  await scheduler.init();
+  await updateBase(config, root);
+  h.pause(false);
+  await scheduler.drain();
+  await scheduler.stop();
+  assert.ok(store.read().tasks.every((t) => t.status === 'done'));
+  const head = store.read().tasks[0].resultSha!;
+  return {
+    root,
+    store,
+    h,
+    board,
+    head,
+    cleanup: () => {
+      store.close();
+      seed.release();
+    },
+  };
+}
+
+test('Проверка доски, прерванная сроком фазы: отказ приёмки называет прерывание, событие и запись — interrupted, passed не выдаётся', async () => {
+  const { root, store, h, board, head, cleanup } = await slowBoard();
+  try {
     // Эксплуатационный срок фазы короче gate доски.
     h.config.runTimeoutMs = 2000;
     await assert.rejects(
@@ -211,7 +240,115 @@ test('Проверка доски, прерванная сроком фазы: �
     assert.equal(record.failure?.gate, 'slow', 'прерванная проверка не выглядит прошедшей');
     assert.equal(store.read().boards[0].revisions.at(-1)!.status, 'active');
   } finally {
-    store.close();
-    seed.release();
+    cleanup();
+  }
+});
+
+test('Проверка доски, отменённая вызывающим посреди gate: отказ CANCELLED, а не «прервана»; закрывающее событие — interrupted', async () => {
+  const { root, store, h, board, cleanup } = await slowBoard();
+  try {
+    const abort = new AbortController();
+    const accepting = acceptBoard(h, board.id, 'codex', false, undefined, {
+      root,
+      signal: abort.signal,
+    });
+    await until(() => store.events().some((e) => e.type === 'board.coverage.started'));
+    await sleep(3000);
+    abort.abort();
+    await assert.rejects(accepting, (e: Error & { code?: string }) => {
+      assert.equal(e.code, 'CANCELLED', e.message);
+      assert.doesNotMatch(e.message, /на итоговом SHA прервана/);
+      return true;
+    });
+    const coverage = store.events().filter((e) => e.type.startsWith('board.coverage.'));
+    assert.deepEqual(
+      coverage.map((e) => e.type).reverse(),
+      ['board.coverage.started', 'board.coverage.failed'],
+      'следующая проверка не начата',
+    );
+    const closing = coverage[0].data as { reason?: string; interrupted?: { gate?: string } };
+    assert.equal(closing.reason, 'interrupted');
+    assert.equal(closing.interrupted?.gate, 'slow');
+    assert.equal(store.read().boards[0].revisions.at(-1)!.status, 'active');
+  } finally {
+    cleanup();
+  }
+});
+
+test('Проверка базы, отменённая вызывающим посреди gate: CANCELLED, повтор не начат, записанная попытка базы не засчитана', async () => {
+  const root = await mkdtemp(join(tmpdir(), 'devcontour-base-cancel-'));
+  try {
+    await testDemo(root);
+    const c = loadConfig(join(root, 'config.json'));
+    c.gates = [
+      {
+        id: 'slow',
+        kind: 'test',
+        timeoutMs: 30000,
+        command: [process.execPath, '-e', sleeper(20000)],
+        report: { type: 'junit', path: '.reports/slow.xml' },
+      },
+    ] as Config['gates'];
+    const store = new Store(join(root, 'cancel-base.sqlite'));
+    const h = new DevContour(store, c);
+    try {
+      const target = 'refs/heads/' + c.targetBranch;
+      await writeFile(join(c.repository, 'base.txt'), 'moved');
+      await git(c.repository, 'add', '--', 'base.txt');
+      await git(c.repository, 'commit', '-qm', 'Base moved');
+      const sha = await git(c.repository, 'rev-parse', 'HEAD');
+      const from = await git(c.repository, 'rev-parse', target);
+      await git(c.repository, 'update-ref', target, sha);
+      h.baseUpdated([{ repositoryId: 'main', from, to: sha }]);
+      assert.ok(h.leader('server'));
+      // Первая попытка этой базы уже провалилась: остался один автоматический повтор.
+      const previous: BaseCheck = {
+        repositoryId: 'main',
+        sha,
+        policyDigest: h.policyDigest('main'),
+        runId: 'BK-previous',
+        passed: false,
+        gates: ['slow'],
+        failures: [{ gate: 'slow', message: 'exit 1' }],
+        evidence: [],
+        at: new Date().toISOString(),
+        tries: 1,
+      };
+      store.atomic(() => store.saveLocal(BASE_CHECK, 'main', sha, previous));
+      const abort = new AbortController();
+      const checking = checkBase(
+        h,
+        { data: root, state: root },
+        () => {
+          h.leader('server');
+        },
+        abort.signal,
+      );
+      await until(() => store.allEvents().some((e) => e.type === 'base.check.started'));
+      await sleep(3000);
+      abort.abort();
+      await assert.rejects(checking, (e: Error & { code?: string }) => {
+        assert.equal(e.code, 'CANCELLED', e.message);
+        return true;
+      });
+      const checks = store.allEvents().filter((e) => e.type.startsWith('base.check.'));
+      assert.deepEqual(
+        checks.map((e) => e.type).filter((t) => t !== 'base.check.liveness'),
+        ['base.check.started', 'base.check.failed'],
+        'повтор после отмены не начат',
+      );
+      const closing = checks.at(-1)!.data as { reason?: string; interrupted?: { gate?: string } };
+      assert.equal(closing.reason, 'interrupted');
+      assert.equal(closing.interrupted?.gate, 'slow');
+      assert.deepEqual(
+        store.localRecord<BaseCheck>(BASE_CHECK, 'main', sha),
+        previous,
+        'запись и счёт попыток прежние: отмена — не исход базы',
+      );
+    } finally {
+      store.close();
+    }
+  } finally {
+    await rm(root, { recursive: true, force: true });
   }
 });

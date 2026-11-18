@@ -597,11 +597,15 @@ export async function checkBase(
           : { providers: { ...plan.providers, '@moved': 'during-check' } }),
         ...(plan.carried.length ? { carried: plan.carried } : {}),
       };
+      // Отмена вызывающим (остановка сервера) посреди gate — не исход базы:
+      // запись не пишется, прежняя (и её счёт попыток) остаётся.
+      const cancelled = !!outcome.interrupted && !!signal?.aborted;
       try {
-        h.store.atomic(() => {
-          guard();
-          h.store.saveLocal(BASE_CHECK, base.repositoryId, base.sha, saved);
-        });
+        if (!cancelled)
+          h.store.atomic(() => {
+            guard();
+            h.store.saveLocal(BASE_CHECK, base.repositoryId, base.sha, saved);
+          });
       } catch (error) {
         // Начатая проверка кончается событием и тогда, когда исход не
         // записался: иначе её последний переход живости висел бы как идущий.
@@ -648,11 +652,11 @@ export async function checkBase(
         },
         true,
       );
-      // Отмена вызывающим (остановка сервера): повтор не начинается.
-      if (outcome.interrupted && signal?.aborted)
+      // Отмена вызывающим: повтор не начинается, попытка не засчитана.
+      if (cancelled)
         throw new HarnessError(
           'CANCELLED',
-          'Проверка базы прервана: ' + outcome.interrupted.reason,
+          'Проверка базы прервана: ' + (outcome.interrupted?.reason ?? 'отмена'),
         );
       record = saved;
     }

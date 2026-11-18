@@ -147,18 +147,6 @@ const reviewOnlyGate = {
   report: { type: 'junit' as const, path: '.technical-review-only.xml' },
 };
 
-/**
- * `integrationReuse` политики: поле политики общее, в DevContour оно лежит в
- * компонентах и действует, только когда задано во всех (смешанную
- * конфигурацию отклоняет `validateWorkflow`).
- */
-export function integrationReuseOf(config: Config): 'identical-tree' | undefined {
-  const repos = repositories(config);
-  return repos.length && repos.every((r) => r.integrationReuse === 'identical-tree')
-    ? 'identical-tree'
-    : undefined;
-}
-
 export function policyFromConfig(
   config: Config,
   options: { purpose?: 'execution' | 'review' } = {},
@@ -257,9 +245,8 @@ export function policyFromConfig(
     runTimeoutMs: config.runTimeoutMs,
     ...(config.stallSweep ? { stallSweep: config.stallSweep } : {}),
     ...(config.gateTimeoutFloorMs ? { gateTimeoutFloorMs: config.gateTimeoutFloorMs } : {}),
-    // Перенос evidence кандидата — поле компонентов (во всех или ни в одном,
-    // `validateWorkflow`); только заданное: без него digest политики прежний.
-    ...(integrationReuseOf(config) ? { integrationReuse: integrationReuseOf(config) } : {}),
+    // Перенос evidence кандидата — только заданный: без поля digest прежний.
+    ...(config.integrationReuse ? { integrationReuse: config.integrationReuse } : {}),
     ...(config.inputPolicy
       ? {
           inputPolicy: {

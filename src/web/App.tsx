@@ -374,13 +374,15 @@ function GateSummary({ run }: { run: PanelRun }) {
     // Неприменимые — отдельным счётом: ни в прошедшие, ни в упавшие.
     const skipped = items.filter((e) => evidenceVerdict(e) === 'not-applicable').length;
     const passed = items.length - failed - skipped;
-    // Взятые из кандидата — прошли, но не исполнялись: отдельным счётом.
+    // Взятые из кандидата — прошли, но не исполнялись: отдельным счётом, не
+    // в числе исполненных (✓ — исполненные PASS, ↺ — взятые).
     const reused = items.filter((e) => e.reused).length;
+    const ran = passed - reused;
     return (
       <span
         className={failed ? 'text-destructive' : passed ? 'text-success' : 'text-muted-foreground'}
       >
-        {label} {failed ? `✗${failed}` : passed ? `✓${passed}` : ''}
+        {label} {failed ? `✗${failed}` : ran ? `✓${ran}` : ''}
         {skipped ? <span className="text-muted-foreground"> –{skipped}</span> : null}
         {reused ? (
           <span className="text-muted-foreground" title={REUSED_LABEL}>
@@ -3247,7 +3249,8 @@ export function App() {
                                   {check.phase} / {check.gate}:{' '}
                                   {check.kind === 'not-applicable'
                                     ? notApplicableLine(check.notApplicable)
-                                    : verdictWord(check)}{' '}
+                                    : verdictWord(check)}
+                                  {check.reused ? ` · ${REUSED_LABEL}` : ''}{' '}
                                   · <code>{check.sha.slice(0, 12)}</code>
                                 </li>
                               ),
