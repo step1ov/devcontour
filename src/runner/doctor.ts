@@ -1058,7 +1058,9 @@ export async function doctor(
   // закреплённой приёмки — предупреждение, а не блокировка. Новая редакция
   // с ним отклоняется до ревью (review-contract, contract-change).
   checks.push(...(await contractClosureChecks(config, state?.contracts ?? [])));
-  checks.push(...contractSizeChecks(state?.contracts ?? [], state?.tasks ?? []));
+  checks.push(
+    ...contractSizeChecks(state?.contracts ?? [], Array.isArray(state?.tasks) ? state.tasks : []),
+  );
   checks.push(...contractForkChecks(state?.contracts ?? []));
   // Состояние прочитано не полностью: контракты баз компонентов не видны, и
   // отсутствие находок закрепления ничего не доказывает.
@@ -1224,26 +1226,48 @@ export function checkoutsCheck(config: Config, root: string): Check {
  * `CONTRACT_CONSOLIDATE_AFTER` смысловых редакций документа с последней
  * консолидации; готовность не снимает.
  *
- * Советы — только по документу, который ещё будут поправлять: к одной из его
- * редакций привязана открытая задача (не `done` и не `cancelled`), или задач
- * у него нет вовсе — только что зарегистрированный под следующий этап
- * контракт дешевле всего консолидировать до привязки. Документ, все задачи
- * которого приняты или отменены, — исторический журнал: новые задачи
+ * Советы — только по документу, который ещё будут поправлять. Документ
+ * выведен из работы (исторический журнал), если к его действующей редакции
+ * (или к редакциям, которые она лишь консолидирует) привязаны задачи и все
+ * задачи всех его редакций приняты (`done`) или отменены. Новые задачи
  * привязываются к другим контрактам, и совет держал бы doctor в `degraded`
- * без действия, которое что-то изменит.
+ * без действия, которое что-то изменит. Действующая редакция без своих
+ * задач — зарегистрирована под следующий этап: совет остаётся, до
+ * привязки консолидировать дешевле всего. Задача без статуса — открытая.
  */
 export function contractSizeChecks(
   contracts: DevContourState['contracts'],
-  tasks: readonly Pick<DevContourState['tasks'][number], 'status' | 'contracts'>[] = [],
+  tasks: readonly unknown[] = [],
 ): Check[] {
-  const bound = (t: (typeof tasks)[number], ids: Set<string>) =>
-    Array.isArray(t.contracts) && t.contracts.some((id) => ids.has(id));
+  // doctor читает состояние до разбора схемой: запись задачи чужой формы не
+  // роняет проверку; задача без списка контрактов ни к чему не привязана.
+  const records = tasks.flatMap((t) => {
+    const r = t as { status?: unknown; contracts?: unknown } | null;
+    return r && typeof r === 'object' && Array.isArray(r.contracts)
+      ? [{ status: r.status, contracts: r.contracts as unknown[] }]
+      : [];
+  });
+  const boundTo = (ids: Set<string>) =>
+    records.filter((t) => t.contracts.some((id) => typeof id === 'string' && ids.has(id)));
+  const byId = new Map(contracts.map((x) => [x.id, x]));
+  // Действующая редакция и те, что она консолидирует звено за звеном:
+  // консолидация сохраняет привязки прежней редакции.
+  const equivalent = (c: DevContourState['contracts'][number]) => {
+    const ids = new Set([c.id]);
+    for (let x = c; x.consolidates && x.consolidates.from === x.previous;) {
+      const before = x.previous ? byId.get(x.previous) : undefined;
+      if (!before || ids.has(before.id)) break;
+      ids.add(before.id);
+      x = before;
+    }
+    return ids;
+  };
   const retired = (c: DevContourState['contracts'][number]) => {
-    const ids = new Set(
+    if (!boundTo(equivalent(c)).length) return false;
+    const all = new Set(
       (c.source ? contractRedactionsOf(contracts, c.source, c.repositoryId) : [c]).map((x) => x.id),
     );
-    const mine = tasks.filter((t) => bound(t, ids));
-    return mine.length > 0 && mine.every((t) => t.status === 'done' || t.status === 'cancelled');
+    return boundTo(all).every((t) => t.status === 'done' || t.status === 'cancelled');
   };
   return (
     contracts

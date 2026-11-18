@@ -249,3 +249,70 @@ test('F50: doctor() drops the advice of a contract whose bound tasks are all acc
     rmSync(root, { recursive: true, force: true });
   }
 });
+
+test('F50 r1: a fresh redaction without its own tasks keeps the advice, a consolidation keeps the binding', () => {
+  const source = 'docs/contracts/journal.md';
+  const chain = Array.from({ length: 7 }, (_, i) =>
+    contract(`J-${i + 1}`, CONTRACT_CONTENT_WARN, { source }),
+  );
+  const ids = (cs: Contract[], tasks: unknown[]) =>
+    contractSizeChecks(cs, tasks as never).map((c) => c.id);
+  // Принятые задачи — только на прежней редакции; J-7 зарегистрирована под
+  // следующий этап и задач ещё не имеет: консолидировать её дешевле всего.
+  assert.deepEqual(ids(chain, [{ id: 'T-1', status: 'done', contracts: ['J-2'] }]), [
+    'contract-size:J-7',
+    'contract-consolidate:J-7',
+  ]);
+  // Консолидация J-7 равносильна ей: принятая задача на J-7 закрывает и её.
+  const consolidated = contract('J-8', CONTRACT_CONTENT_WARN, {
+    source,
+    previous: 'J-7',
+    consolidates: { from: 'J-7', review: 'R' },
+  });
+  assert.deepEqual(
+    ids([...chain, consolidated], [{ id: 'T-1', status: 'done', contracts: ['J-7'] }]),
+    [],
+  );
+  // Без задач на J-7 консолидация по-прежнему получает совет о размере.
+  assert.deepEqual(
+    ids([...chain, consolidated], [{ id: 'T-1', status: 'done', contracts: ['J-2'] }]),
+    ['contract-size:J-8'],
+  );
+});
+
+test('F50 r1: bound tasks are counted per component; a missing repositoryId is main', () => {
+  const source = 'docs/contracts/api.md';
+  const main = contract('M-1', CONTRACT_CONTENT_WARN, { source });
+  const mainExplicit = contract('M-1', CONTRACT_CONTENT_WARN, { source, repositoryId: 'main' });
+  const lib = contract('L-1', CONTRACT_CONTENT_WARN, { source, repositoryId: 'lib' });
+  const ids = (cs: Contract[], tasks: unknown[]) =>
+    contractSizeChecks(cs, tasks as never).map((c) => c.id);
+  // main закрыт принятой задачей, открытая задача — только у lib.
+  const tasks = [
+    { id: 'T-1', status: 'done', contracts: ['M-1'] },
+    { id: 'T-2', status: 'ready', contracts: ['L-1'] },
+  ];
+  assert.deepEqual(ids([main, lib], tasks), ['contract-size:L-1']);
+  assert.deepEqual(ids([mainExplicit, lib], tasks), ['contract-size:L-1']);
+  // Наоборот: lib закрыт, main открыт.
+  assert.deepEqual(
+    ids(
+      [main, lib],
+      [
+        { id: 'T-1', status: 'ready', contracts: ['M-1'] },
+        { id: 'T-2', status: 'done', contracts: ['L-1'] },
+      ],
+    ),
+    ['contract-size:M-1'],
+  );
+});
+
+test('F50 r1: malformed task records do not break doctor; a bound task without status is open', () => {
+  const c = contract('C-near', CONTRACT_CONTENT_WARN);
+  const ids = (tasks: unknown[]) => contractSizeChecks([c], tasks as never).map((x) => x.id);
+  const done = { id: 'T-1', status: 'done', contracts: ['C-near'] };
+  assert.deepEqual(ids([done, { id: 'T-2', status: 'ready' }]), []);
+  assert.deepEqual(ids([done, { id: 'T-3', status: 'ready', contracts: 'C-near' }]), []);
+  assert.deepEqual(ids([done, { id: 'T-4', contracts: ['C-near'] }]), ['contract-size:C-near']);
+  assert.deepEqual(ids([null, done]), []);
+});
