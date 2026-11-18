@@ -223,6 +223,15 @@ const samples: { [C in HintCode]: (HintSubject & Extract<HintOf, { code: C }>)[]
     { code: 'board-start', params: { running: true }, boardId: 'board-1', job },
     { code: 'board-start', params: { running: false }, boardId: 'board-1' },
   ],
+  'board-restart': [
+    {
+      code: 'board-restart',
+      params: { running: false, operation: 'CC-1', others: ['board-2'] },
+      boardId: 'board-1',
+      job: { ...job, status: 'running' },
+    },
+    { code: 'board-restart', params: { running: true }, boardId: 'board-1', job },
+  ],
   'pause-lift': [
     {
       code: 'pause-lift',
@@ -548,8 +557,11 @@ test('Подсказки шага: новая конфигурация setup п�
  * неизвестным диапазоном подтверждает оператор (ревью 3).
  * Текст `stale-base` называет, как готовить следующий этап при идущей доске
  * (черновики вне рабочей ветки, F52); прочие образцы байтово прежние.
+ * Добавлены образцы кода `board-restart` (задание доски устарело после
+ * перепривязки задач операцией изменения контракта, F66); прочие образцы
+ * байтово прежние.
  */
-const ENGLISH_SAMPLES_SHA256 = 'd605a46d83e5d9b1101881b19832b9ad0ea72f14cb89383c337ec3caa91730da';
+const ENGLISH_SAMPLES_SHA256 = '0e4e4f5b51cc73a29e21e4124eabfdf8950183cd2f5d738cb907ad96ae5ffcfc';
 
 test('Подсказки шага: английские тексты образцов закреплены', () => {
   assert.equal(

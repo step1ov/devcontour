@@ -6,6 +6,7 @@ import { join } from 'node:path';
 import { z } from 'zod';
 import { fencedRefMove } from 'devcontour-harness';
 import { executionOf } from '../harness/execution.ts';
+import { LeadWorkflow } from '../core/lead-workflow.ts';
 import { DomainError, type Contract } from '../core/model.ts';
 import { contractDigest, digest, latestRedaction, type DevContour } from '../core/service.ts';
 import { consolidationPlan, reviewConsolidation, StaleConsolidation } from './consolidation.ts';
@@ -210,6 +211,11 @@ export type ContractChangeView = Omit<ContractChange, 'token' | 'leaseUntil'> & 
     demoted?: string[];
   }[];
   continued?: ContractChangeView[];
+  /** Задания досок, устаревшие после перепривязки, и шаг (`ContractChanges.boardJobs`). */
+  boardJobs?: {
+    jobs: ReturnType<LeadWorkflow['invalidated']>;
+    next: string;
+  };
 };
 
 export class ContractChanges {
@@ -269,10 +275,37 @@ export class ContractChanges {
         ...(a.merged?.length ? { merged: a.merged } : {}),
         ...(a.demoted?.length ? { demoted: a.demoted } : {}),
       }));
+    const boardJobs = this.boardJobs(op);
     return {
       ...rest,
       next: stepsOf(op)[op.step] ?? null,
       ...(mapping.length ? { mapping } : {}),
+      ...(boardJobs ? { boardJobs } : {}),
+    };
+  }
+
+  /**
+   * Задания ведущего досок операции, которые её перепривязка сделала
+   * устаревшими (F66): начатые до её окончания по прежнему входу, без нового
+   * задания по текущему. Они не продолжатся, и очередь может стоять на
+   * ожидании проверки базы, которое снимает только задание доски, — шаг
+   * называет новое задание каждой доски. Только у завершённой операции.
+   */
+  boardJobs(op: ContractChange) {
+    if (op.status !== 'completed' || !op.boards.length || !op.finishedAt) return undefined;
+    const jobs = new LeadWorkflow(this.h)
+      .invalidated(op.boards)
+      .filter((j) => j.startedAt <= op.finishedAt!);
+    if (!jobs.length) return undefined;
+    const starts = jobs
+      .map(
+        (j) =>
+          `workflow_start {"kind": "board", "id": ${JSON.stringify(j.boardId)}, "authorRuntime": ${JSON.stringify(j.authorRuntime)}}`,
+      )
+      .join('; ');
+    return {
+      jobs,
+      next: `Перепривязка задач сделала устаревшими задания ведущего досок (${jobs.map((j) => `${j.boardId}: ${j.status}`).join(', ')}): они не продолжатся. Начните новое задание каждой доски — ${starts}; прежнее закроется как stale. Новое задание само проверит перенесённую базу (ожидание base-check) и продолжит выдачу; session_handoff называет этот шаг (host.next workflow_start, code board-restart).`,
     };
   }
 

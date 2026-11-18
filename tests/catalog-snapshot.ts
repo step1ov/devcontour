@@ -197,5 +197,9 @@
 // Намеренное изменение (F64): queue_set принимает необязательную короткую
 // причину паузы ведущего `reason` (только с paused true, до 300 знаков),
 // описание называет, где её видно; прочие операции байтово прежние.
-export const CATALOG_DIGEST = '5b0bba83a4ab06391c5c92cfabd0771c6ce2ab5af55054489eec4aedc1d83a69';
+// Намеренное изменение (F66): описание session_handoff называет шаг
+// workflow_start с кодом board-restart (задание доски на прежнем входе, в
+// том числе после перепривязки contract-change), описание
+// contract_change_status — поле boardJobs; прочие операции байтово прежние.
+export const CATALOG_DIGEST = 'e563c8a0b8452070b6739a1001fefc07223a06f91411c7aeecdba9839cc5d962';
 export const SNAPSHOT_VERSION = '0.4.0-alpha.7';

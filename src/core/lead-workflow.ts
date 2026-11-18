@@ -357,6 +357,54 @@ export class LeadWorkflow {
     for (const id of fresh) stale.delete(id);
     return stale;
   }
+  /**
+   * Задания досок, начатые по прежнему входу (перепривязка контракта,
+   * политика исполнения, постановка), которые уже не продолжатся: последнее
+   * такое задание доски (queued, running или stale), если задания по
+   * текущему входу у неё нет. Очередь закрывает устаревшее задание `stale`
+   * лишь при следующем взятии стадии, поэтому действующее задание здесь —
+   * тоже устаревшее. Доска, вход которой не построить, не входит: её шаг —
+   * исправление входа. Чтение, без записи.
+   */
+  invalidated(boardIds?: readonly string[], s: DevContourState = this.h.store.read()) {
+    const fresh = new Set<string>();
+    const latest = new Map<string, WorkflowJob>();
+    const inputs = new Map<string, { digest: string; owner?: string } | undefined>();
+    const bound = (id: string) => {
+      if (!inputs.has(id))
+        try {
+          inputs.set(id, this.input('board', id, s));
+        } catch (error) {
+          if (!(error instanceof DomainError)) throw error;
+          inputs.set(id, undefined);
+        }
+      return inputs.get(id);
+    };
+    for (const owner of [undefined, ...repositories(this.h.config).map((r) => r.id)])
+      for (const job of this.list(owner)) {
+        if (job.kind !== 'board' || (boardIds && !boardIds.includes(job.id))) continue;
+        const input = bound(job.id);
+        if (!input) continue;
+        if (input.digest === job.inputDigest && input.owner === job.owner) {
+          fresh.add(job.id);
+          continue;
+        }
+        if (!['queued', 'running', 'stale'].includes(job.status)) continue;
+        const seen = latest.get(job.id);
+        if (!seen || job.startedAt > seen.startedAt) latest.set(job.id, job);
+      }
+    return [...latest.values()]
+      .filter((job) => !fresh.has(job.id))
+      .map((job) => ({
+        boardId: job.id,
+        key: job.key,
+        ...(job.owner ? { repositoryId: job.owner } : {}),
+        status: job.status,
+        stage: job.stage,
+        startedAt: job.startedAt,
+        authorRuntime: job.authorRuntime,
+      }));
+  }
   get(key: string, owner?: string) {
     return domain(() => this.queue().get(key, owner)) as WorkflowJob;
   }

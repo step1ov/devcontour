@@ -52,6 +52,7 @@ import {
 } from '../core/work-status.ts';
 import { queueStopOf } from './queue-stop.ts';
 import { executionOf, toDomain } from '../harness/execution.ts';
+import { ContractChanges } from '../runner/contract-change.ts';
 import { resolveIdPrefix } from '../core/id-prefix.ts';
 import type { DevContourExecutionStore } from '../harness/store.ts';
 
@@ -685,6 +686,8 @@ export interface HostContext {
   /** Задания досок (вид графа) в порядке `harnessOf`. */
   jobs: HarnessJob[];
   live: (job: HarnessJob) => boolean;
+  /** Устаревшие задания досок без задания по текущему входу (`LeadWorkflow.invalidated`). */
+  invalidated: () => ReturnType<LeadWorkflow['invalidated']>;
   current: (job: HarnessJob) => boolean;
   /** Причина, по которой вход доски не построить, или `undefined`. */
   inputError: (boardId: string) => string | undefined;
@@ -704,7 +707,13 @@ export function hostContext(
 ): HostContext {
   const reconfigure = { reconfigureApplies: harness.engine.reconfigureApplies(view) };
   let built: HandoffPack | undefined;
+  let invalidated: ReturnType<LeadWorkflow['invalidated']> | undefined;
   return {
+    invalidated: () =>
+      (invalidated ??=
+        h.config.approvalMode === 'operator'
+          ? []
+          : new LeadWorkflow(h).invalidated(undefined, state)),
     h,
     get pack() {
       return (built ??= pack());
@@ -781,6 +790,23 @@ export function boardStep(boardId: string, ctx: HostContext): HandoffHostNext | 
 function closedBoard(state: State, boardId: string) {
   const tasks = boardTasks(state, boardId)?.tasks;
   return !!tasks?.length && tasks.every((t) => t.status === 'cancelled');
+}
+
+/**
+ * Завершённая операция изменения контракта, перепривязавшая задачи доски
+ * после старта её задания (`since`): последняя такая, если есть.
+ */
+function reboundBy(ctx: HostContext, boardId: string, since: string) {
+  return new ContractChanges(ctx.h, '')
+    .list()
+    .filter(
+      (op) =>
+        op.status === 'completed' &&
+        op.boards.includes(boardId) &&
+        !!op.finishedAt &&
+        op.finishedAt >= since,
+    )
+    .sort((a, b) => (a.finishedAt! < b.finishedAt! ? 1 : -1))[0]?.id;
 }
 
 function boardDraft(boardId: string, ctx: HostContext): HostNextDraft | undefined {
@@ -908,6 +934,28 @@ function boardDraft(boardId: string, ctx: HostContext): HostNextDraft | undefine
   const plan = planStep(boardId, ctx);
   if (plan) return plan;
   const running = ctx.pack.active.some((a) => ctx.view.work(a.workId)?.graphId === boardId);
+  // Задание, которое вход доски сделал устаревшим (перепривязка контракта,
+  // политика, постановка): шаг — его перезапуск с причиной (F66).
+  const restart = ctx.invalidated().find((j) => j.boardId === boardId);
+  if (restart) {
+    const job = jobs.find((j) => j.key === restart.key) ?? jobs[0];
+    const operation = reboundBy(ctx, boardId, restart.startedAt);
+    const others = ctx
+      .invalidated()
+      .filter((j) => j.boardId !== boardId)
+      .map((j) => j.boardId);
+    return {
+      action: 'workflow_start',
+      boardId,
+      job: jobRef(job),
+      code: 'board-restart',
+      params: {
+        running,
+        ...(operation ? { operation } : {}),
+        ...(others.length ? { others } : {}),
+      },
+    };
+  }
   const previous = jobs.find((j) => j.status !== 'completed');
   return {
     action: 'workflow_start',
@@ -1363,7 +1411,7 @@ function hostStep(ctx: HostContext): HandoffHostNext | undefined {
     // Ожидание задания, цикл которого лишь ждёт задач, спрятало бы решение
     // пакета за «сервер продолжит»: вместо него — решение о плане доски,
     // если план не согласован, иначе шага нет и стоит шаг пакета.
-    return own
+    const chosen = own
       .map((id) => {
         const step = boardStep(id, ctx);
         if (step?.action === 'wait' && !acts(step.loop)) return planStep(id, ctx);
@@ -1372,13 +1420,32 @@ function hostStep(ctx: HostContext): HandoffHostNext | undefined {
       .filter((x): x is HandoffHostNext => !!x)
       .filter((x) => x.action !== 'workflow_start' && x.action !== 'queue_set')
       .sort((a, b) => rank(a) - rank(b))[0];
+    // Решение о плане — о будущем объёме; задание другой доски, которое
+    // устарело после перепривязки, стоит уже сейчас: сначала его перезапуск
+    // (F66). Перезапуск — шаг той доски, а не выдуманный шаг очереди.
+    if (chosen?.decision === 'plan' || (!chosen && pack.next.action === 'review-plan')) {
+      const restart = ctx
+        .invalidated()
+        .filter((j) => !own.includes(j.boardId))
+        .map((j) => boardStep(j.boardId, ctx))
+        .find((x) => x?.code === 'board-restart');
+      if (restart) return restart;
+    }
+    return chosen;
   }
-  const boards =
-    next && state.boards.some((b) => b.id === next)
-      ? [next]
-      : [...new Set(pack.works.map((w) => w.graphId))].filter((id) =>
-          state.boards.some((b) => b.id === id),
-        );
+  // Доски, чьи задания устарели (перепривязка контракта и т. п.), — среди
+  // кандидатов всегда: их перезапуск идёт раньше решения о плане другой
+  // доски, на которую указывает пакет (F66).
+  const boards = [
+    ...new Set([
+      ...(next && state.boards.some((b) => b.id === next)
+        ? [next]
+        : [...new Set(pack.works.map((w) => w.graphId))].filter((id) =>
+            state.boards.some((b) => b.id === id),
+          )),
+      ...ctx.invalidated().map((j) => j.boardId),
+    ]),
+  ];
   const steps = boards
     .map((id) => boardStep(id, ctx))
     .filter((x): x is HandoffHostNext => !!x)
