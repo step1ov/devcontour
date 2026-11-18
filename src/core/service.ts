@@ -1008,6 +1008,9 @@ function planPath(path: PropertyKey[]) {
     'план'
   );
 }
+/** Обязательные поля постановки задачи (`taskInput` без значения по умолчанию). */
+const TASK_REQUIRED_FIELDS = ['title', 'description', 'role', 'acceptance'] as const;
+
 export class DevContour {
   constructor(
     readonly store: Store,
@@ -1563,6 +1566,19 @@ export class DevContour {
    * видел правящий: она вне digest постановки, и без неё правка со
    * старыми gates молча вернула бы чужую правку одних gates.
    */
+  /**
+   * Постановка правки из файла (`edit-task --file`): обязательные поля
+   * постановки, которых в файле нет, берутся из текущей задачи — как и
+   * необязательные (их сохраняет `editTask`). Поля со значением по умолчанию
+   * (`repositoryId`, `scope`, `dependsOn`, `contracts`) файл задаёт сам: без
+   * них — значения по умолчанию, как и прежде.
+   */
+  static keptTaskFields(current: Task, input: unknown): unknown {
+    if (!input || typeof input !== 'object' || Array.isArray(input)) return input;
+    const out: Record<string, unknown> = { ...(input as Record<string, unknown>) };
+    for (const key of TASK_REQUIRED_FIELDS) if (!(key in out)) out[key] = current[key];
+    return out;
+  }
   editTask(id: string, input: unknown, expectedDigest: string, expectedScopeDigest?: string) {
     const parsed = taskIngest.parse(input);
     repository(this.config, parsed.repositoryId);

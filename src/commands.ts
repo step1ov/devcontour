@@ -49,6 +49,7 @@ import { mkdir, writeFile, readFile, realpath, rename } from 'node:fs/promises';
 import { join, resolve, dirname, sep, basename, posix } from 'node:path';
 import { Store } from './core/store.ts';
 import { DevContour } from './core/service.ts';
+import { z } from 'zod';
 import { configSchema } from './core/model.ts';
 import { loadConfig, scopedConfig } from './runner/config.ts';
 import { Scheduler } from './runner/scheduler.ts';
@@ -1537,11 +1538,21 @@ async function main() {
       } else if (operation === 'edit-task') {
         const task = store.read().tasks.find((t) => t.id === option('--task', ''));
         if (!task) throw new Error('Задача не найдена');
-        result = h.editTask(
-          task.id,
-          await readAgentJson(resolve(option('--file', 'task.json'))),
-          specDigest(task),
-        );
+        const file = await readAgentJson(resolve(option('--file', 'task.json')));
+        try {
+          // Обязательные поля, которых нет в файле, — из текущей задачи (F65).
+          result = h.editTask(task.id, DevContour.keptTaskFields(task, file), specDigest(task));
+        } catch (error) {
+          if (!(error instanceof z.ZodError)) throw error;
+          throw new Error(
+            'Файл задачи не прошёл проверку: ' +
+              error.issues
+                .slice(0, 10)
+                .map((i) => `${i.path.join('.') || 'файл'}: ${i.message}`)
+                .join('; ') +
+              (error.issues.length > 10 ? `; и ещё ${error.issues.length - 10}` : ''),
+          );
+        }
       } else if (operation === 'correct') {
         const roots = option('--roots', '').split(',').filter(Boolean);
         if (!roots.length || !args.includes('--reason'))
