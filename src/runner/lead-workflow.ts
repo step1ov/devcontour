@@ -201,7 +201,12 @@ export class LeadRunner {
         changeSet.acceptance?.at,
         changeSet.deliveries?.map((d) => [d.id, d.status]),
         changeSet.releaseId,
+        // Начало совместной проверки ждёт идущих попыток и живых проверок
+        // всех ChangeSet, а не только своего (`jointStage`).
         s.runs.some((r) => r.status === 'active'),
+        s.changeSets.some((x) =>
+          x.verifications.some((v) => v.status === 'active' && v.leaseUntil > now),
+        ),
         joint ? [joint.done, joint.failed] : null,
         (this.startWaits.get(changeSet.id)?.notBefore ?? 0) > now,
       ],
@@ -228,9 +233,13 @@ export class LeadRunner {
     // Сбои такта читаются один раз за такт и только если нужны отпечатку.
     let errors: ReturnType<typeof tickErrors> | undefined;
     const errorsOnce = () => (errors ??= tickErrors(this.h));
+    // Задания, которых больше нет в списке (удалены, заменены), не держат
+    // своих пауз ожидания.
+    const listed = new Set<string>();
     for (const owner of owners)
       for (const saved of this.workflow.list(owner)) {
         if (this.stopping) return;
+        listed.add(saved.key);
         if (!['queued', 'running'].includes(saved.status)) {
           this.idle.delete(saved.key);
           // Закончившееся задание: паузы начала его ChangeSet не нужны.
@@ -244,7 +253,8 @@ export class LeadRunner {
         // захватывает её на следующем такте.
         const idle = this.idle.get(saved.key);
         const print = saved.status === 'queued' ? this.waitPrint(saved, errorsOnce) : undefined;
-        if (print !== undefined && idle?.print === print && Date.now() < idle.notBefore) continue;
+        if (print !== undefined && idle?.print === print && performance.now() < idle.notBefore)
+          continue;
         const job = this.workflow.claim(saved.key, owner);
         if (!job) {
           // Попытки исчерпаны прерываниями: причина последнего — в ошибке.
@@ -278,7 +288,8 @@ export class LeadRunner {
               idle?.print === print
                 ? Math.min(idle.delayMs * 2, this.idleWait.maxMs)
                 : this.idleWait.initialMs;
-            this.idle.set(saved.key, { print, notBefore: Date.now() + delayMs, delayMs });
+            // Монотонные часы: перевод системных часов назад не продлевает паузу.
+            this.idle.set(saved.key, { print, notBefore: performance.now() + delayMs, delayMs });
           } else this.idle.delete(saved.key);
         } catch (e) {
           this.idle.delete(saved.key);
@@ -315,6 +326,7 @@ export class LeadRunner {
           this.controller = undefined;
         }
       }
+    for (const key of this.idle.keys()) if (!listed.has(key)) this.idle.delete(key);
   }
   /**
    * Упала задача доски. Раньше здесь цикл останавливался словами «Task failure

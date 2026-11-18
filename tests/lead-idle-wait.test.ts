@@ -5,6 +5,8 @@ import { complete, fixture, input } from './helpers.ts';
 import { LeadWorkflow } from '../src/core/lead-workflow.ts';
 import { LeadRunner } from '../src/runner/lead-workflow.ts';
 import { panelSummary } from '../src/application/panel.ts';
+import type { DevContourState } from '../src/core/model.ts';
+import type { WorkflowJob } from '../src/core/lead-workflow.ts';
 
 /**
  * Доска на стадии 2: вторая задача ждёт первую, исполнителей нет — стадия
@@ -69,25 +71,69 @@ test('F60: без перемен ожидающая стадия всё же п�
   const f = fixture();
   try {
     const { runner, claims } = await waitingBoard(f);
-    runner.idleWait = { initialMs: 100, maxMs: 200 };
+    // Запас по времени — сотни миллисекунд: такт под нагрузкой не путает
+    // «пауза ещё идёт» и «пауза прошла».
+    runner.idleWait = { initialMs: 300, maxMs: 600 };
     await runner.tick();
     const start = claims();
     await runner.tick();
     assert.equal(claims(), start, 'до паузы — без захвата');
-    await sleep(150);
+    await sleep(450);
     await runner.tick();
-    assert.equal(claims(), start + 1, 'пауза 100 мс прошла');
-    await sleep(120);
+    assert.equal(claims(), start + 1, 'пауза 300 мс прошла');
+    await sleep(300);
     await runner.tick();
-    assert.equal(claims(), start + 1, 'пауза удвоилась до 200 мс');
-    await sleep(120);
+    assert.equal(claims(), start + 1, 'пауза удвоилась до 600 мс');
+    await sleep(450);
     await runner.tick();
-    assert.equal(claims(), start + 2, 'пауза 200 мс прошла');
+    assert.equal(claims(), start + 2, 'пауза 600 мс прошла');
     // Предел: пауза больше не растёт.
-    await sleep(250);
+    await sleep(750);
     await runner.tick();
-    assert.equal(claims(), start + 3, 'пауза осталась на пределе 200 мс');
+    assert.equal(claims(), start + 3, 'пауза осталась на пределе 600 мс');
     await runner.stop();
+  } finally {
+    f.cleanup();
+  }
+});
+
+test('F60: отпечаток ожидания ChangeSet видит живую проверку другого ChangeSet — её конец снова захватывает стадию', () => {
+  // Начало совместной проверки ждёт, пока идёт любая проверка с живым lease
+  // (`jointStage`): её окончание — перемена для ожидающей стадии.
+  const f = fixture();
+  try {
+    const board = f.h.createBoard('Joint wait', '', 'main');
+    f.h.addTask(board.id, input());
+    const changeSet = (id: string, verifications: unknown[]) =>
+      ({
+        id,
+        title: id,
+        description: '',
+        boardIds: [board.id],
+        createdAt: new Date().toISOString(),
+        verifications,
+      }) as unknown as DevContourState['changeSets'][number];
+    f.store.change('fixture.changesets', (s) => {
+      s.changeSets.push(
+        changeSet('CS-own', []),
+        changeSet('CS-other', [
+          { id: 'V-other', status: 'active', leaseUntil: Date.now() + 60_000, tasks: [] },
+        ]),
+      );
+    });
+    const runner = new LeadRunner(f.h, f.root);
+    const job = { kind: 'changeset', id: 'CS-own', stage: 1 } as WorkflowJob;
+    const print = () =>
+      (runner as unknown as { waitPrint(j: WorkflowJob, e: () => []): string }).waitPrint(
+        job,
+        () => [],
+      );
+    const during = print();
+    f.store.change('fixture.finished', (s) => {
+      const v = s.changeSets.find((c) => c.id === 'CS-other')!.verifications[0];
+      v.status = 'passed';
+    });
+    assert.notEqual(print(), during, 'конец чужой проверки меняет отпечаток');
   } finally {
     f.cleanup();
   }
