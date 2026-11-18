@@ -18,6 +18,7 @@ import {
   type Etagged,
 } from '../application/projection-cache.ts';
 import { leadActivityMark } from '../runner/lead-activity.ts';
+import { LEAD_QUIET_MS } from '../runner/quick.ts';
 import { DeliveryRunner } from '../runner/forge.ts';
 import { AgentService, capabilities, SERVER_STOPPING } from '../application/agent.ts';
 import { checksSummary, taskChecks } from '../application/checks.ts';
@@ -125,6 +126,28 @@ const overviewUntil = (h: DevContour) => {
  * Конфигурация — килобайты, её сериализация несравнимо дешевле проекции.
  */
 const configKey = (h: DevContour | undefined) => (h ? JSON.stringify(h.config) : undefined);
+/**
+ * Сроки, после которых центр внимания меняется без записи: lease идущих
+ * попыток, проверок, доставок и выкладок preview (прерванная работа
+ * становится карточкой) и конец присутствия ведущего (`LEAD_QUIET_MS`).
+ * Сроки, которых здесь нет (lease операции изменения контракта), —
+ * не позже предела возраста ответа.
+ */
+const attentionUntil = (store: Store, view: { lead: { lastActivityAt: string | null } }) => {
+  const now = Date.now();
+  const s = store.view();
+  const at = view.lead.lastActivityAt ? Date.parse(view.lead.lastActivityAt) : NaN;
+  const deadlines = [
+    ...(s.runs ?? []).filter((r) => r.status === 'active').map((r) => r.leaseUntil),
+    ...(s.changeSets ?? []).flatMap((c) => [
+      ...c.verifications.filter((v) => v.status === 'active').map((v) => v.leaseUntil),
+      ...(c.deliveries ?? []).filter((d) => d.status === 'active').map((d) => d.leaseUntil),
+    ]),
+    ...(s.previews ?? []).filter((p) => p.active).map((p) => p.leaseUntil),
+    Number.isFinite(at) ? at + LEAD_QUIET_MS : NaN,
+  ].filter((t): t is number => typeof t === 'number' && t > now);
+  return deadlines.length ? Math.min(...deadlines) : undefined;
+};
 /** Область кэша — параметры запроса без метки клиента, в постоянном порядке. */
 const scopeOf = (url: URL, ...ignored: string[]) =>
   JSON.stringify(
@@ -418,9 +441,13 @@ export async function serve(
                 const before = await previous?.catch(() => undefined);
                 const quick = await service.prerequisites();
                 const view = service.view(query, quick);
-                // Факты Git быстрого маршрута устаревают по своему сроку.
-                if (quick.size && value)
-                  attentions.limit(scope, value, Date.now() + QUICK_FACTS_MAX_AGE_MS);
+                if (value) {
+                  const until = attentionUntil(store, view);
+                  if (until !== undefined) attentions.limit(scope, value, until);
+                  // Факты Git быстрого маршрута устаревают по своему сроку.
+                  if (quick.size)
+                    attentions.limit(scope, value, Date.now() + QUICK_FACTS_MAX_AGE_MS);
+                }
                 return etagged({ ...view }, before, ['generatedAt']);
               })();
               return { value };

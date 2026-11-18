@@ -30,6 +30,7 @@ import { workspaceDeclares } from '../runner/budget-doctor.ts';
 import { configApplyKeys, reconfigureSlotBusy } from '../runner/reconfigure.ts';
 import { loadConfig } from '../runner/config.ts';
 import { ProjectionCache } from './projection-cache.ts';
+import { createHash } from 'node:crypto';
 
 /**
  * Проекции панели. Периодический опрос получает ограниченную сводку: строки
@@ -401,12 +402,32 @@ const summaryQuery = z.object({
   boardRevision: z.coerce.number().int().min(1).optional(),
   revision: z
     .string()
-    .regex(/^\d+(\.\d+)?$/)
+    .regex(/^\d+(\.\d+){0,2}$/)
     .optional(),
   task: z.string().max(200).optional(),
   view: z.enum(['workspace']).optional(),
   accepted: z.enum(['1']).optional(),
 });
+
+/**
+ * Отпечаток состояния процесса в номере сводки: расхождение config.json
+ * (`configDrift`) и сбой проекции журнала. Пустая строка, когда их нет;
+ * иначе число не меньше 2 — его не спутать с меткой lease `.1`.
+ */
+function processToken(h: DevContour, root: string) {
+  const drift = configDrift(h, root);
+  const error = h.store.projectionError;
+  if (!drift && !error) return '';
+  return String(
+    parseInt(
+      createHash('sha256')
+        .update(JSON.stringify([drift, error ?? null]))
+        .digest('hex')
+        .slice(0, 12),
+      16,
+    ) + 2,
+  );
+}
 
 function leaseOperations(state: DevContourState) {
   return state.changeSets.flatMap((c) => [
@@ -491,7 +512,16 @@ function summaryOnce(
     // lease его не меняет, а смена блокировки меняет: так ответ, собранный из
     // снимка, который ещё не видел продления, не закрепится у клиента
     // ответами «без изменений».
-    const revision = leases.length ? `${shared.revision}.1` : String(shared.revision);
+    //
+    // Расхождение config.json с конфигурацией процесса и сбой проекции
+    // журнала — состояние процесса, а не базы: их смена ревизию данных не
+    // меняет. Они входят в номер второй частью (отпечаток), иначе «без
+    // изменений» скрывало бы их до следующей записи (F60).
+    const local = processToken(h, root);
+    // Номер: ревизия данных, отпечаток процесса (если есть) и `.1`, пока
+    // действует lease операции.
+    const revision =
+      String(shared.revision) + (local ? `.${local}` : '') + (leases.length ? '.1' : '');
     if (q.revision === revision) return { revision, unchanged: true as const };
     if (!cache) return buildSummary(h, root, q, state, revision, leases, now);
     // Область — запрос без номера клиента: он решает только «без изменений».

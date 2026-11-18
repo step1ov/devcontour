@@ -563,8 +563,15 @@ test('D05-E: a lead technical blocker is not an operator choice, and reading is 
   await page.goto('/?tab=attention&who=lead');
 
   // Ведущего нет на связи: предупреждение с командой передачи.
+  // Метка из запроса убирается: иначе сервер ответил бы «без изменений», и
+  // подмена не дошла бы до панели.
   await page.route(isList, async (route) => {
-    const real = (await (await route.fetch()).json()) as Record<string, unknown>;
+    const url = new URL(route.request().url());
+    url.searchParams.delete('etag');
+    const real = (await (await route.fetch({ url: url.toString() })).json()) as Record<
+      string,
+      unknown
+    >;
     await route.fulfill({ json: { ...real, lead: { present: false, lastActivityAt: null } } });
   });
   await expect(leadGroup.getByText('Нужен ведущий агент: ему есть что разобрать.')).toBeVisible();
