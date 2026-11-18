@@ -51,29 +51,28 @@ function walMode(path: string) {
   return header[18] === 2 && header[19] === 2;
 }
 
-/**
- * Адрес базы для соединения только для чтения. Даже такое соединение с базой
- * в режиме WAL создаёт рядом `-wal` и `-shm`, если их нет. База WAL без
- * служебных файлов журнала не имеет незавершённых записей и открытых
- * writers: она открывается как неизменяемая (`immutable=1`), без файлов
- * рядом. Есть файлы журнала — обычным соединением: чтение учитывает журнал.
- * Базу в режиме DELETE соединение только для чтения файлами не дополняет, а
- * writer между транзакциями файлов не оставляет: она открывается обычно, с
- * блокировками, — неизменяемое чтение допустило бы разорванное чтение.
- * Writer, начавший работу во время неизменяемого чтения, проверяет
- * вызывающий (`journalFiles`, отпечаток файла базы).
- */
-/** Сколько соединение ждёт блокировку базы, прежде чем отказать. */
+/** Сколько соединение writer ждёт блокировку базы, прежде чем отказать. */
 export const BUSY_TIMEOUT_MS = 20_000;
+/**
+ * Ожидание блокировки соединением только для чтения — короче: чтение
+ * повторяет попытку (`readOnlyRead`), и худший случай остаётся заметно
+ * меньше предела вызова инструмента агента.
+ */
+export const READ_ONLY_BUSY_TIMEOUT_MS = 4_000;
 
 /**
  * Отказ SQLite из-за блокировки: базу держит другой процесс (обычно
  * работающий serve). Это временная занятость, а не неисправность.
  */
-export const isDatabaseBusy = (error: unknown) =>
-  /database is locked|database table is locked|SQLITE_BUSY/i.test(
+export function isDatabaseBusy(error: unknown) {
+  // node:sqlite называет код SQLite (`errcode`): основной код SQLITE_BUSY (5)
+  // или SQLITE_LOCKED (6), включая расширенные. Без кода — по тексту.
+  const errcode = (error as { errcode?: unknown } | null)?.errcode;
+  if (typeof errcode === 'number') return [5, 6].includes(errcode & 0xff);
+  return /database is locked|database table is locked|SQLITE_BUSY|SQLITE_LOCKED/i.test(
     error instanceof Error ? error.message : String(error),
   );
+}
 
 /**
  * Совет при занятой базе. Работающий serve — штатный writer: занятость под
@@ -91,6 +90,18 @@ export const busyAsDomain = (error: unknown): unknown =>
     ? new DomainError(DATABASE_BUSY_ADVICE, 503, { code: 'DATABASE_BUSY', retryable: true })
     : error;
 
+/**
+ * Адрес базы для соединения только для чтения. Даже такое соединение с базой
+ * в режиме WAL создаёт рядом `-wal` и `-shm`, если их нет. База WAL без
+ * служебных файлов журнала не имеет незавершённых записей и открытых
+ * writers: она открывается как неизменяемая (`immutable=1`), без файлов
+ * рядом. Есть файлы журнала — обычным соединением: чтение учитывает журнал.
+ * Базу в режиме DELETE соединение только для чтения файлами не дополняет, а
+ * writer между транзакциями файлов не оставляет: она открывается обычно, с
+ * блокировками, — неизменяемое чтение допустило бы разорванное чтение.
+ * Writer, начавший работу во время неизменяемого чтения, проверяет
+ * вызывающий (`journalFiles`, отпечаток файла базы).
+ */
 export function readOnlyLocation(path: string): string | URL {
   if (journalFiles(path).some((f) => existsSync(f)) || !walMode(path)) return path;
   const url = pathToFileURL(resolve(path));
@@ -358,7 +369,7 @@ export class Store {
     // Ожидание блокировки — до первого запроса: уже чтение схемы ниже берёт
     // разделяемую блокировку, и без таймаута занятая writer база (режим
     // DELETE, восстановление WAL) отказывала сразу «database is locked».
-    this.db.exec(`PRAGMA busy_timeout=${BUSY_TIMEOUT_MS};`);
+    this.db.exec(`PRAGMA busy_timeout=${readOnly ? READ_ONLY_BUSY_TIMEOUT_MS : BUSY_TIMEOUT_MS};`);
     if (
       !locations?.length &&
       this.db.prepare("SELECT name FROM sqlite_master WHERE type='table' AND name='owner'").get()

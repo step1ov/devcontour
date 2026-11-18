@@ -933,7 +933,12 @@ async function main() {
   // чтения, не открывают базу writer: открытие writer ждёт блокировку записи,
   // и под нагрузкой работающего serve пакет передачи контекста отказывал
   // «database is locked», хотя ничего не пишет.
-  if (operation === 'agent' && args.includes('--file')) {
+  // Базы ещё нет — обычный путь writer: он её создаст.
+  if (
+    operation === 'agent' &&
+    args.includes('--file') &&
+    (await exists(join(root, 'state.sqlite')))
+  ) {
     const request: unknown = await readAgentJson(resolve(option('--file', '')));
     if (
       request &&
@@ -1706,7 +1711,7 @@ main().catch((error) => {
   // Голое «database is locked» не говорит, что делать: базу держит другой
   // процесс DevContour, обычно работающий serve этого же workspace. Это
   // временная занятость под нагрузкой: команду повторяют, serve не трогают.
-  if (isDatabaseBusy(message)) console.error(DATABASE_BUSY_ADVICE);
+  if (isDatabaseBusy(error)) console.error(DATABASE_BUSY_ADVICE);
   process.exitCode = 1;
 });
 
