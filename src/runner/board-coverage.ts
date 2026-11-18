@@ -90,6 +90,9 @@ export async function coverBoard(
   // Все непрошедшие gates всех компонентов — одним отказом: иначе каждый
   // провал стоил бы отдельной попытки стадии.
   const failed: string[] = [];
+  // Прерванные проверки (сигнал или срок) — отдельно: их исход неизвестен.
+  const interrupted: string[] = [];
+  const warnings: string[] = [];
   const event = (type: string, data: Record<string, unknown>, closing = false) =>
     h.store.atomic(() => {
       guard(closing ? { closing } : undefined);
@@ -227,6 +230,8 @@ export async function coverBoard(
     record.gates = [...new Set([...kept.map((e) => e.gate), ...result.gates])];
     if (result.failure) record.failure = result.failure;
     if (result.failures.length) record.failures = result.failures;
+    const outcome = gatesOutcome(result);
+    Object.assign(record, outcomeFields(outcome));
     try {
       save();
     } catch (error) {
@@ -259,16 +264,39 @@ export async function coverBoard(
         runId: record.runId,
         gates: result.gates,
         ...(result.failures.length ? { failures: result.failures.map((f) => f.gate) } : {}),
+        // Прерванная проверка — не провал gates: закрывающее событие то же
+        // (`passed: false`), причина и неисполненные gates названы.
+        ...(outcome.interrupted ? { reason: 'interrupted' } : {}),
+        ...outcomeFields(outcome),
       },
       true,
     );
-    for (const f of result.failures)
+    for (const f of outcome.failed)
       failed.push(`${gap.repositoryId}/${f.gate} на ${sha}: ${f.message}`);
+    const cut = interruptionLine(gap.repositoryId, outcome);
+    if (cut) interrupted.push(`${cut} на ${sha}`);
+    for (const w of outcome.warnings) warnings.push(`${gap.repositoryId}: ${w}`);
+    // Отмена вызывающим: следующие компоненты не начинаются.
+    if (outcome.interrupted && signal?.aborted)
+      throw toDomain(
+        new HarnessError('CANCELLED', 'Проверка доски прервана: ' + outcome.interrupted.reason),
+      );
     if (result.failures.length) continue;
     runs.push({ repositoryId: gap.repositoryId, sha, runId: record.runId, gates: result.gates });
   }
-  if (failed.length)
-    throw new DomainError('Проверка доски на итоговом SHA не пройдена: ' + failed.join('; '));
+  if (failed.length || interrupted.length)
+    throw new DomainError(
+      [
+        ...(failed.length
+          ? ['Проверка доски на итоговом SHA не пройдена: ' + failed.join('; ')]
+          : []),
+        ...(interrupted.length
+          ? ['Проверка доски на итоговом SHA прервана: ' + interrupted.join('; ')]
+          : []),
+        // Порт на wildcard-адресе мог стать причиной провала службы gate.
+        ...(warnings.length ? ['предупреждения: ' + warnings.join('; ')] : []),
+      ].join('. '),
+    );
   return runs;
 }
 
@@ -284,4 +312,53 @@ export function journalError(error: unknown, roots: string[]) {
     code: error instanceof HarnessError ? error.code : 'CHECK_FAILED',
     message: clipText(local(raw), CLIP_SHORT) ?? '',
   };
+}
+
+/** Исход `runGatesAt` в словах журнала и причин: провал, прерывание, неисполненные. */
+export interface GatesOutcome {
+  /** Непрошедшие gates без прерванного и неисполненных после прерывания. */
+  failed: { gate: string; message: string }[];
+  /** Проверка прервана (сигнал или срок): gate в тот момент и причина. */
+  interrupted?: { gate?: string; reason: string };
+  /** Gates, не исполненные после прерывания (или первого провала при `failFast`). */
+  skipped: string[];
+  /** Предупреждения пробы портов (порт только на wildcard-адресе). */
+  warnings: string[];
+}
+/** Предел предупреждений в записи и событии. */
+const WARNINGS = 10;
+/**
+ * Разбор результата `runGatesAt` (поля harness 0.1.0-alpha.50). Для
+ * совместимости `failures` называет и прерванный gate, и неисполненные после
+ * него: прерванная проверка не выглядит прошедшей, но и провалом gates её
+ * называть нельзя — исход тех gates неизвестен.
+ */
+export function gatesOutcome(result: {
+  failures: { gate: string; message: string }[];
+  interrupted?: { gate?: string; reason: string };
+  skipped?: string[];
+  warnings?: string[];
+}): GatesOutcome {
+  const skipped = result.skipped ?? [];
+  const cut = result.interrupted?.gate;
+  return {
+    failed: result.failures.filter((f) => f.gate !== cut && !skipped.includes(f.gate)),
+    ...(result.interrupted ? { interrupted: result.interrupted } : {}),
+    skipped,
+    warnings: (result.warnings ?? []).slice(0, WARNINGS).map((w) => clipText(w, CLIP_SHORT) ?? ''),
+  };
+}
+/** Поля исхода для записи и события: только непустые. */
+export function outcomeFields(o: GatesOutcome) {
+  return {
+    ...(o.interrupted ? { interrupted: o.interrupted } : {}),
+    ...(o.skipped.length ? { skipped: o.skipped } : {}),
+    ...(o.warnings.length ? { warnings: o.warnings } : {}),
+  };
+}
+/** Прерывание словами: «gate (причина); не исполнены: a, b». */
+export function interruptionLine(prefix: string, o: GatesOutcome) {
+  if (!o.interrupted) return undefined;
+  const at = o.interrupted.gate ? `${prefix}/${o.interrupted.gate}` : prefix;
+  return `${at} (${o.interrupted.reason})${o.skipped.length ? `; не исполнены: ${o.skipped.join(', ')}` : ''}`;
 }

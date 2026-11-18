@@ -911,6 +911,12 @@ export interface BoardCoverage {
   failure?: { gate: string; message: string };
   /** Все непрошедшие gates проверки (`failure` — первый из них). */
   failures?: { gate: string; message: string }[];
+  /** Проверка прервана (сигнал или срок): gate в тот момент и причина. */
+  interrupted?: { gate?: string; reason: string };
+  /** Gates, не исполненные после прерывания. */
+  skipped?: string[];
+  /** Предупреждения пробы портов ресурсов (порт только на wildcard-адресе). */
+  warnings?: string[];
   at: string;
 }
 export const BOARD_COVERAGE = 'board-coverage';
