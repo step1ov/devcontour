@@ -31,7 +31,10 @@ import {
   CONTRACT_CONTENT_WARN,
   DomainError,
   relativePath,
+  type Config,
+  type Task,
 } from '../core/model.ts';
+import { derivedWrites } from '../core/workflow.ts';
 import { adapters, type AgentAdapter } from './adapters.ts';
 import { declaredRoles, repositories, repository, requiresContract } from '../core/repositories.ts';
 import { git } from './process.ts';
@@ -1015,6 +1018,14 @@ export function attemptHistory(
   return { attemptHistory: build(false, 1, true) };
 }
 
+/** Производные записи генераторов по задачам предложения; нет — поля нет. */
+function derivedWritesOf(config: Config, tasks: Task[]) {
+  const entries = tasks.flatMap((t) => {
+    const writes = derivedWrites(config, t).map((g) => ({ generator: g.id, outputs: g.outputs }));
+    return writes.length ? [[t.id, writes] as const] : [];
+  });
+  return entries.length ? { derivedWrites: Object.fromEntries(entries) } : {};
+}
 export async function reviewPlan(
   h: DevContour,
   root: string,
@@ -1173,6 +1184,10 @@ export async function reviewPlan(
           ),
         }
       : {}),
+    // Производные записи генераторов (F54a): задача правит вход или
+    // инструмент генератора, и controller перестроит его выходы в её коммите —
+    // в том числе в области записи другой роли. Ревьюер видит эту запись.
+    ...derivedWritesOf(h.config, tasks),
   };
   // Утверждается только то, что ревьюер прочёл целиком: черновик, ушедший
   // в краткую сводку принятого, означал бы утверждение без ревью.
