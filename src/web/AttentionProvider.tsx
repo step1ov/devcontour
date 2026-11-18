@@ -86,6 +86,8 @@ export function AttentionProvider({ children }: { children: ReactNode }) {
   const [optimistic, setOptimistic] = useState<Optimistic>(() => new Map());
   const [arrived, setArrived] = useState({ seq: 0, titles: [] as string[], ids: [] as string[] });
   const signature = useRef('');
+  // Метка последнего полного ответа: с ней сервер отвечает «без изменений».
+  const etag = useRef<string | undefined>(undefined);
   // Время последнего успешного ответа: «данные на …» в строке устаревания.
   const lastOk = useRef<string | undefined>(undefined);
   const seen = useRef<Set<string> | undefined>(undefined);
@@ -134,6 +136,7 @@ export function AttentionProvider({ children }: { children: ReactNode }) {
         const response = await getAttention(
           {},
           AbortSignal.any([abort.signal, AbortSignal.timeout(REQUEST_TIMEOUT_MS)]),
+          etag.current,
         );
         if (disposed.current) return;
         if (!response.ok || !response.body) {
@@ -147,9 +150,20 @@ export function AttentionProvider({ children }: { children: ReactNode }) {
           }));
           return;
         }
-        const view = response.body;
-        const next = signatureOf(view);
         const at = new Date().toISOString();
+        if (response.body.unchanged) {
+          // Содержимое то же: только снять устаревание.
+          lastOk.current = at;
+          setState((s) =>
+            s.stale || s.error
+              ? { ...s, error: '', stale: false, failure: undefined, lastOkAt: at }
+              : s,
+          );
+          return;
+        }
+        const view = response.body;
+        etag.current = view.etag;
+        const next = signatureOf(view);
         lastOk.current = at;
         const step = freshItems(seen.current, view.items);
         seen.current = step.seen;

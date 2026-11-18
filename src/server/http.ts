@@ -11,6 +11,14 @@ import type { Store } from '../core/store.ts';
 import { LeadRunner } from '../runner/lead-workflow.ts';
 import { PreviewRunner } from '../runner/preview.ts';
 import { authorOverview } from '../application/overview.ts';
+import {
+  ProjectionCache,
+  etagged,
+  etaggedBody,
+  type Etagged,
+} from '../application/projection-cache.ts';
+import { leadActivityMark } from '../runner/lead-activity.ts';
+import { LEAD_QUIET_MS } from '../runner/quick.ts';
 import { DeliveryRunner } from '../runner/forge.ts';
 import { AgentService, capabilities, SERVER_STOPPING } from '../application/agent.ts';
 import { checksSummary, taskChecks } from '../application/checks.ts';
@@ -27,6 +35,7 @@ import {
   panelRun,
   panelRuns,
   panelSummary,
+  summaryCache,
   inputPolicyView,
   panelTask,
   panelTaskSearch,
@@ -91,6 +100,68 @@ const json = (res: ServerResponse, status: number, value: unknown) => {
   });
   res.end(JSON.stringify(value));
 };
+/** Готовое тело JSON (кэш проекций, `projection-cache.ts`). */
+const jsonText = (res: ServerResponse, text: string) => {
+  res.writeHead(200, {
+    'Content-Type': 'application/json; charset=utf-8',
+    'Cache-Control': 'no-store',
+    'X-Content-Type-Options': 'nosniff',
+  });
+  res.end(text);
+};
+/**
+ * Сроки, после которых обзор автора меняется без записи: lease идущей
+ * выкладки preview («выкладывается» сменяется прерванной).
+ */
+const overviewUntil = (h: DevContour) => {
+  const now = Date.now();
+  const leases = (h.store.view().previews ?? [])
+    .filter((p) => p.active && p.leaseUntil > now)
+    .map((p) => p.leaseUntil);
+  return leases.length ? Math.min(...leases) : undefined;
+};
+/**
+ * Конфигурация в версии ответа кэша — текстом: замена применённой
+ * конфигурации (`config-apply`) и правка её полей на месте не пишут в базу.
+ * Конфигурация — килобайты, её сериализация несравнимо дешевле проекции.
+ */
+const configKey = (h: DevContour | undefined) => (h ? JSON.stringify(h.config) : undefined);
+/**
+ * Сроки, после которых центр внимания меняется без записи: lease идущих
+ * попыток, проверок, доставок и выкладок preview (прерванная работа
+ * становится карточкой) и конец присутствия ведущего (`LEAD_QUIET_MS`).
+ * Сроки, которых здесь нет (lease операции изменения контракта), —
+ * не позже предела возраста ответа.
+ */
+const attentionUntil = (store: Store, view: { lead: { lastActivityAt: string | null } }) => {
+  const now = Date.now();
+  const s = store.view();
+  const at = view.lead.lastActivityAt ? Date.parse(view.lead.lastActivityAt) : NaN;
+  const deadlines = [
+    ...(s.runs ?? []).filter((r) => r.status === 'active').map((r) => r.leaseUntil),
+    ...(s.changeSets ?? []).flatMap((c) => [
+      ...c.verifications.filter((v) => v.status === 'active').map((v) => v.leaseUntil),
+      ...(c.deliveries ?? []).filter((d) => d.status === 'active').map((d) => d.leaseUntil),
+    ]),
+    ...(s.previews ?? []).filter((p) => p.active).map((p) => p.leaseUntil),
+    Number.isFinite(at) ? at + LEAD_QUIET_MS : NaN,
+  ].filter((t): t is number => typeof t === 'number' && t > now);
+  return deadlines.length ? Math.min(...deadlines) : undefined;
+};
+/** Область кэша — параметры запроса без метки клиента, в постоянном порядке. */
+const scopeOf = (url: URL, ...ignored: string[]) =>
+  JSON.stringify(
+    [...url.searchParams]
+      .filter(([k]) => !ignored.includes(k))
+      .sort(([a], [b]) => (a < b ? -1 : a > b ? 1 : 0)),
+  );
+/**
+ * Срок ответов центра внимания и обзора без названного lease: присутствие
+ * ведущего, прерванные операции и время без движения пересчитываются не
+ * реже этого. С фактами Git быстрого маршрута — срок их кэша.
+ */
+const PROJECTION_MAX_AGE_MS = 30_000;
+const QUICK_FACTS_MAX_AGE_MS = 10_000;
 async function body(req: IncomingMessage) {
   let text = '';
   for await (const chunk of req) {
@@ -129,6 +200,13 @@ export async function serve(
   let stopping = false;
   // Факты репозитория — процессы Git: общий короткий кэш панели и центра внимания.
   const cachedFacts = quickFactsCache();
+  // Кэши проекций частого опроса панели (F60): одна проекция на версию данных.
+  const summaries = summaryCache();
+  const overviews = new ProjectionCache<Etagged>({ maxAgeMs: PROJECTION_MAX_AGE_MS });
+  const attentions = new ProjectionCache<Promise<Etagged>>({
+    maxAgeMs: PROJECTION_MAX_AGE_MS,
+  });
+  const preparations = new ProjectionCache<string>({ maxAgeMs: QUICK_FACTS_MAX_AGE_MS });
   const attentionOf = (store: Store) =>
     new AttentionService(store, h, {
       root: h?.config.workspaceRoot ?? options.bootstrap?.workspace,
@@ -170,6 +248,60 @@ export async function serve(
         await import('vite')
       ).createServer({ server: { middlewareMode: true }, appType: 'spa' })
     : undefined;
+  /** Экран этапа подготовки: статус, настройка, исполнители и остановка очереди. */
+  const preparationView = (store: Store, change: string | undefined) => {
+    const view = new Preparation(store).status(change);
+    const root = h?.config.workspaceRoot ?? options.bootstrap?.workspace;
+    // Setting a contour up is work with a result, so the stage that
+    // waits on it reports how far it got and who is busy right now,
+    // instead of a task count that stays at zero for the whole of setup.
+    const engine = h?.store.read();
+    return {
+      ...view,
+      engineConnected: Boolean(h),
+      setup: h
+        ? {
+            repositories: h.config.repositories.map((r) => r.id),
+            profile: h.config.packs?.[0]?.id ?? null,
+            gates: h.config.gates.map((g) => g.id),
+            workspaceGates: h.config.workspaceGates.map((g) => g.id),
+            concurrency: h.config.concurrency,
+            maxAttempts: h.config.maxAttempts,
+          }
+        : undefined,
+      workers: (engine?.runs ?? [])
+        .filter((r) => r.status === 'active')
+        .map((r) => {
+          const task = engine?.tasks.find((t) => t.id === r.taskId);
+          return {
+            runId: r.id,
+            taskId: r.taskId,
+            title: task?.title ?? r.taskId,
+            role: task?.role,
+            // Имя роли объявляет workspace; экран этапа не читает всю
+            // конфигурацию и без него показывал сырой ключ роли.
+            roleTitle:
+              task && h
+                ? (h.config.repositories.find((x) => x.id === task.repositoryId)?.roles?.[task.role]
+                    ?.title ?? h.config.roles[task.role]?.title)
+                : undefined,
+            phase: r.phase,
+            runtime: r.runtime,
+            model: r.model,
+            reviewer: r.reviewer,
+            reviewerModel: r.reviewerModel,
+            attempt: r.attempt,
+            startedAt: r.startedAt,
+          };
+        }),
+      // Экран этапа говорил «все исполнители свободны», пока диспетчер
+      // стоял на ошибке: причина была видна только на досках.
+      // Тот же вид остановки, что в `/api/state`, сводке и CLI.
+      queue: engine ? queueStopOf(h!, engine) : undefined,
+      startupError,
+      workspace: root ? workspaceDescription(root) : undefined,
+    };
+  };
   const handleRequest = async (req: IncomingMessage, res: ServerResponse) => {
     try {
       if (
@@ -204,60 +336,21 @@ export async function serve(
         }
         const preparationStore = h?.store ?? options.bootstrap?.store;
         if (req.method === 'GET' && path === '/api/preparation' && preparationStore) {
-          const view = new Preparation(preparationStore).status(
-            url.searchParams.get('change') ?? undefined,
-          );
-          const root = h?.config.workspaceRoot ?? options.bootstrap?.workspace;
-          // Setting a contour up is work with a result, so the stage that
-          // waits on it reports how far it got and who is busy right now,
-          // instead of a task count that stays at zero for the whole of setup.
-          const engine = h?.store.read();
-          json(res, 200, {
-            ...view,
-            engineConnected: Boolean(h),
-            setup: h
-              ? {
-                  repositories: h.config.repositories.map((r) => r.id),
-                  profile: h.config.packs?.[0]?.id ?? null,
-                  gates: h.config.gates.map((g) => g.id),
-                  workspaceGates: h.config.workspaceGates.map((g) => g.id),
-                  concurrency: h.config.concurrency,
-                  maxAttempts: h.config.maxAttempts,
-                }
-              : undefined,
-            workers: (engine?.runs ?? [])
-              .filter((r) => r.status === 'active')
-              .map((r) => {
-                const task = engine?.tasks.find((t) => t.id === r.taskId);
-                return {
-                  runId: r.id,
-                  taskId: r.taskId,
-                  title: task?.title ?? r.taskId,
-                  role: task?.role,
-                  // Имя роли объявляет workspace; экран этапа не читает всю
-                  // конфигурацию и без него показывал сырой ключ роли.
-                  roleTitle:
-                    task && h
-                      ? (h.config.repositories.find((x) => x.id === task.repositoryId)?.roles?.[
-                          task.role
-                        ]?.title ?? h.config.roles[task.role]?.title)
-                      : undefined,
-                  phase: r.phase,
-                  runtime: r.runtime,
-                  model: r.model,
-                  reviewer: r.reviewer,
-                  reviewerModel: r.reviewerModel,
-                  attempt: r.attempt,
-                  startedAt: r.startedAt,
-                };
+          // Экран этапа опрашивается так же часто: ответ версии данных — из
+          // кэша (F60). Причина отказа подключения и движок — вне базы.
+          jsonText(
+            res,
+            preparations.get(
+              scopeOf(url),
+              String(preparationStore.revision()),
+              [preparationStore, h, configKey(h), startupError],
+              () => ({
+                value: JSON.stringify(
+                  preparationView(preparationStore, url.searchParams.get('change') ?? undefined),
+                ),
               }),
-            // Экран этапа говорил «все исполнители свободны», пока диспетчер
-            // стоял на ошибке: причина была видна только на досках.
-            // Тот же вид остановки, что в `/api/state`, сводке и CLI.
-            queue: engine ? queueStopOf(h!, engine) : undefined,
-            startupError,
-            workspace: root ? workspaceDescription(root) : undefined,
-          });
+            ),
+          );
           return;
         }
         // Поручение быстрого изменения вводит оператор в панели: происхождение
@@ -329,12 +422,38 @@ export async function serve(
         // базе. Чтение ничего не пишет и моделей не вызывает.
         if (req.method === 'GET' && path === '/api/attention' && preparationStore) {
           const service = attentionOf(preparationStore);
-          const query = Object.fromEntries(url.searchParams);
-          json(
-            res,
-            200,
-            query.view === 'history' ? service.history(query) : await service.active(query),
+          const { etag: known, ...query } = Object.fromEntries(url.searchParams);
+          if (query.view === 'history') {
+            json(res, 200, service.history(query));
+            return;
+          }
+          // Активный список — из кэша версии данных (F60). Отметка присутствия
+          // ведущего — файл вне базы: она входит в версию.
+          const scope = scopeOf(url, 'etag');
+          const store = preparationStore;
+          const pending = attentions.get(
+            scope,
+            `${store.revision()}|${leadActivityMark(store) ?? ''}`,
+            [store, h, configKey(h)],
+            (previous) => {
+              let value: Promise<Etagged> | undefined = undefined;
+              value = (async () => {
+                const before = await previous?.catch(() => undefined);
+                const quick = await service.prerequisites();
+                const view = service.view(query, quick);
+                if (value) {
+                  const until = attentionUntil(store, view);
+                  if (until !== undefined) attentions.limit(scope, value, until);
+                  // Факты Git быстрого маршрута устаревают по своему сроку.
+                  if (quick.size)
+                    attentions.limit(scope, value, Date.now() + QUICK_FACTS_MAX_AGE_MS);
+                }
+                return etagged({ ...view }, before, ['generatedAt']);
+              })();
+              return { value };
+            },
           );
+          jsonText(res, etaggedBody(await pending, known));
           return;
         }
         // Отметки «прочитано» и «увидел» — локальные записи оператора, не решение.
@@ -511,9 +630,20 @@ export async function serve(
             stopping: () => stopping || !!scheduler?.stopping,
           }).run(await body(req));
         } else if (req.method === 'GET' && path === '/api/overview') {
-          result = authorOverview(h);
+          const engine = h;
+          const overview = overviews.get(
+            'overview',
+            String(engine.store.revision()),
+            [engine, configKey(engine)],
+            (previous) => ({
+              value: etagged({ ...authorOverview(engine) }, previous),
+              until: overviewUntil(engine),
+            }),
+          );
+          jsonText(res, etaggedBody(overview, url.searchParams.get('etag')));
+          return;
         } else if (req.method === 'GET' && path === '/api/summary') {
-          result = panelSummary(h, scheduler.root, Object.fromEntries(url.searchParams));
+          result = panelSummary(h, scheduler.root, Object.fromEntries(url.searchParams), summaries);
         } else if (req.method === 'GET' && path === '/api/queue') {
           result = panelQueue(h, Object.fromEntries(url.searchParams));
         } else if (req.method === 'GET' && path === '/api/contract-attempts') {
@@ -939,6 +1069,8 @@ export async function serve(
   return {
     server,
     url: origin,
+    /** Кэши проекций опроса панели: счётчики вычислений для диагностики и тестов. */
+    projections: { summaries, overviews, attentions, preparations },
     close: async () => {
       stopping = true;
       // Ведущий цикл прерывается первым — до отметки остановки: его стадия не

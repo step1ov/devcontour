@@ -151,12 +151,23 @@ export function AuthorOverviewPanel({
   // После действия карточка решения исчезает; фокус переходит к сообщению
   // об итоге, а не теряется на body.
   const status = useRef<HTMLParagraphElement>(null);
+  // Метка последнего ответа: с ней сервер отвечает «без изменений», и опрос
+  // не переносит и не перерисовывает тот же обзор.
+  const etag = useRef<string | undefined>(undefined);
   const load = useCallback(async (signal?: AbortSignal) => {
     try {
-      const response = await fetch('/api/overview', { signal });
-      const value = await response.json();
+      const response = await fetch(
+        '/api/overview' + (etag.current ? '?etag=' + encodeURIComponent(etag.current) : ''),
+        { signal },
+      );
+      const value = (await response.json()) as
+        | (AuthorOverview & { etag?: string; unchanged?: undefined; error?: string })
+        | { unchanged: true; etag: string; error?: string };
       if (!response.ok) throw new Error(value.error ?? 'Не удалось прочитать сводку');
-      setOverview(value);
+      if (!value.unchanged) {
+        etag.current = value.etag;
+        setOverview(value);
+      }
       setError('');
     } catch (e) {
       if (!signal?.aborted) setError(e instanceof Error ? e.message : String(e));

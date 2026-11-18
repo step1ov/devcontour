@@ -38,8 +38,16 @@ const query = (params: Record<string, string | undefined>) => {
 
 export type ListParams = { actor?: string; category?: string; component?: string };
 
-export const getAttention = (params: ListParams, signal?: AbortSignal) =>
-  call<AttentionView>(query(params), { signal });
+/** Метка содержимого ответа (`etag`) или «без изменений» с той же меткой. */
+export type AttentionPoll =
+  (AttentionView & { etag?: string; unchanged?: undefined }) | { unchanged: true; etag: string };
+
+/**
+ * Активный список. С меткой прежнего ответа (`etag`) сервер отвечает «без
+ * изменений», если содержимое то же: опрос не переносит список заново.
+ */
+export const getAttention = (params: ListParams, signal?: AbortSignal, etag?: string) =>
+  call<AttentionPoll>(query({ ...params, etag }), { signal });
 
 export const getHistory = (params: ListParams, signal?: AbortSignal) =>
   call<AttentionHistoryView>(query({ view: 'history', ...params }), { signal });

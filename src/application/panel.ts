@@ -29,6 +29,8 @@ import { questionStops } from '../core/input-labels.ts';
 import { workspaceDeclares } from '../runner/budget-doctor.ts';
 import { configApplyKeys, reconfigureSlotBusy } from '../runner/reconfigure.ts';
 import { loadConfig } from '../runner/config.ts';
+import { ProjectionCache } from './projection-cache.ts';
+import { createHash } from 'node:crypto';
 
 /**
  * Проекции панели. Периодический опрос получает ограниченную сводку: строки
@@ -400,12 +402,32 @@ const summaryQuery = z.object({
   boardRevision: z.coerce.number().int().min(1).optional(),
   revision: z
     .string()
-    .regex(/^\d+(\.\d+)?$/)
+    .regex(/^\d+(\.\d+){0,2}$/)
     .optional(),
   task: z.string().max(200).optional(),
   view: z.enum(['workspace']).optional(),
   accepted: z.enum(['1']).optional(),
 });
+
+/**
+ * Отпечаток состояния процесса в номере сводки: расхождение config.json
+ * (`configDrift`) и сбой проекции журнала. Пустая строка, когда их нет;
+ * иначе число не меньше 2 — его не спутать с меткой lease `.1`.
+ */
+function processToken(h: DevContour, root: string) {
+  const drift = configDrift(h, root);
+  const error = h.store.projectionError;
+  if (!drift && !error) return '';
+  return String(
+    parseInt(
+      createHash('sha256')
+        .update(JSON.stringify([drift, error ?? null]))
+        .digest('hex')
+        .slice(0, 12),
+      16,
+    ) + 2,
+  );
+}
 
 function leaseOperations(state: DevContourState) {
   return state.changeSets.flatMap((c) => [
@@ -431,6 +453,16 @@ function leaseStale(state: Readonly<DevContourState>, readAt: number) {
 const MAPPING = 20;
 
 /**
+ * Кэш сводки сервера (F60): ответ одной версии данных, запроса и
+ * конфигурации считается один раз для всех опросов и вкладок. Действует до
+ * ближайшего lease операции (`expiresAt`) и не дольше `maxAgeMs`: время
+ * без движения попыток и проверок в ответе пересчитывается не реже этого.
+ */
+export const summaryCache = () =>
+  new ProjectionCache<PanelSummary>({ maxAgeMs: SUMMARY_MAX_AGE_MS });
+const SUMMARY_MAX_AGE_MS = 30_000;
+
+/**
  * Периодическая сводка. `revision` — номер данных, которые клиент уже
  * показывает для той же области (доска, задача, вид): если данные не
  * менялись, возвращается только номер. Продление lease номер не меняет:
@@ -442,6 +474,7 @@ export function panelSummary(
   h: DevContour,
   root: string,
   query: Record<string, string | undefined>,
+  cache?: ProjectionCache<PanelSummary>,
 ) {
   const q = summaryQuery.parse(query);
   // Если lease операции истёк, пока читался снимок, другой процесс мог успеть
@@ -449,7 +482,7 @@ export function panelSummary(
   // повторяется один раз в новом снимке. Продление после истечения
   // отклоняется, поэтому второй снимок уже точен.
   for (let attempt = 0; ; attempt++) {
-    const result = summaryOnce(h, root, q, attempt === 0);
+    const result = summaryOnce(h, root, q, attempt === 0, cache);
     if (result) return result;
   }
 }
@@ -459,6 +492,7 @@ function summaryOnce(
   root: string,
   q: z.infer<typeof summaryQuery>,
   retryUncertain: boolean,
+  cache?: ProjectionCache<PanelSummary>,
 ) {
   return h.store.snapshot(() => {
     const shared = h.store.readShared(leaseStale);
@@ -478,9 +512,26 @@ function summaryOnce(
     // lease его не меняет, а смена блокировки меняет: так ответ, собранный из
     // снимка, который ещё не видел продления, не закрепится у клиента
     // ответами «без изменений».
-    const revision = leases.length ? `${shared.revision}.1` : String(shared.revision);
+    //
+    // Расхождение config.json с конфигурацией процесса и сбой проекции
+    // журнала — состояние процесса, а не базы: их смена ревизию данных не
+    // меняет. Они входят в номер второй частью (отпечаток), иначе «без
+    // изменений» скрывало бы их до следующей записи (F60).
+    const local = processToken(h, root);
+    // Номер: ревизия данных, отпечаток процесса (если есть) и `.1`, пока
+    // действует lease операции.
+    const revision =
+      String(shared.revision) + (local ? `.${local}` : '') + (leases.length ? '.1' : '');
     if (q.revision === revision) return { revision, unchanged: true as const };
-    return buildSummary(h, root, q, state, revision, leases, now);
+    if (!cache) return buildSummary(h, root, q, state, revision, leases, now);
+    // Область — запрос без номера клиента: он решает только «без изменений».
+    // Конфигурация — текстом: её замена и правка на месте не пишут в базу.
+    const { revision: _known, ...scope } = q;
+    void _known;
+    return cache.get(JSON.stringify(scope), revision, [h, JSON.stringify(h.config)], () => {
+      const value = buildSummary(h, root, q, state, revision, leases, now);
+      return { value, until: value.expiresAt };
+    });
   });
 }
 
