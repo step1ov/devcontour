@@ -32,6 +32,23 @@ export const serverRecordPath = (root: string) => join(root, 'server.json');
 /** Идентификатор экземпляра сервера: его отдаёт `GET /api/server`. */
 export const serverInstance = () => randomUUID();
 
+/**
+ * Владелец роли controller планировщика сервера: начинается с экземпляра
+ * сервера (F71). По нему чтение из другого процесса (CLI session-handoff)
+ * узнаёт, что роль держит сервер, записанный в `server.json`.
+ */
+export const serveControllerOwner = (instance: string) => `serve:${instance}:${randomUUID()}`;
+
+/**
+ * Роль controller с владельцем `owner` держит работающий сервер этого
+ * каталога данных: запись `server.json` есть, её процесс жив, а владелец —
+ * планировщик этого экземпляра. Свежесть срока роли проверяет вызывающий.
+ */
+export function heldByServer(root: string, owner: string) {
+  const record = readServerRecord(root);
+  return !!record && processAlive(record.pid) && owner.startsWith(`serve:${record.instance}:`);
+}
+
 export function writeServerRecord(root: string, record: ServerRecord) {
   const path = serverRecordPath(root);
   const temp = `${path}.${process.pid}`;

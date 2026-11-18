@@ -1084,7 +1084,10 @@ async function main() {
     return;
   }
   attachJournal(h);
-  const scheduler = new Scheduler(h, root);
+  // Экземпляр сервера — до планировщика: владелец его роли controller
+  // начинается с экземпляра (F71), по нему пакет передачи узнаёт свой сервер.
+  const serving = ['serve', 'demo'].includes(operation) ? serverInstance() : undefined;
+  const scheduler = new Scheduler(h, root, undefined, { instance: serving });
   const workspace = new Workspace(h, new IntentService(h));
   const workspaceRunner = new WorkspaceRunner(h, root);
   if (agentOperations.includes(operation)) {
@@ -1714,7 +1717,7 @@ async function main() {
   const port = Number(option('--port', process.env.PORT ?? '4317'));
   if (!Number.isInteger(port) || (port !== 0 && port < 1024) || port > 65535)
     throw new Error('Некорректный port');
-  const instance = serverInstance();
+  const instance = serving ?? serverInstance();
   const app = await serve(h, scheduler, {
     port,
     dev: args.includes('--dev'),

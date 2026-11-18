@@ -48,6 +48,8 @@ import {
 import { command } from '../src/runner/process.ts';
 import { ContractChanges, type ContractChange } from '../src/runner/contract-change.ts';
 import { cliCommand } from './cli-command.ts';
+import { serveControllerOwner, writeServerRecord } from '../src/runner/server-record.ts';
+import { Scheduler } from '../src/runner/scheduler.ts';
 
 const INTENT = 'Okapi intention: finish the payment board before the release';
 
@@ -2414,6 +2416,75 @@ test('LeadWorkflow.invalidated: задание stale — только после
     );
     assert.deepEqual(ctx.invalidated(), []);
     assert.equal(changes.boardJobs(op as unknown as ContractChange), undefined);
+  } finally {
+    f.cleanup();
+  }
+});
+
+test('F71: CONTROLLER_BUSY is no lead stop while the live server of this workspace holds the role; another, unknown or dead holder keeps it', () => {
+  const busy = (holder: (f: ReturnType<typeof fixture>) => string) => {
+    const f = fixture();
+    try {
+      const { at } = oneBoard(f.h);
+      assert.ok(f.h.leader(holder(f)), 'роль controller взята');
+      const pack = at().pack;
+      assert.ok(pack.summary.open > 0, 'работа открыта');
+      assert.equal(pack.controller?.live, true);
+      return pack.stops.some((s) => s.code === 'CONTROLLER_BUSY');
+    } finally {
+      f.cleanup();
+    }
+  };
+  const record = (f: ReturnType<typeof fixture>, instance: string, pid = process.pid) =>
+    writeServerRecord(f.root, {
+      pid,
+      url: 'http://127.0.0.1:1',
+      instance,
+      startedAt: new Date().toISOString(),
+    });
+  // Роль держит планировщик сервера, записанного в server.json этого каталога.
+  assert.equal(
+    busy((f) => {
+      record(f, 'I-live');
+      return serveControllerOwner('I-live');
+    }),
+    false,
+  );
+  // Владелец без экземпляра (очередь run, другой процесс) — остановка остаётся.
+  assert.equal(
+    busy((f) => {
+      record(f, 'I-live');
+      return 'server';
+    }),
+    true,
+  );
+  // Сервер другого экземпляра (запись сменилась) и записи нет вовсе.
+  assert.equal(
+    busy((f) => {
+      record(f, 'I-new');
+      return serveControllerOwner('I-old');
+    }),
+    true,
+  );
+  assert.equal(
+    busy(() => serveControllerOwner('I-live')),
+    true,
+  );
+  // Процесс записи завершился: роль держит не живой сервер.
+  assert.equal(
+    busy((f) => {
+      record(f, 'I-live', 2 ** 22 + 12345);
+      return serveControllerOwner('I-live');
+    }),
+    true,
+  );
+});
+
+test('F71: the server scheduler owns the controller role under its instance', () => {
+  const f = fixture();
+  try {
+    assert.match(new Scheduler(f.h, f.root, undefined, { instance: 'I-1' }).owner, /^serve:I-1:/);
+    assert.doesNotMatch(new Scheduler(f.h, f.root).owner, /^serve:/);
   } finally {
     f.cleanup();
   }

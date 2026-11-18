@@ -29,6 +29,8 @@ import {
   type WorkflowJob as HarnessJob,
 } from 'devcontour-harness';
 import { z } from 'zod';
+import { dirname, resolve } from 'node:path';
+import { heldByServer } from '../runner/server-record.ts';
 import { DomainError, type Config, type DevContourState } from '../core/model.ts';
 import type { DevContour } from '../core/service.ts';
 import { LeadWorkflow, jointWaiting, type WorkflowJob } from '../core/lead-workflow.ts';
@@ -428,10 +430,14 @@ export function harnessOf(h: DevContour) {
 /**
  * Остановка выдачи «очередь ведёт другой controller» (`CONTROLLER_BUSY`) в
  * пакете без открытых поручений: выдавать нечего, а сервер, держащий роль
- * controller, — обычное состояние, а не шаг ведущего.
+ * controller, — обычное состояние, а не шаг ведущего. С открытыми
+ * поручениями остановка снимается, когда роль держит работающий сервер
+ * этого workspace (`serve`, F71): очередь ведёт он сам, действия ведущего
+ * не нужно. Чужой или неизвестный владелец и истёкший срок роли остаются
+ * остановкой.
  */
-export function withoutIdleControllerStop(pack: HandoffPack): HandoffPack {
-  if (pack.summary.open || !pack.controller?.live) return pack;
+export function withoutIdleControllerStop(pack: HandoffPack, serve = false): HandoffPack {
+  if (!pack.controller?.live || (pack.summary.open && !serve)) return pack;
   const stops = pack.stops.filter((s) => s.code !== 'CONTROLLER_BUSY');
   if (stops.length < pack.stops.length) return { ...pack, stops };
   // Остановку отбросил предел пакета: она — среди `truncated.stops`.
@@ -1713,6 +1719,14 @@ export function devcontourHandoffWithin(
       // если предел её отбросил (`withHeldBaseStop`).
       const full: { queueStop?: HandoffPack['stops'][number] } = {};
       const errors = h.store.latestEvents(['scheduler.error'], 50);
+      // Роль controller со свежим сроком держит работающий сервер этого
+      // workspace (F71): его остановка CONTROLLER_BUSY — не шаг ведущего.
+      const lease = v.controller();
+      const serveController =
+        !!lease &&
+        lease.leaseUntil > Date.now() &&
+        h.store.file !== ':memory:' &&
+        heldByServer(dirname(resolve(h.store.file)), lease.owner);
       const stale = staleBaseStop(state, errors);
       // Чем снимается пауза того же снимка: им пакет называет паузу вместо
       // команды harness (`withQueuePauseText`).
@@ -1744,7 +1758,7 @@ export function devcontourHandoffWithin(
           withStaleBaseStop(
             withHeldBaseStop(
               withoutShutdownFailures(
-                withoutIdleControllerStop(raw),
+                withoutIdleControllerStop(raw, serveController),
                 scopedRuns(state, options?.graphId),
               ),
               state,
