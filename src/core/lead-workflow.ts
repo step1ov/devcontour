@@ -358,15 +358,22 @@ export class LeadWorkflow {
     return stale;
   }
   /**
-   * Задания досок, начатые по прежнему входу (перепривязка контракта,
-   * политика исполнения, постановка), которые уже не продолжатся: последнее
-   * такое задание доски (queued, running или stale), если задания по
-   * текущему входу у неё нет. Очередь закрывает устаревшее задание `stale`
-   * лишь при следующем взятии стадии, поэтому действующее задание здесь —
-   * тоже устаревшее. Доска, вход которой не построить, не входит: её шаг —
-   * исправление входа. Чтение, без записи.
+   * Задания досок, начатые по прежнему входу, которые уже не продолжатся
+   * (F66): действующее задание (queued, running) с устаревшим входом — то же,
+   * что `staleBoards` (очередь закроет его `stale` лишь при следующем взятии
+   * стадии), — или уже закрытое `stale`, если оно последнее задание доски и
+   * его вход сменила записанная перепривязка задач после его старта
+   * (`rebound`: операция изменения контракта). Давно брошенная доска со
+   * `stale` без такой перепривязки сюда не входит. Доска с заданием по
+   * текущему входу, доска со всеми отменёнными задачами и доска, вход
+   * которой не построить, не входят. Чтение, без записи.
    */
-  invalidated(boardIds?: readonly string[], s: DevContourState = this.h.store.read()) {
+  invalidated(
+    boardIds: readonly string[] | undefined,
+    s: DevContourState = this.h.store.read(),
+    rebound: (boardId: string, since: string) => boolean = () => false,
+  ) {
+    const active = this.staleBoards(s);
     const fresh = new Set<string>();
     const latest = new Map<string, WorkflowJob>();
     const inputs = new Map<string, { digest: string; owner?: string } | undefined>();
@@ -383,18 +390,27 @@ export class LeadWorkflow {
     for (const owner of [undefined, ...repositories(this.h.config).map((r) => r.id)])
       for (const job of this.list(owner)) {
         if (job.kind !== 'board' || (boardIds && !boardIds.includes(job.id))) continue;
-        const input = bound(job.id);
-        if (!input) continue;
-        if (input.digest === job.inputDigest && input.owner === job.owner) {
-          fresh.add(job.id);
-          continue;
-        }
-        if (!['queued', 'running', 'stale'].includes(job.status)) continue;
         const seen = latest.get(job.id);
         if (!seen || job.startedAt > seen.startedAt) latest.set(job.id, job);
+        const input = bound(job.id);
+        if (input && input.digest === job.inputDigest && input.owner === job.owner)
+          fresh.add(job.id);
       }
+    const closed = (id: string) => {
+      const ids = s.boards.find((b) => b.id === id)?.revisions.at(-1)?.taskIds ?? [];
+      return (
+        !!ids.length && ids.every((t) => s.tasks.find((x) => x.id === t)?.status === 'cancelled')
+      );
+    };
     return [...latest.values()]
-      .filter((job) => !fresh.has(job.id))
+      .filter(
+        (job) =>
+          !fresh.has(job.id) &&
+          !!bound(job.id) &&
+          !closed(job.id) &&
+          (active.get(job.id)?.key === job.key ||
+            (job.status === 'stale' && rebound(job.id, job.startedAt))),
+      )
       .map((job) => ({
         boardId: job.id,
         key: job.key,

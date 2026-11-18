@@ -757,7 +757,13 @@ export function hostContext(
       (invalidated ??=
         h.config.approvalMode === 'operator'
           ? []
-          : new LeadWorkflow(h).invalidated(undefined, state)),
+          : new LeadWorkflow(h)
+              .invalidated(undefined, state, (boardId, since) => !!reboundOf(h, boardId, since))
+              // Пакет одной доски называет только её перезапуск.
+              .filter((j) => {
+                const graph = (built ??= pack()).graphId;
+                return graph === undefined || j.boardId === graph;
+              })),
     h,
     get pack() {
       return (built ??= pack());
@@ -841,7 +847,11 @@ function closedBoard(state: State, boardId: string) {
  * после старта её задания (`since`): последняя такая, если есть.
  */
 function reboundBy(ctx: HostContext, boardId: string, since: string) {
-  return new ContractChanges(ctx.h, '')
+  return reboundOf(ctx.h, boardId, since);
+}
+/** Последняя завершённая перепривязка задач доски после `since` (id операции). */
+function reboundOf(h: DevContour, boardId: string, since: string) {
+  return new ContractChanges(h, '')
     .list()
     .filter(
       (op) =>
@@ -995,6 +1005,7 @@ function boardDraft(boardId: string, ctx: HostContext): HostNextDraft | undefine
       code: 'board-restart',
       params: {
         running,
+        authorRuntime: restart.authorRuntime,
         ...(operation ? { operation } : {}),
         ...(others.length ? { others } : {}),
       },
@@ -1533,6 +1544,12 @@ function hostStep(ctx: HostContext): HandoffHostNext | undefined {
         params: { reason: stale },
       });
     }
+    // Устаревшее задание доски (перепривязка контракта и т. п.) — шаг
+    // ведущего уже сейчас, а ожидание задания другой доски, которое снимет
+    // паузу, его бы спрятало (F66). Паузу человека новое задание без его
+    // решения не обходит: её шаг — прежний.
+    const restart = steps.find((x) => x.code === 'board-restart');
+    if (restart && !(state.pauseReason === 'operator' && !pausedByLead(state))) return restart;
     // Пауза выдачи общая: её снимает любое действующее задание, чей цикл
     // снимет её — сразу или после такта, который сначала чинит задачу.
     for (const job of live)

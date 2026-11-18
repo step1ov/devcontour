@@ -292,10 +292,14 @@ export class ContractChanges {
    * называет новое задание каждой доски. Только у завершённой операции.
    */
   boardJobs(op: ContractChange) {
+    // В режиме оператора задания ведущего не исполняются: шаг workflow_start
+    // не предлагается.
+    if ((this.h.config.approvalMode ?? 'agent') === 'operator') return undefined;
     if (op.status !== 'completed' || !op.boards.length || !op.finishedAt) return undefined;
+    const finished = op.finishedAt;
     const jobs = new LeadWorkflow(this.h)
-      .invalidated(op.boards)
-      .filter((j) => j.startedAt <= op.finishedAt!);
+      .invalidated(op.boards, undefined, (_board, since) => since <= finished)
+      .filter((j) => j.startedAt <= finished);
     if (!jobs.length) return undefined;
     const starts = jobs
       .map(

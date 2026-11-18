@@ -226,11 +226,16 @@ const samples: { [C in HintCode]: (HintSubject & Extract<HintOf, { code: C }>)[]
   'board-restart': [
     {
       code: 'board-restart',
-      params: { running: false, operation: 'CC-1', others: ['board-2'] },
+      params: { running: false, authorRuntime: 'codex', operation: 'CC-1', others: ['board-2'] },
       boardId: 'board-1',
       job: { ...job, status: 'running' },
     },
-    { code: 'board-restart', params: { running: true }, boardId: 'board-1', job },
+    {
+      code: 'board-restart',
+      params: { running: true, authorRuntime: 'claude' },
+      boardId: 'board-1',
+      job,
+    },
   ],
   'pause-lift': [
     {
@@ -563,8 +568,11 @@ test('Подсказки шага: новая конфигурация setup п�
  * Правка черновика (edit-task --file) сохраняет и поля со значением по
  * умолчанию; очистка — только явным значением (F65, ревью 1); прочие
  * образцы байтово прежние.
+ * Текст `board-restart` называет рантайм автора прежнего задания
+ * (`params.authorRuntime`, как `boardJobs.next` операции; F66, ревью 1);
+ * прочие образцы байтово прежние.
  */
-const ENGLISH_SAMPLES_SHA256 = 'fc411a41b42da76f9468228266485fc38d99b1294cc97d093efb3da1e9d2dddc';
+const ENGLISH_SAMPLES_SHA256 = '5e7343a19d89e50abe6fda49f0155975f3a2348fcfdf0c09d4b45be3130c65f9';
 
 test('Подсказки шага: английские тексты образцов закреплены', () => {
   assert.equal(

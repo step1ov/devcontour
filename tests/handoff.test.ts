@@ -46,6 +46,7 @@ import {
   type DevContourHandoff,
 } from '../src/application/handoff.ts';
 import { command } from '../src/runner/process.ts';
+import { ContractChanges, type ContractChange } from '../src/runner/contract-change.ts';
 import { cliCommand } from './cli-command.ts';
 
 const INTENT = 'Okapi intention: finish the payment board before the release';
@@ -2284,6 +2285,118 @@ test('session_handoff: доска без задач ревизии — не «в
       ['fix-input', 'workflow_start', 'workflow_retry', 'decide'].includes(step.action),
       JSON.stringify(step),
     );
+  } finally {
+    f.cleanup();
+  }
+});
+
+test('session_handoff: перезапуск устаревшего задания — рядом с заданием другой доски, others, закрытая доска и режим оператора (F66, ревью 1)', () => {
+  const f = fixture();
+  try {
+    const lead = new LeadWorkflow(f.h);
+    const board = (title: string) => {
+      const b = f.h.createBoard(title, '', 'main');
+      f.h.addTask(b.id, input(`Task of ${title}`));
+      f.h.approve(b.id);
+      lead.start({ kind: 'board', id: b.id, authorRuntime: 'codex' });
+      return b.id;
+    };
+    const x = board('Board X live');
+    const y = board('Board Y moved');
+    const z = board('Board Z moved');
+    // Вход заданий Y и Z сменился (описание доски входит во вход задания, а
+    // не в постановку задач: план остаётся согласованным).
+    f.store.change('fixture', (s) => {
+      for (const b of s.boards) if (b.id !== x) b.description = 'Moved after the job started';
+      return {};
+    });
+    const listed = lead.invalidated(undefined).map((j) => j.boardId);
+    assert.deepEqual(listed.sort(), [y, z].sort());
+    // Очередь на начальной паузе, задание X её снимет: перезапуск всё равно
+    // называется, с другой устаревшей доской в others.
+    const paused = devcontourHandoff(f.h).host.next;
+    assert.equal(paused?.code, 'board-restart', JSON.stringify(paused));
+    assert.equal(paused?.action, 'workflow_start');
+    assert.ok([y, z].includes(paused.boardId!));
+    assert.deepEqual(
+      paused.params.others,
+      [y, z].filter((id) => id !== paused.boardId),
+    );
+    assert.equal(paused.params.authorRuntime, 'codex');
+    assert.match(paused.detail, /"authorRuntime": "codex"/);
+    // Очередь идёт: перезапуск раньше ожидания задания X.
+    f.h.pause(false);
+    assert.equal(devcontourHandoff(f.h).host.next?.code, 'board-restart');
+    // Пакет доски X перезапуск чужой доски не называет.
+    assert.notEqual(devcontourHandoff(f.h, { boardId: x }).host.next?.code, 'board-restart');
+    // Доска, все задачи которой отменены, шага не даёт (F58), даже с
+    // устаревшим заданием.
+    for (const id of [y, z]) {
+      const task = f.store
+        .read()
+        .boards.find((b) => b.id === id)!
+        .revisions.at(-1)!.taskIds[0];
+      f.h.cancel(task, 'Board dropped');
+    }
+    assert.deepEqual(lead.invalidated(undefined), []);
+    assert.notEqual(devcontourHandoff(f.h).host.next?.code, 'board-restart');
+  } finally {
+    f.cleanup();
+  }
+});
+
+test('LeadWorkflow.invalidated: задание stale — только после записанной перепривязки; в режиме оператора перезапуска нет (F66, ревью 1)', () => {
+  const f = fixture();
+  try {
+    const lead = new LeadWorkflow(f.h);
+    const b = f.h.createBoard('Board stale job', '', 'main');
+    f.h.addTask(b.id, input('Task of the stale board'));
+    f.h.approve(b.id);
+    const job = lead.start({ kind: 'board', id: b.id, authorRuntime: 'claude' });
+    f.store.change('fixture', (s) => {
+      s.boards.find((x) => x.id === b.id)!.description = 'Moved after the job started';
+      return {};
+    });
+    // Взятие стадии закрывает устаревшее задание stale.
+    lead.claim(job.key, job.owner);
+    assert.equal(lead.get(job.key, job.owner).status, 'stale');
+    // Брошенная доска со stale без перепривязки — не перезапуск.
+    assert.deepEqual(lead.invalidated(undefined), []);
+    assert.notEqual(devcontourHandoff(f.h).host.next?.code, 'board-restart');
+    // Записанная перепривязка после старта задания — перезапуск.
+    assert.deepEqual(
+      lead.invalidated(undefined, undefined, () => true).map((j) => j.key),
+      [job.key],
+    );
+    const op = {
+      id: 'CC-fixture',
+      owner: 'main',
+      status: 'completed',
+      boards: [b.id],
+      finishedAt: new Date().toISOString(),
+    };
+    f.store.atomic(() => f.store.saveLocal('contract-change', 'main', op.id, op));
+    const next = devcontourHandoff(f.h).host.next;
+    assert.equal(next?.code, 'board-restart', JSON.stringify(next));
+    assert.equal(next?.params.operation, 'CC-fixture');
+    assert.equal(next?.params.authorRuntime, 'claude');
+    const changes = new ContractChanges(f.h, f.root);
+    assert.ok(changes.boardJobs(op as unknown as ContractChange));
+    // Режим оператора: задания не исполняются — ни шага, ни boardJobs.
+    f.h.config.approvalMode = 'operator';
+    const harness = harnessOf(f.h);
+    f.store.read();
+    const ctx = executionOf(f.h).store.read((v) =>
+      hostContext(
+        f.h,
+        harness,
+        v,
+        executionOf(f.h).store.stateOf(v),
+        () => devcontourHandoff(f.h).pack,
+      ),
+    );
+    assert.deepEqual(ctx.invalidated(), []);
+    assert.equal(changes.boardJobs(op as unknown as ContractChange), undefined);
   } finally {
     f.cleanup();
   }

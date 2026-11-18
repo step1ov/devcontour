@@ -78,7 +78,13 @@ export interface HintParamMap {
    * изменения контракта, чья перепривязка задач его сменила; `others` —
    * другие доски с таким же заданием.
    */
-  'board-restart': { running: boolean; operation?: string; others?: string[] };
+  'board-restart': {
+    running: boolean;
+    /** Рантайм автора прежнего задания — тот же, что в `boardJobs.next` операции. */
+    authorRuntime: string;
+    operation?: string;
+    others?: string[];
+  };
   /** Пауза выдачи, её снимет действующее задание; `pause` — причина паузы. */
   'pause-lift': { pause: string; stage: number };
   /** Пауза человека (`by: lead` — её поставил ведущий через queue_set), её не снимает ни одно задание. */
@@ -340,7 +346,7 @@ const en: Catalog = {
       ? ' An attempt is running: the server finishes it without a job; the board can also be continued by hand (MCP task_retry or devcontour retry --by host, accept; docs/cli.md).'
       : ''),
   'board-restart': (p, s) =>
-    `The lead workflow job of board ${s.boardId!}${s.job ? ` (${s.job.status}, key ${s.job.key})` : ''} was started on an earlier input: ${p.operation ? `contract-change ${p.operation} rebound its tasks` : 'its tasks, contracts or execution policy changed'} after it started, so it will not continue (it closes as stale). Start a new job: workflow_start {"kind": "board", "id": ${JSON.stringify(s.boardId!)}, "authorRuntime": …} with the DevContour server running; the new job checks a moved base itself (base-check) and continues dispatch.` +
+    `The lead workflow job of board ${s.boardId!}${s.job ? ` (${s.job.status}, key ${s.job.key})` : ''} was started on an earlier input: ${p.operation ? `contract-change ${p.operation} rebound its tasks` : 'its tasks, contracts or execution policy changed'} after it started, so it will not continue (it closes as stale). Start a new job: workflow_start {"kind": "board", "id": ${JSON.stringify(s.boardId!)}, "authorRuntime": ${JSON.stringify(p.authorRuntime)}} with the DevContour server running; the new job checks a moved base itself (base-check) and continues dispatch.` +
     (p.others?.length ? ` Restart the jobs of boards ${p.others.join(', ')} the same way.` : '') +
     (p.running ? ' An attempt is running: the server finishes it without a job.' : ''),
   'pause-lift': (p, s) =>
@@ -596,7 +602,7 @@ const ru: Catalog = {
       ? ' Идёт попытка: сервер завершит её и без задания; доску можно продолжить и вручную (MCP task_retry или devcontour retry --by host, accept; docs/cli.md).'
       : ''),
   'board-restart': (p, s) =>
-    `Задание ведущего доски ${s.boardId!}${s.job ? ` (${s.job.status}, ключ ${s.job.key})` : ''} начато на прежнем входе: ${p.operation ? `операция contract-change ${p.operation} перепривязала его задачи` : 'после его старта изменились задачи, контракты или политика исполнения'}, поэтому оно не продолжится (закроется как stale). Начните новое задание: workflow_start {"kind": "board", "id": ${JSON.stringify(s.boardId!)}, "authorRuntime": …} при работающем сервере DevContour; новое задание само проверит перенесённую базу (base-check) и продолжит выдачу.` +
+    `Задание ведущего доски ${s.boardId!}${s.job ? ` (${s.job.status}, ключ ${s.job.key})` : ''} начато на прежнем входе: ${p.operation ? `операция contract-change ${p.operation} перепривязала его задачи` : 'после его старта изменились задачи, контракты или политика исполнения'}, поэтому оно не продолжится (закроется как stale). Начните новое задание: workflow_start {"kind": "board", "id": ${JSON.stringify(s.boardId!)}, "authorRuntime": ${JSON.stringify(p.authorRuntime)}} при работающем сервере DevContour; новое задание само проверит перенесённую базу (base-check) и продолжит выдачу.` +
     (p.others?.length ? ` Так же перезапустите задания досок ${p.others.join(', ')}.` : '') +
     (p.running ? ' Идёт попытка: сервер завершит её и без задания.' : ''),
   'pause-lift': (p, s) =>
