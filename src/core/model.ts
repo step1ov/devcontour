@@ -12,6 +12,8 @@ import type { AttemptState, JointBudgetCheckpoint } from 'devcontour-harness/con
 import {
   GATE_SCOPE_LIMIT,
   dependencyStoreSchema,
+  generatorSchema,
+  MAX_GENERATORS,
   DEFAULT_STALL_SWEEP,
   gateScopeTooBig,
   gateWhenSchema,
@@ -1057,6 +1059,13 @@ export const repositorySchema = z.object({
    * (по умолчанию контроллер ставит их install-gates под изоляцией gates).
    */
   writerDependencies: z.boolean().optional(),
+  /**
+   * Генераторы закоммиченных выходов (схема harness): правка входов или
+   * инструмента — и controller перестраивает выходы в коммите кандидата,
+   * даже когда они лежат в области записи другой роли. Поле без умолчания:
+   * компонент без генераторов сохраняет digest политики.
+   */
+  generators: z.array(generatorSchema).max(MAX_GENERATORS).optional(),
   preflight: z.array(stepSchema).optional(),
   forge: forgeSchema.optional(),
   name: z.string().min(1),

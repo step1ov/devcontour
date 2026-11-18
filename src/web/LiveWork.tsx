@@ -448,10 +448,12 @@ const stageNames: Record<string, string> = {
   'implementation-reuse': 'код взят у прошлой попытки',
   'candidate-environment': 'окружение',
   'candidate-test': 'проверки',
+  generate: 'генерация',
   'candidate-review': 'ревью',
   'integration-wait': 'очередь интеграции',
   'integration-environment': 'окружение интеграции',
   'integration-test': 'проверки интеграции',
+  'integration-generate': 'генерация интеграции',
   'integration-review': 'ревью интеграции',
 };
 const outcomeNames: Record<Run['status'], string> = {

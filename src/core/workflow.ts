@@ -8,6 +8,7 @@ import {
   type Verification,
 } from './model.ts';
 import { createHash } from 'node:crypto';
+import { generatorIssues, pathsOverlap, type GeneratorPolicy } from 'devcontour-harness/contracts';
 import {
   codeReviewVendor,
   repositories,
@@ -148,6 +149,7 @@ export function validateWorkflow(config: Config) {
     ])
       if (steps && new Set(steps.map((s) => s.id)).size !== steps.length)
         throw new DomainError('Step ids должны быть уникальны');
+    validateGenerators(config, repo);
   }
   const seen = new Set<string>(),
     active = new Set<string>();
@@ -184,6 +186,71 @@ export function validateWorkflow(config: Config) {
       throw new DomainError('requirement-source — зарезервированный gate');
     for (const gate of gates) validateResources(config, gate.resources ?? []);
   }
+}
+/**
+ * Генераторы компонента: правила harness (`generatorIssues` — ID, выходы
+ * между собой, со входами и инструментом, защищёнными путями и служебными
+ * каталогами) и пути, которые знает только хост: файл компонента, локальные
+ * данные контура и закреплённые файлы context packs. Выход генератора
+ * controller записывает в обход области записи — поэтому выход не может
+ * перекрыть то, что исполнитель менять не вправе.
+ */
+function validateGenerators(config: Config, repo: ReturnType<typeof repositories>[number]) {
+  const generators = repo.generators ?? [];
+  if (!generators.length) return;
+  const refuse = (message: string) => {
+    throw new DomainError(`Компонент ${repo.id}: ${message}`);
+  };
+  const [issue] = generatorIssues({ generators, protectedPaths: repo.protectedPaths });
+  if (issue) refuse(issue.message);
+  const reserved: [string, string][] = [
+    ['.devcontour-local', 'локальные данные контура'],
+    ...(repo.configFile ? [[repo.configFile, 'файл компонента'] as [string, string]] : []),
+    ...config.contextPacks
+      .filter((p) => p.repositoryId === repo.id)
+      .flatMap((p) => [...p.files, ...p.references])
+      .map((f): [string, string] => [f, 'файл context pack']),
+  ];
+  for (const g of generators)
+    for (const out of g.outputs)
+      for (const [path, what] of reserved)
+        if (pathsOverlap(out, path))
+          refuse(`Выход генератора ${g.id} (${out}) пересекает ${what} ${path}`);
+}
+/**
+ * Действующая область записи задачи — пересечение области роли и задачи;
+ * `undefined` — весь репозиторий (нет ни той, ни другой).
+ */
+export function effectiveWriteArea(
+  config: Config,
+  task: Pick<TaskInput, 'role' | 'repositoryId' | 'writePaths'>,
+): string[] | undefined {
+  const roleScope = roleBinding(config, task.role, task.repositoryId)?.writePaths;
+  const own = task.writePaths?.length ? task.writePaths : undefined;
+  if (!roleScope?.length) return own;
+  if (!own) return roleScope;
+  return [
+    ...new Set(
+      own.flatMap((path) =>
+        insideFolded(path, roleScope) ? [path] : roleScope.filter((p) => insideFolded(p, [path])),
+      ),
+    ),
+  ];
+}
+/**
+ * Генераторы, чьи входы или инструмент задача вправе изменить: их выходы
+ * controller перестроит в коммите задачи, в том числе в чужой области.
+ */
+export function derivedWrites(
+  config: Config,
+  task: Pick<TaskInput, 'role' | 'repositoryId' | 'writePaths'>,
+): GeneratorPolicy[] {
+  const generators = repository(config, task.repositoryId).generators ?? [];
+  if (!generators.length) return [];
+  const area = effectiveWriteArea(config, task);
+  return generators.filter((g) =>
+    [...g.inputs, ...g.tool].some((p) => !area || area.some((a) => pathsOverlap(a, p))),
+  );
 }
 export function validateResources(config: Config, ids: string[]) {
   for (const id of ids)
@@ -237,6 +304,25 @@ export function validateTaskContext(
         `Область записи задачи (${task.writePaths.join(', ')}) не пересекается с областью роли ` +
           `${task.role} (${roleScope.join(', ')}): исполнитель не сможет изменить ни одного файла`,
       );
+  }
+  // Правка инструмента генератора меняет его выходы. Когда выходы лежат вне
+  // области роли, это запись в чужую область, которую ревью кода роли не
+  // охватывает: инструмент правит роль-владелец выходов. Правка входов
+  // (данных) допустима — выход перестроит controller. История не
+  // перепроверяется: генератор мог появиться после принятия задачи.
+  if (!options.history && roleScope?.length) {
+    const area = effectiveWriteArea(config, task);
+    for (const g of repository(config, task.repositoryId).generators ?? []) {
+      const tools = g.tool.filter((t) => !area || area.some((a) => pathsOverlap(a, t)));
+      const foreign = g.outputs.filter((out) => !insideFolded(out, roleScope));
+      if (tools.length && foreign.length)
+        throw new DomainError(
+          `Задача может изменить инструмент генератора ${g.id} (${tools.join(', ')}), а его выходы ` +
+            `(${foreign.join(', ')}) лежат вне области записи роли ${task.role} (${roleScope.join(', ')}): ` +
+            'так задача перепишет чужую область. Поручите правку инструмента роли, которой принадлежат выходы, ' +
+            'или сузьте область записи задачи до входов генератора',
+        );
+    }
   }
   if (task.gates) {
     const repo = repository(config, task.repositoryId);
@@ -334,6 +420,17 @@ export function roleScopeAdvice(
   );
 }
 
+/**
+ * `withinPaths` без учёта регистра — как `pathsOverlap` harness: правила
+ * генераторов сравнивают пути одинаково, иначе выход `Apps/Mobile/…` при
+ * области роли `apps/mobile/` считался бы чужим (файловая система macOS
+ * регистр не различает).
+ */
+const insideFolded = (path: string, prefixes: string[]) =>
+  withinPaths(
+    path.toLowerCase(),
+    prefixes.map((p) => p.toLowerCase()),
+  );
 export const withinPaths = (path: string, prefixes: string[]) =>
   prefixes.some(
     (prefix) => path === prefix || path.startsWith(prefix.endsWith('/') ? prefix : prefix + '/'),

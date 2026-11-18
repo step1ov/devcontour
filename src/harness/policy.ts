@@ -203,6 +203,9 @@ export function policyFromConfig(
       dependencyArtifacts: r.dependencyArtifacts ?? [],
       ...(r.dependencyStore ? { dependencyStore: r.dependencyStore } : {}),
       ...(r.writerDependencies === false ? { writerDependencies: false } : {}),
+      // Только объявленные и только для исполнения: ревью ничего не строит,
+      // а политика без генераторов сохраняет прежний digest.
+      ...(r.generators?.length && !forReview ? { generators: r.generators } : {}),
       preflight: r.preflight ?? [],
       ...(r.roles
         ? {
