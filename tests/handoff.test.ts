@@ -1242,7 +1242,7 @@ test('session_handoff: решение о плане называет черно�
     assert.doesNotMatch(next.detail, /review-plan --board/, 'ревью сырых находок не предлагается');
     assert.match(
       next.detail,
-      /fields absent from the file are kept, except repositoryId, scope, dependsOn and contracts.*copy them from the current task/,
+      /fields absent from the file keep their current values, including repositoryId, scope, dependsOn and contracts/,
     );
     // Правка черновика — явный разбор: даже с прежней приёмкой находка
     // отмечена triaged и идёт в область ревью.

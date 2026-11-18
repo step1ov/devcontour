@@ -27,7 +27,13 @@ test('edit-task --file без role и других обязательных по
     await writeFile(join(data, 'config.json'), JSON.stringify(c));
     let h = new DevContour(new Store(join(data, 'state.sqlite')), c);
     const board = h.createBoard('Edit board', '', 'main');
-    const id = h.addTask(board.id, { ...input('Original title'), role: 'frontend' }).id;
+    const contract = h.contract('Edit API', 'v1', undefined, undefined, 'docs/contracts/edit.md');
+    const base = h.addTask(board.id, input('Base task')).id;
+    const id = h.addTask(board.id, {
+      ...input('Original title', [base]),
+      role: 'frontend',
+      contracts: [contract.id],
+    }).id;
     const before = h.store.read().tasks.find((t) => t.id === id)!;
     h.store.close();
     const cli = (file: string) =>
@@ -44,13 +50,28 @@ test('edit-task --file без role и других обязательных по
     assert.equal(after.role, 'frontend');
     assert.equal(after.description, before.description);
     assert.deepEqual(after.acceptance, before.acceptance);
+    // Поля со значением по умолчанию тоже не сбрасываются частичным файлом.
+    assert.deepEqual(after.dependsOn, [base]);
+    assert.deepEqual(after.contracts, [contract.id]);
+    assert.equal(after.repositoryId, before.repositoryId);
+    assert.equal(after.scope, before.scope);
+    // Очистить поле можно только явным значением.
+    const clear = join(root, 'clear.json');
+    await writeFile(clear, JSON.stringify({ dependsOn: [] }));
+    const cleared = await cli(clear);
+    assert.equal(cleared.code, 0, cleared.stderr);
+    h = new DevContour(new Store(join(data, 'state.sqlite')), c);
+    const emptied = h.store.read().tasks.find((t) => t.id === id)!;
+    h.store.close();
+    assert.deepEqual(emptied.dependsOn, []);
+    assert.deepEqual(emptied.contracts, [contract.id]);
     // Неверное значение поля — понятный отказ с именем поля, а не сырой zod.
     const bad = join(root, 'bad.json');
     await writeFile(bad, JSON.stringify({ title: 'x' }));
     const refused = await cli(bad);
     assert.notEqual(refused.code, 0);
     assert.match(refused.stderr, /Файл задачи не прошёл проверку/);
-    assert.match(refused.stderr, /title/);
+    assert.match(refused.stderr, /title: меньше допустимого \(не меньше 3 знаков\)/);
     assert.doesNotMatch(refused.stderr, /"code":|ZodError/);
   } finally {
     if (root.startsWith(await realpath(tmpdir())) && root.includes('devcontour-edit-task-'))

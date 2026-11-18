@@ -201,5 +201,9 @@
 // workflow_start с кодом board-restart (задание доски на прежнем входе, в
 // том числе после перепривязки contract-change), описание
 // contract_change_status — поле boardJobs; прочие операции байтово прежние.
-export const CATALOG_DIGEST = 'e563c8a0b8452070b6739a1001fefc07223a06f91411c7aeecdba9839cc5d962';
+// Намеренное изменение (F65, ревью 1): описание task_edit говорит, что
+// операция принимает постановку целиком (поля со значением по умолчанию без
+// значения сбрасываются), в отличие от CLI edit-task --file; прочие
+// операции байтово прежние.
+export const CATALOG_DIGEST = 'd74b63ed62d52c8030e361fb7f5d3b105eb5b57c4d264384e4e84e27a09090dd';
 export const SNAPSHOT_VERSION = '0.4.0-alpha.7';

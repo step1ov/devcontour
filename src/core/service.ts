@@ -1008,8 +1008,22 @@ function planPath(path: PropertyKey[]) {
     'план'
   );
 }
-/** Обязательные поля постановки задачи (`taskInput` без значения по умолчанию). */
-const TASK_REQUIRED_FIELDS = ['title', 'description', 'role', 'acceptance'] as const;
+/**
+ * Поля постановки, которые схема правки (`taskIngest`) требует или заполняет
+ * значением по умолчанию: без переноса из текущей задачи частичный файл
+ * правки отверг бы правку или молча сбросил бы зависимости и контракты.
+ * Необязательные поля без умолчания правка сохраняет и так (`editTask`).
+ */
+const TASK_KEPT_FIELDS = [
+  'title',
+  'description',
+  'role',
+  'acceptance',
+  'repositoryId',
+  'scope',
+  'dependsOn',
+  'contracts',
+] as const;
 
 export class DevContour {
   constructor(
@@ -1562,23 +1576,27 @@ export class DevContour {
       throw new DomainError(label + ': ' + roleScopeAdvice(this.config, task, added), 400);
   }
   /**
-   * `expectedScopeDigest` — область проверок (gates, потребители), которую
-   * видел правящий: она вне digest постановки, и без неё правка со
-   * старыми gates молча вернула бы чужую правку одних gates.
-   */
-  /**
-   * Постановка правки из файла (`edit-task --file`): обязательные поля
-   * постановки, которых в файле нет, берутся из текущей задачи — как и
-   * необязательные (их сохраняет `editTask`). Поля со значением по умолчанию
-   * (`repositoryId`, `scope`, `dependsOn`, `contracts`) файл задаёт сам: без
-   * них — значения по умолчанию, как и прежде.
+   * Постановка правки из файла (`edit-task --file`): каждое поле постановки,
+   * которого в файле нет, остаётся как у текущей задачи — и обязательные
+   * (`title`, `description`, `role`, `acceptance`), и со значением по
+   * умолчанию (`repositoryId`, `scope`, `dependsOn`, `contracts`): частичный
+   * файл не сбрасывает зависимости и контракты. Очистить поле можно только
+   * явным значением (`"dependsOn": []`). Необязательные поля без умолчания
+   * сохраняет `editTask`. Агентская `task_edit` по-прежнему принимает
+   * постановку целиком.
    */
   static keptTaskFields(current: Task, input: unknown): unknown {
     if (!input || typeof input !== 'object' || Array.isArray(input)) return input;
     const out: Record<string, unknown> = { ...(input as Record<string, unknown>) };
-    for (const key of TASK_REQUIRED_FIELDS) if (!(key in out)) out[key] = current[key];
+    for (const key of TASK_KEPT_FIELDS)
+      if (!(key in out) && current[key] !== undefined) out[key] = current[key];
     return out;
   }
+  /**
+   * `expectedScopeDigest` — область проверок (gates, потребители), которую
+   * видел правящий: она вне digest постановки, и без неё правка со
+   * старыми gates молча вернула бы чужую правку одних gates.
+   */
   editTask(id: string, input: unknown, expectedDigest: string, expectedScopeDigest?: string) {
     const parsed = taskIngest.parse(input);
     repository(this.config, parsed.repositoryId);

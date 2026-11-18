@@ -232,7 +232,7 @@ function loopEn(o: LoopOutlook) {
 const STOP_REMEDY_EN =
   'Diagnose it; fix or retry the task by hand (MCP task_retry, or devcontour retry --task ID --by host [--reset --reason TEXT]; a property episode — recovery_decide) or ask the user. Retrying the job (workflow_retry) before that fails again.';
 const EDIT_EN =
-  'devcontour edit-task --task ID --file FILE --workspace …; fields absent from the file are kept, except repositoryId, scope, dependsOn and contracts, which fall back to their defaults: copy them from the current task';
+  'devcontour edit-task --task ID --file FILE --workspace …; fields absent from the file keep their current values, including repositoryId, scope, dependsOn and contracts; clear a field only with an explicit value (for example "dependsOn": [])';
 const SERVER_EN =
   'The running DevContour server continues it; if the server is stopped, start it (devcontour start --workspace …).';
 
@@ -490,7 +490,7 @@ function loopRu(o: LoopOutlook) {
 const STOP_REMEDY_RU =
   'Разберите причину; исправьте или повторите задачу вручную (MCP task_retry или devcontour retry --task ID --by host [--reset --reason TEXT]; эпизод свойства — recovery_decide) либо спросите пользователя. Повтор задания (workflow_retry) до этого снова упадёт.';
 const EDIT_RU =
-  'devcontour edit-task --task ID --file FILE --workspace …; отсутствующие в файле поля сохраняются, кроме repositoryId, scope, dependsOn и contracts — они получают значения по умолчанию: перенесите их из текущей задачи';
+  'devcontour edit-task --task ID --file FILE --workspace …; отсутствующие в файле поля сохраняют текущие значения, в том числе repositoryId, scope, dependsOn и contracts; очищайте поле только явным значением (например, "dependsOn": [])';
 const SERVER_RU =
   'Его продолжает работающий сервер DevContour; если сервер остановлен, запустите его (devcontour start --workspace …).';
 

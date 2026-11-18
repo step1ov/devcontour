@@ -99,6 +99,31 @@ import { brokerAddress, httpBroker } from './runner/visual-broker.ts';
 import { VISUAL_RUN_DEADLINE_MS, visualRun } from './runner/visual-run.ts';
 const args = process.argv.slice(2),
   operation = args[0] ?? 'serve';
+/** Причина отказа проверки файла по-русски: частые коды zod, иначе текст zod. */
+function issueRu(issue: z.core.$ZodIssue) {
+  const i = issue as z.core.$ZodIssue & {
+    expected?: string;
+    minimum?: number | bigint;
+    maximum?: number | bigint;
+    keys?: string[];
+    origin?: string;
+  };
+  const unit = i.origin === 'string' ? ' знаков' : i.origin === 'array' ? ' элементов' : '';
+  switch (i.code) {
+    case 'invalid_type':
+      return `ожидается ${i.expected ?? 'другой тип'}: поле не задано или другого типа`;
+    case 'too_small':
+      return `меньше допустимого (не меньше ${String(i.minimum)}${unit})`;
+    case 'too_big':
+      return `больше допустимого (не больше ${String(i.maximum)}${unit})`;
+    case 'unrecognized_keys':
+      return `неизвестные поля: ${(i.keys ?? []).join(', ')}`;
+    case 'invalid_value':
+      return 'недопустимое значение';
+    default:
+      return i.message;
+  }
+}
 const option = (name: string, fallback: string) =>
   args.includes(name) ? args[args.indexOf(name) + 1] : fallback;
 /**
@@ -1548,7 +1573,7 @@ async function main() {
             'Файл задачи не прошёл проверку: ' +
               error.issues
                 .slice(0, 10)
-                .map((i) => `${i.path.join('.') || 'файл'}: ${i.message}`)
+                .map((i) => `${i.path.join('.') || 'файл'}: ${issueRu(i)}`)
                 .join('; ') +
               (error.issues.length > 10 ? `; и ещё ${error.issues.length - 10}` : ''),
           );
