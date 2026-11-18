@@ -164,6 +164,21 @@ export class LeadRunner {
    * (`idleWait`); то, чего отпечаток не видит (Git, время), стадия
    * проверит не позже предела паузы.
    */
+  /**
+   * Ожидание стадии доски при паузе очереди человеком или ведущим
+   * (`operator`) либо по отказу runtime: стадия 2 такую паузу не снимает,
+   * Git и время не читает, а восстановление и повтор решаются по задачам
+   * доски и попыткам — они в отпечатке. Предел паузы `idleWait` здесь не
+   * нужен: стадия захватывается снова, только когда отпечаток сменился
+   * (снятие паузы, перемена задачи). Ожидание проверки базы, остановка
+   * сервера, пауза без причины («база отстала») и ChangeSet (Git,
+   * требования) — по-прежнему с пределом.
+   */
+  private pausedHold(job: WorkflowJob) {
+    if (job.kind !== 'board') return false;
+    const s = this.h.store.view();
+    return s.paused && (s.pauseReason === 'operator' || s.pauseReason === 'runtime');
+  }
   private waitPrint(job: WorkflowJob, errors: () => ReturnType<typeof tickErrors>) {
     const s = this.h.store.view();
     const now = Date.now();
@@ -174,6 +189,9 @@ export class LeadRunner {
     const ids = new Set(boards.flatMap((b) => b.revisions.flatMap((r) => r.taskIds)));
     const joint = changeSet ? this.joints.get(changeSet.id) : undefined;
     return JSON.stringify([
+      // Правило восстановления читает пределы конфигурации (`repairStep`).
+      this.h.config.maxAttempts,
+      this.h.config.repairBudget,
       job.stage,
       job.inputDigest,
       job.attempts,
@@ -255,6 +273,8 @@ export class LeadRunner {
         const print = saved.status === 'queued' ? this.waitPrint(saved, errorsOnce) : undefined;
         if (print !== undefined && idle?.print === print && performance.now() < idle.notBefore)
           continue;
+        // Снимок для решения о бессрочной паузе — тот же, что у отпечатка.
+        const held = print !== undefined && this.pausedHold(saved);
         const job = this.workflow.claim(saved.key, owner);
         if (!job) {
           // Попытки исчерпаны прерываниями: причина последнего — в ошибке.
@@ -289,7 +309,14 @@ export class LeadRunner {
                 ? Math.min(idle.delayMs * 2, this.idleWait.maxMs)
                 : this.idleWait.initialMs;
             // Монотонные часы: перевод системных часов назад не продлевает паузу.
-            this.idle.set(saved.key, { print, notBefore: performance.now() + delayMs, delayMs });
+            // Очередь на паузе, которую стадия доски сама не снимает: всё,
+            // от чего зависит стадия, — в отпечатке, и повторный захват
+            // до его смены только переписывал бы задание (F61).
+            this.idle.set(saved.key, {
+              print,
+              notBefore: held ? Infinity : performance.now() + delayMs,
+              delayMs,
+            });
           } else this.idle.delete(saved.key);
         } catch (e) {
           this.idle.delete(saved.key);

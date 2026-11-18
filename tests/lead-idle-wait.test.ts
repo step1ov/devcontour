@@ -97,6 +97,44 @@ test('F60: без перемен ожидающая стадия всё же п�
   }
 });
 
+test('F61: на паузе очереди ожидающая стадия доски не захватывается и после предела — ревизия стоит, снятие паузы захватывает сразу', async () => {
+  const f = fixture();
+  try {
+    const { flow, job, runner, claims } = await waitingBoard(f);
+    runner.idleWait = { initialMs: 100, maxMs: 200 };
+    f.h.pause(true, 'operator', 'lead');
+    // Первый такт после паузы — перемена отпечатка: один захват.
+    await runner.tick();
+    const claimed = claims();
+    const revision = f.store.revision();
+    const summary = panelSummary(f.h, f.root, {}) as { revision: string };
+    for (let i = 0; i < 4; i++) {
+      await sleep(250);
+      await runner.tick();
+    }
+    assert.equal(claims(), claimed, 'пауза очереди: без захватов и после предела паузы');
+    assert.equal(f.store.revision(), revision, 'ревизия данных не росла');
+    assert.deepEqual(panelSummary(f.h, f.root, { revision: summary.revision }), {
+      revision: summary.revision,
+      unchanged: true,
+    });
+    const before = flow.get(job.key, 'main');
+    assert.equal(before.status, 'queued');
+
+    f.h.pause(false, 'operator', 'lead');
+    await runner.tick();
+    assert.equal(claims(), claimed + 1, 'снятие паузы — немедленный захват');
+    assert.equal(flow.get(job.key, 'main').attempts, before.attempts);
+    // Без паузы предел снова действует.
+    await sleep(250);
+    await runner.tick();
+    assert.equal(claims(), claimed + 2, 'без паузы — проверка после предела');
+    await runner.stop();
+  } finally {
+    f.cleanup();
+  }
+});
+
 test('F60: отпечаток ожидания ChangeSet видит живую проверку другого ChangeSet — её конец снова захватывает стадию', () => {
   // Начало совместной проверки ждёт, пока идёт любая проверка с живым lease
   // (`jointStage`): её окончание — перемена для ожидающей стадии.
