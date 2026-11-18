@@ -564,6 +564,173 @@ test('S13 заменённая устаревшая операция, всё е�
   }
 });
 
+test('S13 замена устаревшей операции: что не заменяет и что держит карточку', async () => {
+  const FILE = 'docs/api.md';
+  const START = '2026-01-01T00:00:00.000Z';
+  const LATER = '2026-01-02T00:00:00.000Z';
+  const EARLIER = '2025-12-31T00:00:00.000Z';
+  const record = (id: string, extra: Record<string, unknown> = {}) => ({
+    id,
+    key: digest({ owner: 'main', source: FILE }),
+    owner: 'main',
+    status: 'stale',
+    version: 3,
+    proposal: { title: 'API', file: FILE },
+    error: 'начните операцию заново по текущей редакции',
+    held: [],
+    startedAt: START,
+    history: [{ at: '2026-01-01T00:01:00.000Z', step: 'review', event: 'stale' }],
+    ...extra,
+  });
+  const contract = (id: string, extra: Record<string, unknown> = {}) => ({
+    id,
+    repositoryId: 'main',
+    title: 'API',
+    content: 'api',
+    digest: 'd'.repeat(64),
+    source: FILE,
+    approvedAt: LATER,
+    ...extra,
+  });
+  type F = ReturnType<typeof fixture>;
+  /** Сценарий: подготовка рядом с устаревшей операцией `op`; ждём, видна ли карточка. */
+  const cases: [string, boolean, (f: F, op: string) => void | Promise<void>][] = [
+    [
+      'тот же путь в другом репозитории не заменяет',
+      true,
+      (f) =>
+        f.store.change('fixture', (s) => {
+          s.contracts.push(contract('C-x', { repositoryId: 'other' }));
+        }),
+    ],
+    [
+      'собственная регистрация операции не заменяет',
+      true,
+      (f, op) => {
+        f.store.atomic(() =>
+          f.store.saveLocal('contract-change', 'main', op, record(op, { contractId: 'C-own' })),
+        );
+        f.store.change('fixture', (s) => {
+          s.contracts.push(contract('C-own'));
+        });
+      },
+    ],
+    [
+      'регистрация незавершённой (отменённой) операции не заменяет',
+      true,
+      (f) => {
+        const other = 'CC-' + randomUUID();
+        f.store.atomic(() =>
+          f.store.saveLocal(
+            'contract-change',
+            'main',
+            other,
+            record(other, { status: 'abandoned', contractId: 'C-abandoned', startedAt: LATER }),
+          ),
+        );
+        f.store.change('fixture', (s) => {
+          s.contracts.push(contract('C-abandoned'));
+        });
+      },
+    ],
+    [
+      'завершённая операция того же ключа, начатая раньше, не заменяет',
+      true,
+      (f) => {
+        const other = 'CC-' + randomUUID();
+        f.store.atomic(() =>
+          f.store.saveLocal(
+            'contract-change',
+            'main',
+            other,
+            record(other, { status: 'completed', startedAt: EARLIER }),
+          ),
+        );
+      },
+    ],
+    [
+      'позднее начатая, но не завершённая операция того же ключа не заменяет',
+      true,
+      (f) => {
+        f.store.atomic(() => {
+          for (const status of ['stale', 'abandoned']) {
+            const other = 'CC-' + randomUUID();
+            f.store.saveLocal(
+              'contract-change',
+              'main',
+              other,
+              record(other, { status, startedAt: LATER }),
+            );
+          }
+        });
+      },
+    ],
+    [
+      'заменена; удержанная задача уже отменена — карточки нет',
+      false,
+      (f, op) => {
+        const b = f.h.createBoard('Board');
+        const t = f.h.addTask(b.id, input('Held'));
+        f.h.approve(b.id);
+        f.h.hold([t.id], op, 'contract change');
+        f.store.change('fixture', (s) => {
+          s.contracts.push(contract('C-later'));
+          s.tasks.find((x) => x.id === t.id)!.status = 'cancelled';
+        });
+      },
+    ],
+    [
+      'заменена, но держит паузу выдачи — карточка остаётся',
+      true,
+      (f, op) =>
+        f.store.change('fixture', (s) => {
+          s.contracts.push(contract('C-later'));
+          s.paused = true;
+          s.pauseReason = 'reconfigure';
+          s.pauseOperation = op;
+        }),
+    ],
+    [
+      'заменена, но держит неприменённый запрос конфигурации — карточка остаётся',
+      true,
+      (f, op) =>
+        f.store.change('fixture', (s) => {
+          s.contracts.push(contract('C-later'));
+          s.reconfigure = { operation: op, digest: 'c'.repeat(64), requestedAt: LATER };
+        }),
+    ],
+    [
+      'заменена, но держит ожидание блокировки контекста — карточка остаётся',
+      true,
+      (f, op) =>
+        f.store.change('fixture', (s) => {
+          s.contracts.push(contract('C-later'));
+          s.waits = [{ kind: 'context-lock', detail: 'pack', at: LATER, operation: op }];
+        }),
+    ],
+  ];
+  for (const [name, visible, arrange] of cases) {
+    const f = fixture();
+    try {
+      const op = 'CC-' + randomUUID();
+      f.store.atomic(() => f.store.saveLocal('contract-change', 'main', op, record(op)));
+      await arrange(f, op);
+      const items = await engineItems(f);
+      const card = byKey(items, `contract-change:${op}`);
+      assert.equal(Boolean(card), visible, name);
+      if (card) assert.match(card.reason, new RegExp(`contract-change --id ${op} --abandon`), name);
+      if (name.includes('блокировки контекста'))
+        assert.match(
+          byKey(items, 'wait:context-lock')!.reason,
+          new RegExp(`contract-change --id ${op} --abandon`),
+          'карточка ожидания называет отмену устаревшей операции',
+        );
+    } finally {
+      f.cleanup();
+    }
+  }
+});
+
 test('S14 ожидание блокировки контекста и подтверждения переноса базы', async () => {
   const f = fixture();
   try {

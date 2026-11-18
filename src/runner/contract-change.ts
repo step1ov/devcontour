@@ -1573,12 +1573,16 @@ export class ContractChanges {
   supersededBy(op: ContractChange, contracts = this.h.store.read().contracts) {
     if (op.status !== 'stale') return undefined;
     const file = op.proposal?.file;
+    // Редакцию, которую зарегистрировала незавершённая операция (живая,
+    // отменённая, устаревшая — в том числе эта), закрепит или отвергнет она
+    // сама: заменой она не считается.
+    const unfinished = file ? this.unfinishedRegistrations() : new Set<string>();
     const registered = file
       ? contracts.find(
           (c) =>
             c.source === file &&
-            (c.repositoryId ?? op.owner) === op.owner &&
-            c.id !== op.contractId &&
+            (c.repositoryId ?? 'main') === op.owner &&
+            !unfinished.has(c.id) &&
             c.approvedAt > op.startedAt,
         )
       : undefined;
