@@ -1,4 +1,5 @@
 import { join } from 'node:path';
+import { blocksWork } from 'devcontour-harness';
 import { LeadWorkflow, WAITING_BASE_HELD, type WorkflowJob } from '../core/lead-workflow.ts';
 import { heldBaseOf, staleBaseStop } from '../core/work-status.ts';
 import { BASE_HELD_REFUSAL, SERVER_STOPPING, type DevContour } from '../core/service.ts';
@@ -153,9 +154,41 @@ export class LeadRunner {
     if (!live) this.startWaits.delete(changeSetId);
   }
   /**
+   * Ожидание стадии доски при паузе очереди человеком или ведущим
+   * (`operator`) либо по отказу runtime: стадия 2 такую паузу не снимает,
+   * Git и время не читает, а восстановление и повтор решаются по задачам
+   * доски и попыткам — они в отпечатке. Предел паузы `idleWait` здесь не
+   * нужен: стадия захватывается снова, только когда отпечаток сменился
+   * (снятие паузы, перемена задачи). Ожидание проверки базы, остановка
+   * сервера, пауза без причины («база отстала») и ChangeSet (Git,
+   * требования) — по-прежнему с пределом.
+   */
+  private pausedHold(job: WorkflowJob) {
+    if (job.kind !== 'board') return false;
+    const s = this.h.store.view();
+    return s.paused && (s.pauseReason === 'operator' || s.pauseReason === 'runtime');
+  }
+  /**
+   * Блокирующие вопросы исполнителя по задачам: id задачи → id вопросов.
+   * Запись вопроса (ответ, снятие, замена) растит ревизию данных, поэтому
+   * карта перечитывается только после записи: долгое ожидание вопроса при
+   * упавшей задаче не разбирает все запросы на каждом такте.
+   */
+  private blockingQuestions() {
+    const revision = this.h.store.revision();
+    if (this.questions?.revision === revision) return this.questions.byWork;
+    const byWork = new Map<string, string[]>();
+    for (const r of executionOf(this.h).engine.inputRequests())
+      if (blocksWork(r)) byWork.set(r.workId, [...(byWork.get(r.workId) ?? []), r.id]);
+    this.questions = { revision, byWork };
+    return byWork;
+  }
+  private questions?: { revision: number; byWork: ReadonlyMap<string, readonly string[]> };
+  /**
    * Отпечаток того, чего может ждать стадия задания: само задание (вход,
    * попытки, восстановления), задачи его досок (статус, попытка,
-   * восстановление, класс отказа), ревизии досок, пауза очереди с её
+   * восстановление, класс отказа) и их блокирующие вопросы исполнителя,
+   * пределы восстановления конфигурации, ревизии досок, пауза очереди с её
    * причинами и ожиданиями (проверка и удержание базы), остановка «база
    * отстала» по сбоям такта; у ChangeSet — проверки с живостью их lease,
    * доставки, приёмка, идущие попытки, совместная проверка цикла и пауза
@@ -164,7 +197,11 @@ export class LeadRunner {
    * (`idleWait`); то, чего отпечаток не видит (Git, время), стадия
    * проверит не позже предела паузы.
    */
-  private waitPrint(job: WorkflowJob, errors: () => ReturnType<typeof tickErrors>) {
+  private waitPrint(
+    job: WorkflowJob,
+    errors: () => ReturnType<typeof tickErrors>,
+    questions: () => ReadonlyMap<string, readonly string[]> = () => this.blockingQuestions(),
+  ) {
     const s = this.h.store.view();
     const now = Date.now();
     const changeSet =
@@ -174,11 +211,22 @@ export class LeadRunner {
     const ids = new Set(boards.flatMap((b) => b.revisions.flatMap((r) => r.taskIds)));
     const joint = changeSet ? this.joints.get(changeSet.id) : undefined;
     return JSON.stringify([
+      // Правило восстановления читает пределы конфигурации (`repairStep`).
+      this.h.config.maxAttempts,
+      this.h.config.repairBudget,
       job.stage,
       job.inputDigest,
       job.attempts,
       job.repairs,
       job.startedAt,
+      // Блокирующие вопросы исполнителя по задачам: снятие или замена
+      // вопроса (input_cancel, input_supersede) полей задачи не меняет, а
+      // повтор и остановку задания решает (F61). Решение о повторе читает
+      // вопросы только упавших задач (`repairDecision`), поэтому и запросы
+      // читаются только при упавшей задаче — один раз за такт.
+      s.tasks
+        .filter((t) => ids.has(t.id) && t.status === 'failed')
+        .map((t) => [t.id, questions().get(t.id) ?? []]),
       s.paused,
       s.pauseReason,
       s.pausedAt,
@@ -233,6 +281,9 @@ export class LeadRunner {
     // Сбои такта читаются один раз за такт и только если нужны отпечатку.
     let errors: ReturnType<typeof tickErrors> | undefined;
     const errorsOnce = () => (errors ??= tickErrors(this.h));
+    // Вопросы исполнителя — так же: один раз за такт и только по запросу отпечатка.
+    let questions: ReturnType<LeadRunner['blockingQuestions']> | undefined;
+    const questionsOnce = () => (questions ??= this.blockingQuestions());
     // Задания, которых больше нет в списке (удалены, заменены), не держат
     // своих пауз ожидания.
     const listed = new Set<string>();
@@ -252,9 +303,12 @@ export class LeadRunner {
         // Отпечаток — до исполнения: всё, что изменила сама стадия, снова
         // захватывает её на следующем такте.
         const idle = this.idle.get(saved.key);
-        const print = saved.status === 'queued' ? this.waitPrint(saved, errorsOnce) : undefined;
+        const print =
+          saved.status === 'queued' ? this.waitPrint(saved, errorsOnce, questionsOnce) : undefined;
         if (print !== undefined && idle?.print === print && performance.now() < idle.notBefore)
           continue;
+        // Снимок для решения о бессрочной паузе — тот же, что у отпечатка.
+        const held = print !== undefined && this.pausedHold(saved);
         const job = this.workflow.claim(saved.key, owner);
         if (!job) {
           // Попытки исчерпаны прерываниями: причина последнего — в ошибке.
@@ -289,7 +343,14 @@ export class LeadRunner {
                 ? Math.min(idle.delayMs * 2, this.idleWait.maxMs)
                 : this.idleWait.initialMs;
             // Монотонные часы: перевод системных часов назад не продлевает паузу.
-            this.idle.set(saved.key, { print, notBefore: performance.now() + delayMs, delayMs });
+            // Очередь на паузе, которую стадия доски сама не снимает: всё,
+            // от чего зависит стадия, — в отпечатке, и повторный захват
+            // до его смены только переписывал бы задание (F61).
+            this.idle.set(saved.key, {
+              print,
+              notBefore: held ? Infinity : performance.now() + delayMs,
+              delayMs,
+            });
           } else this.idle.delete(saved.key);
         } catch (e) {
           this.idle.delete(saved.key);

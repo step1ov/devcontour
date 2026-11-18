@@ -96,6 +96,7 @@ export type PanelRun = Pick<
   | 'blocked'
   | 'reusedFrom'
   | 'failureKind'
+  | 'interrupted'
 > & {
   error?: string;
   boardId?: string;
@@ -135,6 +136,7 @@ function runLine(run: Run, boardId: string | undefined, now: number): PanelRun {
     blocked: run.blocked,
     reusedFrom: run.reusedFrom,
     failureKind: run.failureKind,
+    ...(run.interrupted ? { interrupted: run.interrupted } : {}),
     ...(run.input ? { input: { requestId: run.input.requestId } } : {}),
     error: short(run.error),
     boardId,

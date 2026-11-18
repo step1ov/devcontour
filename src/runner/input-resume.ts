@@ -17,6 +17,7 @@ import { latestAnswer } from 'devcontour-harness';
 import type { DevContour } from '../core/service.ts';
 import { SERVER_STOPPING } from '../core/service.ts';
 import { executionOf } from '../harness/execution.ts';
+import { hostNamespace } from '../harness/projection.ts';
 import { inputReviewRounds } from '../harness/input-host.ts';
 import { InputService } from '../application/input.ts';
 import {
@@ -137,8 +138,16 @@ export class InputResumer {
     )
       return;
     const { engine } = executionOf(this.h);
+    // Кандидат — только отвеченный запрос. Без отвеченных запросов (обычный
+    // простой: вопросы закрыты или ждут ответа) все записи не разбираются:
+    // их число растёт с историей workspace (F61b).
+    const answered = this.h.store.hasLocalWhere(
+      hostNamespace['input-requests'],
+      '$.lifecycle',
+      'answered',
+    );
     // Дешёвый отбор по запросам движка; сводка — только по кандидатам.
-    const candidates = engine.inputRequests().flatMap((r) => {
+    const candidates = (answered ? engine.inputRequests() : []).flatMap((r) => {
       const answer = latestAnswer(r);
       return r.kind === 'question' &&
         r.blocking &&

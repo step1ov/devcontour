@@ -92,7 +92,10 @@ test('D03-K: the lead answers through discussion_post; the message id is the mes
 });
 
 test('D03-K: the panel answer is a discussion message; a correction supersedes it with revision 2; an applied answer is not corrected', async () => {
-  const f = await inputFixture(controlled());
+  // Режим operator: цепочку ответа тест ведёт сам. В режиме agent сервер
+  // (`serve` запускает проход InputResumer) под нагрузкой начинал ревью
+  // и применение ответа оператора параллельно тесту — REVIEW_IN_PROGRESS.
+  const f = await inputFixture(controlled(), { approvalMode: 'operator' });
   const app = await serve(f.h, f.scheduler, { port: 0 });
   try {
     const { taskId, requestId, version } = await question(f);
@@ -148,7 +151,7 @@ test('D03-K: the panel answer is a discussion message; a correction supersedes i
         contextDigest: context.contextDigest,
         targetDigest: target.targetDigest!,
       },
-      'lead',
+      'operator',
     );
     const late = await postAnswer({
       text: 'Actually YAML.',

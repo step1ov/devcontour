@@ -448,10 +448,12 @@ const stageNames: Record<string, string> = {
   'implementation-reuse': 'код взят у прошлой попытки',
   'candidate-environment': 'окружение',
   'candidate-test': 'проверки',
+  generate: 'генерация',
   'candidate-review': 'ревью',
   'integration-wait': 'очередь интеграции',
   'integration-environment': 'окружение интеграции',
   'integration-test': 'проверки интеграции',
+  'integration-generate': 'генерация интеграции',
   'integration-review': 'ревью интеграции',
 };
 const outcomeNames: Record<Run['status'], string> = {
@@ -484,6 +486,8 @@ function Attempt({ run, number, reset }: { run: TimelineRun; number: number; res
   const note = attemptInputNote(run);
   // Остановка вопросом — ожидание ответа, а не провал попытки.
   const asked = run.status === 'failed' && run.failureKind === 'needs-input';
+  // Прерванная остановкой сервера — не засчитана и не провал: задача снова в очереди.
+  const interrupted = run.status === 'failed' && run.interrupted === 'shutdown';
   return (
     <li className="grid gap-1 border-b pb-2 text-sm last:border-b-0">
       <div className="flex flex-wrap items-center gap-x-2">
@@ -499,11 +503,15 @@ function Attempt({ run, number, reset }: { run: TimelineRun; number: number; res
         <span
           className={cn(
             run.status === 'succeeded' && 'text-success',
-            run.status === 'failed' && !asked && 'text-destructive',
+            run.status === 'failed' && !asked && !interrupted && 'text-destructive',
             run.status === 'active' && 'text-info',
           )}
         >
-          {asked ? 'ждала ответа' : outcomeNames[run.status]}
+          {asked
+            ? 'ждала ответа'
+            : interrupted
+              ? 'прервана остановкой сервера, не засчитана'
+              : outcomeNames[run.status]}
         </span>
         <span className="text-muted-foreground font-mono text-xs">
           {engine(run.runtime, run.model)}
