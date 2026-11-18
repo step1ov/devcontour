@@ -29,6 +29,7 @@ import { questionStops } from '../core/input-labels.ts';
 import { workspaceDeclares } from '../runner/budget-doctor.ts';
 import { configApplyKeys, reconfigureSlotBusy } from '../runner/reconfigure.ts';
 import { loadConfig } from '../runner/config.ts';
+import { ProjectionCache } from './projection-cache.ts';
 
 /**
  * Проекции панели. Периодический опрос получает ограниченную сводку: строки
@@ -431,6 +432,16 @@ function leaseStale(state: Readonly<DevContourState>, readAt: number) {
 const MAPPING = 20;
 
 /**
+ * Кэш сводки сервера (F60): ответ одной версии данных, запроса и
+ * конфигурации считается один раз для всех опросов и вкладок. Действует до
+ * ближайшего lease операции (`expiresAt`) и не дольше `maxAgeMs`: время
+ * без движения попыток и проверок в ответе пересчитывается не реже этого.
+ */
+export const summaryCache = () =>
+  new ProjectionCache<PanelSummary>({ maxAgeMs: SUMMARY_MAX_AGE_MS });
+const SUMMARY_MAX_AGE_MS = 30_000;
+
+/**
  * Периодическая сводка. `revision` — номер данных, которые клиент уже
  * показывает для той же области (доска, задача, вид): если данные не
  * менялись, возвращается только номер. Продление lease номер не меняет:
@@ -442,6 +453,7 @@ export function panelSummary(
   h: DevContour,
   root: string,
   query: Record<string, string | undefined>,
+  cache?: ProjectionCache<PanelSummary>,
 ) {
   const q = summaryQuery.parse(query);
   // Если lease операции истёк, пока читался снимок, другой процесс мог успеть
@@ -449,7 +461,7 @@ export function panelSummary(
   // повторяется один раз в новом снимке. Продление после истечения
   // отклоняется, поэтому второй снимок уже точен.
   for (let attempt = 0; ; attempt++) {
-    const result = summaryOnce(h, root, q, attempt === 0);
+    const result = summaryOnce(h, root, q, attempt === 0, cache);
     if (result) return result;
   }
 }
@@ -459,6 +471,7 @@ function summaryOnce(
   root: string,
   q: z.infer<typeof summaryQuery>,
   retryUncertain: boolean,
+  cache?: ProjectionCache<PanelSummary>,
 ) {
   return h.store.snapshot(() => {
     const shared = h.store.readShared(leaseStale);
@@ -480,7 +493,15 @@ function summaryOnce(
     // ответами «без изменений».
     const revision = leases.length ? `${shared.revision}.1` : String(shared.revision);
     if (q.revision === revision) return { revision, unchanged: true as const };
-    return buildSummary(h, root, q, state, revision, leases, now);
+    if (!cache) return buildSummary(h, root, q, state, revision, leases, now);
+    // Область — запрос без номера клиента: он решает только «без изменений».
+    // Конфигурация — текстом: её замена и правка на месте не пишут в базу.
+    const { revision: _known, ...scope } = q;
+    void _known;
+    return cache.get(JSON.stringify(scope), revision, [h, JSON.stringify(h.config)], () => {
+      const value = buildSummary(h, root, q, state, revision, leases, now);
+      return { value, until: value.expiresAt };
+    });
   });
 }
 

@@ -142,7 +142,8 @@ export function AttentionCenter({
       AbortSignal.any([abort.signal, AbortSignal.timeout(REQUEST_TIMEOUT_MS)]),
     )
       .then((r) => {
-        if (r.ok && r.body) {
+        // Без метки сервер «без изменений» не отвечает.
+        if (r.ok && r.body && !r.body.unchanged) {
           setFiltered({ component, view: r.body });
           setFailed(undefined);
         } else
