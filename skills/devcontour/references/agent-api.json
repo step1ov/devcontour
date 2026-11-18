@@ -4705,7 +4705,7 @@
     },
     {
       "name": "contract_change_status",
-      "description": "Read a contract-change operation: its step, holds, history, earlier redactions and the next step. A completed operation whose rebinding left board lead jobs on an earlier input lists them in boardJobs (jobs, next: workflow_start for each board). Read-only.",
+      "description": "Read a contract-change operation: its step, holds, history, earlier redactions and the next step. correctionDetails says for each accepted task in corrections what the change touches (effects scope, document with sections, checks; none — binding only, closed at once); open ones stay in attention_list and session_handoff host.corrections until closed with devcontour contract-change --id ID --ack-correction TASK --reason TEXT. A completed operation whose rebinding left board lead jobs on an earlier input lists them in boardJobs (jobs, next: workflow_start for each board). Read-only.",
       "readOnly": true,
       "inputSchema": {
         "$schema": "https://json-schema.org/draft/2020-12/schema",

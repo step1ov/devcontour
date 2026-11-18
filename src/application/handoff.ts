@@ -50,7 +50,11 @@ import {
   staleBaseStop,
 } from '../core/work-status.ts';
 import { executionOf, toDomain } from '../harness/execution.ts';
-import { ContractChanges } from '../runner/contract-change.ts';
+import {
+  ContractChanges,
+  openCorrections,
+  type CorrectionEffect,
+} from '../runner/contract-change.ts';
 import { resolveIdPrefix } from '../core/id-prefix.ts';
 import type { DevContourExecutionStore } from '../harness/store.ts';
 
@@ -220,7 +224,53 @@ export interface DevContourHandoff {
       startedAt: string;
       elapsedMs: number;
     }[];
+    /**
+     * Открытые корректировки принятых задач завершённых операций изменения
+     * контракта (F69): до пяти, старые операции первыми; `more` — сколько
+     * ещё. Каждая закрывается `command` после проверки принятого результата.
+     */
+    corrections?: {
+      items: {
+        operation: string;
+        taskId: string;
+        effects: CorrectionEffect[];
+        command: string;
+      }[];
+      more?: number;
+    };
   };
+}
+
+/** Предел записей `host.corrections`. */
+const HANDOFF_CORRECTIONS = 5;
+
+/** Открытые корректировки (`host.corrections`); с `boardId` — задачи этой доски. */
+function correctionsOfHandoff(
+  h: DevContour,
+  state: State,
+  boardId?: string,
+): DevContourHandoff['host']['corrections'] {
+  const ids =
+    boardId === undefined
+      ? undefined
+      : new Set(state.boards.find((b) => b.id === boardId)?.revisions.flatMap((r) => r.taskIds));
+  const all = new ContractChanges(h, '')
+    .list()
+    .filter((op) => op.status === 'completed')
+    .sort((a, b) => ((a.finishedAt ?? '') < (b.finishedAt ?? '') ? -1 : 1))
+    .flatMap((op) =>
+      openCorrections(op)
+        .filter((c) => !ids || ids.has(c.taskId))
+        .map((c) => ({
+          operation: op.id,
+          taskId: c.taskId,
+          effects: c.effects,
+          command: `devcontour contract-change --id ${op.id} --ack-correction ${c.taskId} --reason "…"`,
+        })),
+    );
+  if (!all.length) return undefined;
+  const items = all.slice(0, HANDOFF_CORRECTIONS);
+  return { items, ...(all.length > items.length ? { more: all.length - items.length } : {}) };
 }
 
 /** Предел записей `host.verifications`. */
@@ -1781,10 +1831,12 @@ export function devcontourHandoffWithin(
         }
       };
       const verifications = verificationsOf(h, state, boardId);
+      const corrections = correctionsOfHandoff(h, state, boardId);
       const withDiscussion = (discussion: DevContourHandoff['host']['discussion']) => ({
         ...(next ? { next } : {}),
         liveBoards,
         ...(verifications ? { verifications } : {}),
+        ...(corrections ? { corrections } : {}),
         ...(discussion ? { discussion } : {}),
       });
       let budget = limit
@@ -1893,6 +1945,18 @@ function hostMarkdown(host: DevContourHandoff['host'], commands: Record<string, 
       (v) =>
         `- Идёт совместная проверка ChangeSet ${v.changeSetId}: ${v.verificationId}, ${v.elapsedMs < 60_000 ? '<1' : Math.floor(v.elapsedMs / 60_000)} мин (задание ${v.job.key} — ${v.job.status}, стадия ${v.job.stage})`,
     ),
+    ...(host.corrections
+      ? [
+          `- Корректировки принятых задач после изменения контракта: ${host.corrections.items
+            .map(
+              (c) =>
+                `${c.taskId} (${c.operation}${c.effects.length ? ': ' + c.effects.join(', ') : ''})`,
+            )
+            .join(
+              ', ',
+            )}${host.corrections.more ? ` и ещё ${host.corrections.more}` : ''} — закрыть: \`${host.corrections.items[0].command}\``,
+        ]
+      : []),
     ...(host.discussion
       ? [
           host.discussion.requests.length

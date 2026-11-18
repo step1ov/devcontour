@@ -20,7 +20,11 @@ import { IntentService } from '../runner/intent.ts';
 import { LeadWorkflow } from '../core/lead-workflow.ts';
 import { CheckCorpus } from '../core/check-store.ts';
 import { executionOf } from '../harness/execution.ts';
-import { ContractChanges } from '../runner/contract-change.ts';
+import {
+  ContractChanges,
+  openCorrections,
+  type ContractChange,
+} from '../runner/contract-change.ts';
 import { boardTasks, planApproved, unapprovedTasks } from '../runner/lead-outlook.ts';
 import {
   boardStep,
@@ -812,9 +816,44 @@ const contractChangeSource: AttentionSourceRule = {
           actions: [handoffOf(ctx)],
           covered: unclaimed(ctx, held),
         };
-      });
+      })
+      .concat(all.flatMap((op) => correctionCard(ctx, op)));
   },
 };
+
+/** Ключ карточки открытых корректировок завершённой операции (F69). */
+const correctionKey = (op: { id: string }) => `contract-change:${op.id}:corrections`;
+
+/**
+ * F69. Завершённая операция изменения контракта оставила принятые задачи,
+ * которых изменение касается (`correctionDetails` без `closed`): ведущий
+ * проверяет каждую и закрывает командой. Одна карточка на операцию; новая
+ * версия — когда закрыта ещё одна корректировка.
+ */
+function correctionCard(ctx: AttentionContext, op: ContractChange): Candidate[] {
+  const open = openCorrections(op);
+  if (!open.length) return [];
+  const since = op.finishedAt ?? op.startedAt;
+  return [
+    {
+      sourceKey: correctionKey(op),
+      occurrenceId: `${op.id}@corrections`,
+      sourceVersion: `${op.version ?? 0}:${open.map((c) => c.taskId).join(',')}`,
+      source: 'contract-change',
+      category: 'technical',
+      actor: 'lead',
+      title: `Изменение контракта ${op.key}: корректировки принятых задач (${open.length})`,
+      reason: ctx.redact(
+        `Проверьте принятые результаты и закройте каждую: contract-change --id ${op.id} --ack-correction <задача> --reason "…". ` +
+          open.map((c) => `${c.taskId} — ${c.reason}`).join('. '),
+      ),
+      since,
+      subject: { kind: 'operation', id: op.id, href: hrefs.contracts() },
+      actions: [handoffOf(ctx)],
+      covered: [],
+    },
+  ];
+}
 
 /**
  * S11. Бюджет исчерпан или не определён и держит готовые задачи. Расход
@@ -2486,9 +2525,35 @@ contractChangeSource.history = (ctx) =>
     .list()
     .filter((op) => ['completed', 'superseded', 'abandoned'].includes(op.status) && op.finishedAt)
     .flatMap((op): Resolved[] => {
+      // F69: все корректировки, требовавшие ведущего, закрыты.
+      const acked = (op.correctionDetails ?? []).filter((c) => c.closed?.by === 'lead');
+      const settled: Resolved[] =
+        op.status === 'completed' && acked.length && !openCorrections(op).length
+          ? [
+              {
+                sourceKey: correctionKey(op),
+                occurrenceId: `${op.id}@corrections`,
+                sourceVersion: String(op.version ?? 0),
+                source: 'contract-change',
+                category: 'technical',
+                actor: 'lead',
+                title: `Изменение контракта ${op.key}: корректировки закрыты`,
+                reason: ctx.redact(
+                  acked.map((c) => `${c.taskId} — ${c.closed!.reason}`).join('. '),
+                ),
+                since: op.finishedAt!,
+                subject: { kind: 'operation', id: op.id, href: hrefs.contracts() },
+                resolvedAt: acked
+                  .map((c) => c.closed!.at)
+                  .sort()
+                  .at(-1)!,
+              },
+            ]
+          : [];
       const stop = op.history.findLast((e) => e.event === 'failed' || e.event === 'stale');
-      if (!stop) return [];
+      if (!stop) return settled;
       return [
+        ...settled,
         {
           sourceKey: `contract-change:${op.id}`,
           occurrenceId: `${op.id}@${stop.at}`,

@@ -205,5 +205,9 @@
 // операция принимает постановку целиком (поля со значением по умолчанию без
 // значения сбрасываются), в отличие от CLI edit-task --file; прочие
 // операции байтово прежние.
-export const CATALOG_DIGEST = 'd74b63ed62d52c8030e361fb7f5d3b105eb5b57c4d264384e4e84e27a09090dd';
+// Намеренное изменение (F69): описание contract_change_status называет поле
+// correctionDetails (чем изменение касается каждой принятой задачи) и
+// закрытие корректировки CLI contract-change --ack-correction; прочие
+// операции байтово прежние.
+export const CATALOG_DIGEST = '5ca5ddc7ea95b3887543b36ea3d08e200107f37be6d913358b14a445ddb955eb';
 export const SNAPSHOT_VERSION = '0.4.0-alpha.7';

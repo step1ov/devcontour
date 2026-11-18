@@ -1271,6 +1271,13 @@ async function main() {
           : undefined;
         if (args.includes('--id') && args.includes('--abandon'))
           result = changes.abandon(option('--id', ''));
+        else if (args.includes('--id') && args.includes('--ack-correction'))
+          // Закрыть корректировку принятой задачи завершённой операции (F69).
+          result = changes.ackCorrection(
+            option('--id', ''),
+            option('--ack-correction', ''),
+            option('--reason', ''),
+          );
         else if (args.includes('--id') && args.includes('--revise')) {
           // Пересмотр берёт текущий закоммиченный HEAD явно и сверяет версию
           // записи, прочитанную ведущим.

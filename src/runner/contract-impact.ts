@@ -46,6 +46,61 @@ const action = (status: TaskStatus): Action =>
 const boardOf = (s: DevContourState, t: Task) =>
   s.boards.find((b) => b.revisions.some((r) => r.taskIds.includes(t.id)))?.id;
 
+/** Предел списка изменённых разделов. */
+const SECTIONS_SHOWN = 20;
+/** Предел названия раздела в списке. */
+const SECTION_CHARS = 120;
+
+/**
+ * Разделы Markdown-документа, чей текст изменился, добавлен или удалён:
+ * раздел — заголовок `#`…`######` и текст до следующего заголовка; текст до
+ * первого заголовка — раздел «(начало документа)». Повтор заголовка
+ * различается номером вхождения. Порядок — новой редакции, затем удалённые.
+ */
+export function changedSections(before: string, after: string): string[] {
+  const split = (text: string) => {
+    const out = new Map<string, string>();
+    const seen = new Map<string, number>();
+    let key = '(начало документа)';
+    let body: string[] = [];
+    const flush = () => {
+      const text = body.join('\n').trim();
+      if (text || key !== '(начало документа)') out.set(key, text);
+    };
+    for (const line of text.split('\n')) {
+      const heading = /^#{1,6}\s+(.+?)\s*#*\s*$/.exec(line);
+      if (!heading) {
+        body.push(line);
+        continue;
+      }
+      flush();
+      const title = heading[1].slice(0, SECTION_CHARS);
+      const n = (seen.get(title) ?? 0) + 1;
+      seen.set(title, n);
+      key = n > 1 ? `${title} (${n})` : title;
+      body = [];
+    }
+    flush();
+    return out;
+  };
+  const old = split(before),
+    next = split(after);
+  const changed = [
+    ...[...next].filter(([k, v]) => old.get(k) !== v).map(([k]) => k),
+    ...[...old.keys()].filter((k) => !next.has(k)),
+  ];
+  return changed.slice(0, SECTIONS_SHOWN);
+}
+
+/** Тот же договор проверки и та же реализация под тестом. */
+function sameChecks(c: Contract, checks?: unknown, underTest?: string[]) {
+  return (
+    JSON.stringify(c.checks ?? null) === JSON.stringify(checks ?? null) &&
+    JSON.stringify(c.underTest?.length ? c.underTest : null) ===
+      JSON.stringify(underTest?.length ? underTest : null)
+  );
+}
+
 export async function contractImpact(h: DevContour, input: unknown) {
   // Отчёт читает предложение без пределов proposalLimits и называет
   // превышения в `limits` рядом с остальными предпроверками: оператор видит
@@ -215,6 +270,11 @@ export async function contractImpact(h: DevContour, input: unknown) {
     proposed: { digest, revision: head },
     changes: {
       document: current ? current.content !== content : true,
+      // Разделы документа, чей текст изменился (F69): по ним корректировка
+      // принятой задачи называет, что именно поменялось.
+      sections: current ? changedSections(current.content, content) : [],
+      // Договор проверки или реализация под тестом сменились.
+      checks: current ? !sameChecks(current, parsed.checks, parsed.underTest) : false,
       artifacts,
     },
     tasks: { direct: direct.map(describe), transitive: transitive.map(describe) },
