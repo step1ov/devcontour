@@ -70,6 +70,25 @@ export interface ProjectionOptions {
    * утверждение. Утверждённая задача без закреплённого digest — нарушение.
    */
   contractDigest?(id: string): string | undefined;
+  /**
+   * Что будет с попыткой, срок владения которой истёк (F74): текст движка
+   * «Повторите явно» неверен, когда задание ведущего цикла повторяет её само.
+   * Нет — текст движка как есть.
+   */
+  expiryNote?(taskId: string): string;
+}
+
+/** Окончание текста движка об истёкшем сроке владения попыткой (harness `expire`). */
+export const HARNESS_EXPIRY_TAIL = 'Истёк срок владения. Повторите явно.';
+
+/** Текст отказа с окончанием движка об истечении, заменённым на `expiryNote`. */
+export function expiryText(
+  text: string | undefined,
+  taskId: string,
+  options: Pick<ProjectionOptions, 'expiryNote'>,
+): string | undefined {
+  if (!text?.endsWith(HARNESS_EXPIRY_TAIL) || !options.expiryNote) return text;
+  return text.slice(0, -HARNESS_EXPIRY_TAIL.length) + options.expiryNote(taskId);
 }
 
 /** Граф задачи, не входящей ни в одну доску (возможно только у созданных движком). */

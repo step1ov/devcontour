@@ -53,6 +53,7 @@ import {
   usageOf,
   verificationsOf,
   workOf,
+  expiryText,
   type ProjectionOptions,
 } from './projection.ts';
 
@@ -448,10 +449,15 @@ export class DevContourExecutionStore implements ExecutionStore {
       }) as ExecutionView['locals'],
       putGraph: (graph: GraphState) => putGraph(edit(), graph, options),
       putWork: (work: WorkState) => {
+        // Отказ истечения (F74): что будет дальше — по режиму согласования.
+        if (work.status === 'failed' && work.failure)
+          work = { ...work, failure: expiryText(work.failure, work.id, options) };
         putWork(edit(), work, options);
         frame.works.add(work.id);
       },
       putAttempt: (attempt: AttemptState) => {
+        if (attempt.status === 'expired' && attempt.error)
+          attempt = { ...attempt, error: expiryText(attempt.error, attempt.workId, options) };
         putAttempt(edit(), attempt);
         frame.attempts.add(attempt.id);
       },

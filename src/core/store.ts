@@ -59,6 +59,13 @@ export const BUSY_TIMEOUT_MS = 20_000;
  * меньше предела вызова инструмента агента.
  */
 export const READ_ONLY_BUSY_TIMEOUT_MS = 4_000;
+/**
+ * Размер, до которого усекается файл WAL после его сброса (F77). Документ
+ * состояния — одна строка в десятки мегабайт, и каждая его запись (с
+ * `secure_delete` — вдвое) ложится в WAL; без предела файл оставался
+ * размером с наибольший накопленный журнал (сотни мегабайт) навсегда.
+ */
+export const WAL_SIZE_LIMIT_BYTES = 64 * 1024 * 1024;
 
 /**
  * Отказ SQLite из-за блокировки: базу держит другой процесс (обычно
@@ -425,7 +432,7 @@ export class Store {
       (this.db.prepare('PRAGMA main.journal_mode').get() as { journal_mode: string })
         .journal_mode === 'wal';
     this.db.exec(
-      `${keepWal ? '' : `PRAGMA journal_mode=${journalMode ?? (locations?.length ? 'DELETE' : 'WAL')};`} PRAGMA synchronous=FULL; PRAGMA secure_delete=ON;`,
+      `${keepWal ? '' : `PRAGMA journal_mode=${journalMode ?? (locations?.length ? 'DELETE' : 'WAL')};`} PRAGMA synchronous=FULL; PRAGMA secure_delete=ON; PRAGMA journal_size_limit=${WAL_SIZE_LIMIT_BYTES};`,
     );
     this.db.exec(
       'CREATE TABLE IF NOT EXISTS state (id INTEGER PRIMARY KEY CHECK(id=1), data TEXT NOT NULL); CREATE TABLE IF NOT EXISTS events (id INTEGER PRIMARY KEY AUTOINCREMENT, at TEXT NOT NULL, type TEXT NOT NULL, data TEXT NOT NULL); CREATE TABLE IF NOT EXISTS revision (id INTEGER PRIMARY KEY CHECK(id=1), n INTEGER NOT NULL, lease INTEGER NOT NULL DEFAULT 0);',
@@ -676,8 +683,65 @@ export class Store {
     }
     return rows;
   }
+  /**
+   * Проверка задержки основного потока этого процесса перед решением о сроке
+   * его аренды (F74): её ставит планировщик сервера (`Scheduler.start`). Её
+   * вызывает чтение строки аренды попытки — продление движка читает строку до
+   * условного продления, — поэтому задержка, после которой первым проснулось
+   * продление, замечена раньше, чем оно сочтёт срок истёкшим.
+   */
+  leaseWatch?: () => void;
+  /** Открыта транзакция записи этого соединения. */
+  get inTransaction() {
+    return this.transaction;
+  }
+  /**
+   * Сроки аренды попыток владельца `owner`, ещё действовавших в начале
+   * задержки его основного потока (`until > aliveAt`), продлеваются до
+   * `until` (F74). Владелец — живой процесс, который сам стоял: его попытки
+   * (их исполнители — отдельные процессы) не продлены только потому, что не
+   * исполнялся интервал продления. Строки чужого владельца, истёкшие до
+   * задержки, и снятые (попытка не активна — строки нет) не меняются.
+   * Возвращает ID продлённых попыток.
+   */
+  extendStalledLeases(owner: string, aliveAt: number, until: number, busyMs = 2000): string[] {
+    // Своя транзакция ждёт занятую базу недолго: вызывающий — основной поток
+    // сервера, только что простоявший.
+    const own = !this.transaction;
+    if (own) this.db.exec(`PRAGMA busy_timeout=${Math.max(0, Math.floor(busyMs))};`);
+    try {
+      return this.extendStalledUnlocked(owner, aliveAt, until);
+    } finally {
+      if (own) this.db.exec(`PRAGMA busy_timeout=${BUSY_TIMEOUT_MS};`);
+    }
+  }
+  private extendStalledUnlocked(owner: string, aliveAt: number, until: number): string[] {
+    return this.atomic(() => {
+      const ids: string[] = [];
+      for (const schema of this.schemas()) {
+        if (!this.hasLeaseTable(schema)) continue;
+        const rows = this.db
+          .prepare(
+            `SELECT id FROM ${schema}.leases WHERE kind='attempt' AND owner=? AND until>? AND until<?`,
+          )
+          .all(owner, aliveAt, until) as { id: string }[];
+        for (const { id } of rows) {
+          this.db
+            .prepare(
+              `UPDATE ${schema}.leases SET until=? WHERE kind='attempt' AND id=? AND owner=?`,
+            )
+            .run(until, id, owner);
+          ids.push(id);
+        }
+      }
+      // Как продление строкой: счётчик сроков не растёт, срок накладывается
+      // из строки при каждом чтении (`withLeases`).
+      return ids;
+    });
+  }
   /** Строка аренды одной попытки — без чтения документа. */
   attemptLeaseRow(id: string): AttemptLeaseRow | undefined {
+    if (!this.reading) this.leaseWatch?.();
     for (const schema of this.schemas()) {
       if (!this.hasLeaseTable(schema)) continue;
       const row = this.db

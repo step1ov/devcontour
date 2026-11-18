@@ -28,6 +28,7 @@ import { reserveRepositories } from './ownership.ts';
 import { serveReconfigure } from './reconfigure.ts';
 import { checkoutRootOption, checkoutRoots, workspaceCheckoutRoot } from './checkout-root.ts';
 import { LoopMonitor, type LoopGap } from './loop-monitor.ts';
+import { IdleClaimGate, idleClaimGates } from '../harness/idle-claims.ts';
 import { serveControllerOwner } from './server-record.ts';
 
 export { classifyFailure } from 'devcontour-harness';
@@ -55,6 +56,15 @@ export class Scheduler {
    * ведущего очередь интервалом (`start`, сервер).
    */
   private monitor?: LoopMonitor;
+  /**
+   * Выдача такта сервера без перемен (F77, `harness/idle-claims.ts`): пока с
+   * прошлой пустой выдачи не менялись данные и конфигурация, такт её не
+   * повторяет (не дольше `maxMs`).
+   */
+  readonly idleClaims = new IdleClaimGate(() => {
+    const v = this.h.store.version();
+    return `${v.revision}:${v.lease}:${this.h.configDigest}`;
+  });
   /** Планировщик останавливается: новые такты и запуск очереди не принимаются. */
   get stopping() {
     return this.stopped;
@@ -63,10 +73,16 @@ export class Scheduler {
     readonly h: DevContour,
     readonly root: string,
     readonly runtimes: typeof adapters = adapters,
-    options: { instance?: string } = {},
+    options: {
+      instance?: string;
+      /** Часы монитора задержек (тесты): монотонные и стенные. */
+      loopClock?: { mono: () => number; wall: () => number };
+    } = {},
   ) {
     this.owner = options.instance ? serveControllerOwner(options.instance) : randomUUID();
+    this.loopClock = options.loopClock;
   }
+  private readonly loopClock?: { mono: () => number; wall: () => number };
 
   /**
    * Исполнитель очереди для текущей конфигурации. Конфигурация меняется
@@ -399,12 +415,8 @@ export class Scheduler {
   start() {
     if (this.timer) return;
     this.stopped = false;
-    this.monitor ??= new LoopMonitor({
-      leaseMs: this.h.config.leaseMs,
-      onStall: (gap) => this.noteGap('server.loop-stalled', gap),
-      onClockJump: (gap) => this.noteGap('server.clock-jump', gap),
-    });
-    this.monitor.start();
+    this.watchLeases().start();
+    idleClaimGates.set(this.h, this.idleClaims);
     this.timer = setInterval(() => {
       if (this.stopped || this.current) return;
       void this.tick()
@@ -420,6 +432,46 @@ export class Scheduler {
     this.timer.unref();
   }
   /**
+   * Монитор задержек основного потока и его проверка перед решениями о сроках
+   * аренды попыток этого процесса (`Store.leaseWatch`, F74). Задержка, после
+   * которой аренда могла истечь, сначала продлевает сроки своих попыток, ещё
+   * действовавших в её начале, затем пишется событием: проснувшееся первым
+   * продление или истечение такта видит уже продлённый срок, и живая попытка
+   * не теряется из-за того, что стоял сам сервер.
+   */
+  watchLeases(): LoopMonitor {
+    this.monitor ??= new LoopMonitor({
+      leaseMs: this.h.config.leaseMs,
+      onStall: (gap) => {
+        this.extendStalled(gap);
+        this.noteGap('server.loop-stalled', gap);
+      },
+      onClockJump: (gap) => this.noteGap('server.clock-jump', gap),
+      ...(this.loopClock ?? {}),
+    });
+    const monitor = this.monitor;
+    this.h.store.leaseWatch = () => {
+      if (!this.stopped) monitor.check();
+    };
+    return monitor;
+  }
+  /** Попытки, продлённые после задержки основного потока (тесты и диагностика). */
+  extendedAfterStall: string[] = [];
+  private extendStalled(gap: LoopGap) {
+    if (this.stopped) return;
+    try {
+      const ids = this.h.store.extendStalledLeases(
+        this.owner,
+        gap.from,
+        Date.now() + this.h.config.leaseMs,
+      );
+      this.extendedAfterStall.push(...ids);
+    } catch {
+      // Продление не удалось (база занята, закрыта): прежний путь — истечение
+      // и восстановление `repair:host-overloaded`.
+    }
+  }
+  /**
    * Задержка основного потока, при которой аренда могла истечь
    * (`server.loop-stalled`), или сон машины и перевод часов
    * (`server.clock-jump`): владелец, окно по стенным часам и оба разрыва.
@@ -429,17 +481,24 @@ export class Scheduler {
     if (this.stopped) return;
     // Без проекций и без долгого ожидания занятой базы: незаписанный разрыв
     // оставляет сигнал опоздавшего продления.
-    try {
-      this.h.store.tryLeaseEvent(type, {
-        owner: this.owner,
-        from: new Date(gap.from).toISOString(),
-        to: new Date(gap.to).toISOString(),
-        monoMs: gap.monoMs,
-        wallMs: gap.wallMs,
-      });
-    } catch {
-      /* Хранилище закрыто: разрыв останется незаписанным. */
-    }
+    const data = {
+      owner: this.owner,
+      from: new Date(gap.from).toISOString(),
+      to: new Date(gap.to).toISOString(),
+      monoMs: gap.monoMs,
+      wallMs: gap.wallMs,
+    };
+    const write = () => {
+      try {
+        this.h.store.tryLeaseEvent(type, data);
+      } catch {
+        /* Хранилище закрыто: разрыв останется незаписанным. */
+      }
+    };
+    // Задержку заметила проверка внутри транзакции (продление движка читает
+    // строку аренды, F74): событие — своей транзакцией сразу после неё.
+    if (this.h.store.inTransaction) setImmediate(write);
+    else write();
   }
   /**
    * Начало штатной остановки: отметка в базе, по которой запуск очереди из
@@ -458,6 +517,7 @@ export class Scheduler {
     this.beginStop();
     if (this.timer) clearInterval(this.timer);
     this.timer = undefined;
+    if (idleClaimGates.get(this.h) === this.idleClaims) idleClaimGates.delete(this.h);
     // Пауза штатной остановки — сразу, до ожидания идущего такта: он не
     // выдаёт новых попыток, которые тут же пришлось бы прервать. Продуктовая
     // форма (поверх паузы операции); остановка попыток и освобождение роли
@@ -470,6 +530,7 @@ export class Scheduler {
     await Promise.all(this.retired.map((r) => r.settled().catch(() => {})));
     this.retired = [];
     this.monitor?.stop();
+    this.h.store.leaseWatch = undefined;
     // Роль освобождена — отметка уже не действует; снимается для порядка
     // (не снятую снимет следующий запуск).
     try {
@@ -530,7 +591,14 @@ export class Scheduler {
       if (drift.length) await this.assertBaseCurrent(await this.fastForwardBase(drift));
       assertTeamCheckout(this.h);
     }
-    await runner.tick();
+    // Такт интервала сервера выдаёт только после перемен (F77); явный такт
+    // (запуск очереди, drain) — всегда.
+    if (this.timer)
+      await this.idleClaims.around(
+        () => runner.active,
+        () => runner.tick(),
+      );
+    else await runner.tick();
   }
   async drain() {
     while (true) {
