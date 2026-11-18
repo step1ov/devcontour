@@ -2435,13 +2435,12 @@ test('F71: CONTROLLER_BUSY is no lead stop while the live server of this workspa
       f.cleanup();
     }
   };
-  const record = (f: ReturnType<typeof fixture>, instance: string, pid = process.pid) =>
-    writeServerRecord(f.root, {
-      pid,
-      url: 'http://127.0.0.1:1',
-      instance,
-      startedAt: new Date().toISOString(),
-    });
+  const record = (
+    f: ReturnType<typeof fixture>,
+    instance: string,
+    pid = process.pid,
+    startedAt = new Date().toISOString(),
+  ) => writeServerRecord(f.root, { pid, url: 'http://127.0.0.1:1', instance, startedAt });
   // Роль держит планировщик сервера, записанного в server.json этого каталога.
   assert.equal(
     busy((f) => {
@@ -2468,6 +2467,14 @@ test('F71: CONTROLLER_BUSY is no lead stop while the live server of this workspa
   );
   assert.equal(
     busy(() => serveControllerOwner('I-live')),
+    true,
+  );
+  // Pid записи переиспользован процессом, запущенным после записи.
+  assert.equal(
+    busy((f) => {
+      record(f, 'I-live', process.pid, '2000-01-01T00:00:00.000Z');
+      return serveControllerOwner('I-live');
+    }),
     true,
   );
   // Процесс записи завершился: роль держит не живой сервер.

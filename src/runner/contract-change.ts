@@ -316,6 +316,8 @@ export type ContractChangeView = Omit<ContractChange, 'token' | 'leaseUntil'> & 
     demoted?: string[];
   }[];
   continued?: ContractChangeView[];
+  /** Корректировки записаны версией без `correctionDetails`. */
+  correctionsHint?: string;
   /** Задания досок, устаревшие после перепривязки, и шаг (`ContractChanges.boardJobs`). */
   boardJobs?: {
     jobs: ReturnType<LeadWorkflow['invalidated']>;
@@ -386,6 +388,13 @@ export class ContractChanges {
       next: stepsOf(op)[op.step] ?? null,
       ...(mapping.length ? { mapping } : {}),
       ...(boardJobs ? { boardJobs } : {}),
+      // Операция прежней версии: список корректировок без причин и закрытия.
+      ...(op.corrections?.length && !op.correctionDetails
+        ? {
+            correctionsHint:
+              'corrections recorded before correction tracking: no per-task effects, nothing to acknowledge; check these accepted tasks by hand',
+          }
+        : {}),
     };
   }
 
@@ -877,26 +886,29 @@ export class ContractChanges {
   }
 
   /**
-   * Закрыть корректировку принятой задачи завершённой операции (F69): ведущий
+   * Закрыть корректировки принятых задач завершённой операции (F69): ведущий
    * проверил, что принятый результат не требует изменения, или завёл для
-   * него задачу. Причина обязательна и хранится в операции. Повтор по уже
-   * закрытой — отказ 409.
+   * него задачу. `taskIds` — список задач или `all` (все открытые) с одной
+   * причиной; причина обязательна и хранится в каждой корректировке.
+   * Закрытие всё или ничего: неизвестная задача (404), уже закрытая или
+   * незавершённая операция (409) — отказ без записи.
    */
-  ackCorrection(id: string, taskId: string, reason: string) {
+  ackCorrection(id: string, taskIds: readonly string[] | 'all', reason: string) {
     const text = reason.trim();
     if (text.length < 10 || text.length > ACK_REASON)
       throw new DomainError(
-        `--reason: от 10 до ${ACK_REASON} символов — почему принятый результат не требует изменения или какой задачей он исправляется`,
+        `reason: от 10 до ${ACK_REASON} символов — почему принятый результат не требует изменения или какой задачей он исправляется`,
         400,
       );
+    if (taskIds !== 'all' && !taskIds.length)
+      throw new DomainError('Укажите задачи корректировок (через запятую) или all', 400);
     return this.h.store.atomic(() => {
       const op = this.get(id);
-      const item = op.correctionDetails?.find((c) => c.taskId === taskId);
-      if (!item)
+      if (!op.correctionDetails)
         throw new DomainError(
-          op.corrections.includes(taskId)
-            ? `Корректировка ${taskId} записана версией без отслеживания: закрывать нечего`
-            : `Задачи ${taskId} нет среди корректировок операции ${op.id}: ${op.corrections.join(', ') || 'их нет'}`,
+          op.corrections?.length
+            ? `Корректировки операции ${op.id} записаны версией без отслеживания: закрывать нечего`
+            : `У операции ${op.id} корректировок нет`,
           404,
         );
       if (op.status !== 'completed')
@@ -904,13 +916,33 @@ export class ContractChanges {
           `Операция ${op.id} в состоянии ${op.status}: корректировки закрываются после её завершения`,
           409,
         );
-      if (item.closed)
-        throw new DomainError(
-          `Корректировка ${taskId} уже закрыта (${item.closed.by}, ${item.closed.at})`,
-          409,
-        );
-      item.closed = { at: new Date().toISOString(), by: 'lead', reason: text };
-      this.log(op, 'release', 'correction-acked', clipAtBoundary(`${taskId}: ${text}`, DETAIL));
+      const items =
+        taskIds === 'all'
+          ? op.correctionDetails.filter((c) => !c.closed)
+          : [...new Set(taskIds)].map((taskId) => {
+              const item = op.correctionDetails!.find((c) => c.taskId === taskId);
+              if (!item)
+                throw new DomainError(
+                  `Задачи ${taskId} нет среди корректировок операции ${op.id}: ${(op.corrections ?? []).join(', ') || 'их нет'}`,
+                  404,
+                );
+              if (item.closed)
+                throw new DomainError(
+                  `Корректировка ${taskId} уже закрыта (${item.closed.by}, ${item.closed.at})`,
+                  409,
+                );
+              return item;
+            });
+      if (!items.length)
+        throw new DomainError(`Открытых корректировок у операции ${op.id} нет`, 409);
+      const at = new Date().toISOString();
+      for (const item of items) item.closed = { at, by: 'lead', reason: text };
+      this.log(
+        op,
+        'release',
+        'correction-acked',
+        clipAtBoundary(`${items.map((c) => c.taskId).join(', ')}: ${text}`, DETAIL),
+      );
       this.save(op);
       return this.view(op);
     });

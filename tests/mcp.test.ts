@@ -136,6 +136,10 @@ test('F72: MCP input_cancel accepts version as the alias of expectedVersion; the
     const tool = (await client.listTools()).tools.find((t) => t.name === 'input_cancel')!;
     const properties = (tool.inputSchema as { properties: Record<string, unknown> }).properties;
     assert.ok('version' in properties && 'expectedVersion' in properties);
+    assert.deepEqual((tool.inputSchema as { anyOf?: unknown }).anyOf, [
+      { required: ['expectedVersion'] },
+      { required: ['version'] },
+    ]);
     const requestId = 'IR-' + 'a'.repeat(24);
     const call = (args: Record<string, unknown>) =>
       client!.callTool({

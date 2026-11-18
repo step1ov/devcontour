@@ -838,14 +838,21 @@ function correctionCard(ctx: AttentionContext, op: ContractChange): Candidate[] 
     {
       sourceKey: correctionKey(op),
       occurrenceId: `${op.id}@corrections`,
-      sourceVersion: `${op.version ?? 0}:${open.map((c) => c.taskId).join(',')}`,
+      // Открытый набор после завершения только сокращается: закрытие части
+      // корректировок — та же версия карточки, не новое внимание.
+      sourceVersion: `corrections@${since}`,
       source: 'contract-change',
       category: 'technical',
       actor: 'lead',
       title: `Изменение контракта ${op.key}: корректировки принятых задач (${open.length})`,
       reason: ctx.redact(
-        `Проверьте принятые результаты и закройте каждую: contract-change --id ${op.id} --ack-correction <задача> --reason "…". ` +
-          open.map((c) => `${c.taskId} — ${c.reason}`).join('. '),
+        // Предел причины карточки — 300 знаков: задачи впереди, затем команда;
+        // чем изменение касается каждой — contract_change_status.
+        `Открыты: ${open
+          .map((c) => `${c.taskId} (${c.effects.join(', ')})`)
+          .join(
+            ', ',
+          )}. Проверьте принятые результаты (contract_change_status) и закройте: contract_change_ack_correction {"id": "${op.id}", "taskIds": [...] | "all", "reason": "…"}`,
       ),
       since,
       subject: { kind: 'operation', id: op.id, href: hrefs.contracts() },

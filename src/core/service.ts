@@ -234,6 +234,18 @@ export function samePin(
 ) {
   return c.content === content && sameObligations(c, artifacts, checks, underTest);
 }
+/** Тот же договор проверки и та же реализация под тестом. */
+export function sameChecks(
+  c: Pick<Contract, 'checks' | 'underTest'>,
+  checks?: CheckDeclaration,
+  underTest?: string[],
+) {
+  return (
+    JSON.stringify(c.checks ?? null) === JSON.stringify(checks ?? null) &&
+    JSON.stringify(c.underTest?.length ? c.underTest : null) ===
+      JSON.stringify(underTest?.length ? underTest : null)
+  );
+}
 /**
  * Те же закреплённые файлы, договор проверки и реализация под тестом —
  * всё, кроме текста документа. Консолидация обязана их сохранить.
@@ -246,9 +258,7 @@ export function sameObligations(
 ) {
   const pinned = c.artifacts ?? [];
   return (
-    JSON.stringify(c.checks ?? null) === JSON.stringify(checks ?? null) &&
-    JSON.stringify(c.underTest?.length ? c.underTest : null) ===
-      JSON.stringify(underTest?.length ? underTest : null) &&
+    sameChecks(c, checks, underTest) &&
     pinned.length === artifacts.length &&
     pinned.every((a) =>
       artifacts.some(

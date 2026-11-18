@@ -5,7 +5,13 @@ import {
   type Task,
   type TaskStatus,
 } from '../core/model.ts';
-import { contractDigest, orderRedactions, samePin, type DevContour } from '../core/service.ts';
+import {
+  contractDigest,
+  orderRedactions,
+  sameChecks,
+  samePin,
+  type DevContour,
+} from '../core/service.ts';
 import { repository } from '../core/repositories.ts';
 import {
   artifactGuard,
@@ -90,15 +96,6 @@ export function changedSections(before: string, after: string): string[] {
     ...[...old.keys()].filter((k) => !next.has(k)),
   ];
   return changed.slice(0, SECTIONS_SHOWN);
-}
-
-/** Тот же договор проверки и та же реализация под тестом. */
-function sameChecks(c: Contract, checks?: unknown, underTest?: string[]) {
-  return (
-    JSON.stringify(c.checks ?? null) === JSON.stringify(checks ?? null) &&
-    JSON.stringify(c.underTest?.length ? c.underTest : null) ===
-      JSON.stringify(underTest?.length ? underTest : null)
-  );
 }
 
 export async function contractImpact(h: DevContour, input: unknown) {

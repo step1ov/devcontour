@@ -211,6 +211,12 @@ export const agentInputs = {
      */
     proposal: contractProposal.optional(),
   }),
+  contract_change_ack_correction: z.strictObject({
+    id: z.string().regex(/^CC-[A-Za-z0-9-]{1,80}$/),
+    /** Задачи корректировок или `all` — все открытые, с одной причиной. */
+    taskIds: z.union([z.array(id).min(1).max(100), z.literal('all')]),
+    reason: z.string().trim().min(10).max(2000),
+  }),
   ...inputOperationInputs,
   attention_list: attentionInputs.agent,
 };
@@ -349,9 +355,11 @@ export const descriptions: Record<AgentOperation, string> = {
   recovery_decide:
     'Record the lead decision for a recovery episode (two failures on one property) with the expected record version: add confirmed cases under the pinned oracle, one retry with a new hypothesis, a proposal for normal review (strengthen checker, split task), a product conflict for the user, or an environment stop. Never resets attempts.',
   contract_change_status:
-    'Read a contract-change operation: its step, holds, history, earlier redactions and the next step. correctionDetails says for each accepted task in corrections what the change touches (effects scope, document with sections, checks; none — binding only, closed at once); open ones stay in attention_list and session_handoff host.corrections until closed with devcontour contract-change --id ID --ack-correction TASK --reason TEXT. A completed operation whose rebinding left board lead jobs on an earlier input lists them in boardJobs (jobs, next: workflow_start for each board). Read-only.',
+    'Read a contract-change operation: its step, holds, history, earlier redactions and the next step. correctionDetails says for each accepted task in corrections what the change touches (effects scope, document with sections, checks; none — binding only, closed at once); open ones stay in attention_list and session_handoff host.corrections until closed with contract_change_ack_correction (CLI devcontour contract-change --id ID --ack-correction TASK --reason TEXT); correctionsHint marks corrections recorded before this tracking. A completed operation whose rebinding left board lead jobs on an earlier input lists them in boardJobs (jobs, next: workflow_start for each board). Read-only.',
   contract_change_revise:
     'Revise a failed, stale or waiting contract change to the current committed redaction with the expected record version. An optional proposal replaces the stored one for the same contract (same file or inline title, repositoryId and component) — new text, artifacts, checks, underTest — after the start pre-checks (artifact pinning, import closure, check declaration) and before any model call. Before side effects the same operation is re-reviewed with its holds and history kept; after them a linked successor takes the holds over. Effects are never rolled back.',
+  contract_change_ack_correction:
+    'Close corrections of a completed contract change (correctionDetails without closed) after checking the accepted results: taskIds lists the tasks, or all for every open one, with one reason (10-2000 chars: why the accepted result needs no change, or which task fixes it). All or nothing: a task not among the corrections is 404, an already closed correction or an operation not yet completed is 409. The same as devcontour contract-change --id ID --ack-correction TASK[,TASK|all] --reason TEXT. Closed corrections leave attention_list and session_handoff host.corrections.',
   discussion_read:
     'Read a task discussion page in seq order: forward from cursor (the last seq returned; follow nextCursor), or backward with latest: true or before: <seq> (follow previousCursor). version is the thread version for writes. Notes, change requests and their dispositions are local history of the task owner: they never change the task, its approvals, queue or attempts, and Git sync does not carry them.',
   discussion_post:
@@ -903,6 +911,10 @@ export class AgentService {
         const v = agentInputs.contract_change_status.parse(input);
         const changes = new ContractChanges(h, this.root ?? '');
         return changes.view(changes.get(v.id));
+      }
+      case 'contract_change_ack_correction': {
+        const v = agentInputs.contract_change_ack_correction.parse(input);
+        return new ContractChanges(h, this.root ?? '').ackCorrection(v.id, v.taskIds, v.reason);
       }
       case 'feasibility_spikes': {
         const v = agentInputs.feasibility_spikes.parse(input);

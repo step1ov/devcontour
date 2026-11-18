@@ -267,7 +267,7 @@ function correctionsOfHandoff(
           operation: op.id,
           taskId: c.taskId,
           effects: c.effects,
-          command: `devcontour contract-change --id ${op.id} --ack-correction ${c.taskId} --reason "…"`,
+          command: `contract_change_ack_correction {"id": "${op.id}", "taskIds": ["${c.taskId}"], "reason": "…"}`,
         })),
     );
   if (!all.length) return undefined;

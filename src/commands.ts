@@ -1276,9 +1276,12 @@ async function main() {
           result = changes.abandon(option('--id', ''));
         else if (args.includes('--id') && args.includes('--ack-correction'))
           // Закрыть корректировку принятой задачи завершённой операции (F69).
+          // TASK, список через запятую или all — с одной причиной.
           result = changes.ackCorrection(
             option('--id', ''),
-            option('--ack-correction', ''),
+            option('--ack-correction', '') === 'all'
+              ? 'all'
+              : option('--ack-correction', '').split(',').filter(Boolean),
             option('--reason', ''),
           );
         else if (args.includes('--id') && args.includes('--revise')) {

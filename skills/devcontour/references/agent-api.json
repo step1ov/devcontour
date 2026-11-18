@@ -4705,7 +4705,7 @@
     },
     {
       "name": "contract_change_status",
-      "description": "Read a contract-change operation: its step, holds, history, earlier redactions and the next step. correctionDetails says for each accepted task in corrections what the change touches (effects scope, document with sections, checks; none — binding only, closed at once); open ones stay in attention_list and session_handoff host.corrections until closed with devcontour contract-change --id ID --ack-correction TASK --reason TEXT. A completed operation whose rebinding left board lead jobs on an earlier input lists them in boardJobs (jobs, next: workflow_start for each board). Read-only.",
+      "description": "Read a contract-change operation: its step, holds, history, earlier redactions and the next step. correctionDetails says for each accepted task in corrections what the change touches (effects scope, document with sections, checks; none — binding only, closed at once); open ones stay in attention_list and session_handoff host.corrections until closed with contract_change_ack_correction (CLI devcontour contract-change --id ID --ack-correction TASK --reason TEXT); correctionsHint marks corrections recorded before this tracking. A completed operation whose rebinding left board lead jobs on an earlier input lists them in boardJobs (jobs, next: workflow_start for each board). Read-only.",
       "readOnly": true,
       "inputSchema": {
         "$schema": "https://json-schema.org/draft/2020-12/schema",
@@ -5298,6 +5298,49 @@
       }
     },
     {
+      "name": "contract_change_ack_correction",
+      "description": "Close corrections of a completed contract change (correctionDetails without closed) after checking the accepted results: taskIds lists the tasks, or all for every open one, with one reason (10-2000 chars: why the accepted result needs no change, or which task fixes it). All or nothing: a task not among the corrections is 404, an already closed correction or an operation not yet completed is 409. The same as devcontour contract-change --id ID --ack-correction TASK[,TASK|all] --reason TEXT. Closed corrections leave attention_list and session_handoff host.corrections.",
+      "readOnly": false,
+      "inputSchema": {
+        "$schema": "https://json-schema.org/draft/2020-12/schema",
+        "type": "object",
+        "properties": {
+          "id": {
+            "type": "string",
+            "pattern": "^CC-[A-Za-z0-9-]{1,80}$"
+          },
+          "taskIds": {
+            "anyOf": [
+              {
+                "minItems": 1,
+                "maxItems": 100,
+                "type": "array",
+                "items": {
+                  "type": "string",
+                  "pattern": "^[A-Za-z0-9_-]{1,80}$"
+                }
+              },
+              {
+                "type": "string",
+                "const": "all"
+              }
+            ]
+          },
+          "reason": {
+            "type": "string",
+            "minLength": 10,
+            "maxLength": 2000
+          }
+        },
+        "required": [
+          "id",
+          "taskIds",
+          "reason"
+        ],
+        "additionalProperties": false
+      }
+    },
+    {
       "name": "input_list",
       "description": "List writer questions (input requests) with state, severity, floors, version and who acts next: awaiting-answer, answer-saved, context-review, review-rejected (the reviewer rejected the answer), ready-to-apply, applied-awaiting-claim, delivered (only after the writer call with the answer started), stale, cancelled, superseded. In approvalMode agent with a running server DevContour itself drives an operator answer to the next attempt (input_context, input_review with the configured reviewer, input_target, input_apply, with the same checks; you carry your own answers through yourself); resume then names the pass: phase (pending, reviewing, applying, waiting-active, retry, paused — a queue pause by a person or a stop holds it with no model call — or failed, blocked, needs-lead when the lead must act), auto (true while nobody needs to act), trigger and detail. No question or answer text. Read-only.",
       "readOnly": true,
@@ -5395,7 +5438,19 @@
           "requestId",
           "text"
         ],
-        "additionalProperties": false
+        "additionalProperties": false,
+        "anyOf": [
+          {
+            "required": [
+              "expectedVersion"
+            ]
+          },
+          {
+            "required": [
+              "version"
+            ]
+          }
+        ]
       }
     },
     {
@@ -5449,7 +5504,19 @@
           "text",
           "reasoning"
         ],
-        "additionalProperties": false
+        "additionalProperties": false,
+        "anyOf": [
+          {
+            "required": [
+              "expectedVersion"
+            ]
+          },
+          {
+            "required": [
+              "version"
+            ]
+          }
+        ]
       }
     },
     {
@@ -5590,7 +5657,19 @@
           "contextDigest",
           "targetDigest"
         ],
-        "additionalProperties": false
+        "additionalProperties": false,
+        "anyOf": [
+          {
+            "required": [
+              "expectedVersion"
+            ]
+          },
+          {
+            "required": [
+              "version"
+            ]
+          }
+        ]
       }
     },
     {
@@ -5625,7 +5704,19 @@
           "requestId",
           "reason"
         ],
-        "additionalProperties": false
+        "additionalProperties": false,
+        "anyOf": [
+          {
+            "required": [
+              "expectedVersion"
+            ]
+          },
+          {
+            "required": [
+              "version"
+            ]
+          }
+        ]
       }
     },
     {
@@ -5665,7 +5756,19 @@
           "reason",
           "successorTaskId"
         ],
-        "additionalProperties": false
+        "additionalProperties": false,
+        "anyOf": [
+          {
+            "required": [
+              "expectedVersion"
+            ]
+          },
+          {
+            "required": [
+              "version"
+            ]
+          }
+        ]
       }
     },
     {

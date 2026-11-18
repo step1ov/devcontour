@@ -199,6 +199,8 @@ export type InputState = (typeof inputStates)[number];
  */
 const versionFields = { expectedVersion: version.optional(), version: version.optional() };
 type Versioned = { expectedVersion?: number; version?: number };
+/** JSON-схема входа называет обязательность одного из полей (сверку делает `versionCheck`). */
+const versionRequired = { anyOf: [{ required: ['expectedVersion'] }, { required: ['version'] }] };
 const versionCheck = (v: Versioned, ctx: z.RefinementCtx) => {
   if (v.expectedVersion === undefined && v.version === undefined)
     ctx.addIssue({
@@ -240,6 +242,7 @@ export const inputOperationInputs = {
       kind: z.enum(['clarification', 'requirement-change']).default('clarification'),
       ...versionFields,
     })
+    .meta(versionRequired)
     .superRefine(versionCheck)
     .transform(versionMerge),
   input_propose: z
@@ -252,6 +255,7 @@ export const inputOperationInputs = {
       reasoning: z.string().trim().min(10).max(PROPOSAL_REASONING),
       ...versionFields,
     })
+    .meta(versionRequired)
     .superRefine(versionCheck)
     .transform(versionMerge),
   input_context: z.strictObject({
@@ -277,6 +281,7 @@ export const inputOperationInputs = {
       reset: z.strictObject({ reason: z.string().trim().min(10).max(2000) }).optional(),
       ...versionFields,
     })
+    .meta(versionRequired)
     .superRefine(versionCheck)
     .transform(versionMerge),
   input_cancel: z
@@ -285,6 +290,7 @@ export const inputOperationInputs = {
       reason: z.string().trim().min(3).max(1000),
       ...versionFields,
     })
+    .meta(versionRequired)
     .superRefine(versionCheck)
     .transform(versionMerge),
   input_supersede: z
@@ -294,6 +300,7 @@ export const inputOperationInputs = {
       successorTaskId: id,
       ...versionFields,
     })
+    .meta(versionRequired)
     .superRefine(versionCheck)
     .transform(versionMerge),
 };

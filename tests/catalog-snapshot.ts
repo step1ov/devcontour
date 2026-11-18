@@ -215,5 +215,12 @@
 // значения — отказ); их описания называют поле expectedVersion и где
 // прочитать версию (поле version у input_show и input_list); прочие
 // операции байтово прежние.
-export const CATALOG_DIGEST = 'c299eb9d1aa6216ec37e5158a7dc8e73027bdc5a4da1678deac06d4a54023ec6';
+// Намеренное изменение (F69/F72, ревью): новая пишущая операция
+// contract_change_ack_correction (закрыть корректировки списком задач или
+// all с одной причиной) после contract_change_revise; описание
+// contract_change_status называет её и correctionsHint; JSON-схема входа
+// input_answer, input_propose, input_apply, input_cancel и input_supersede
+// требует одно из полей expectedVersion или version (anyOf required);
+// прочие операции байтово прежние.
+export const CATALOG_DIGEST = '967572e4ddbb68d37a8d5795ac4c3e430bf30ad9cd90b02e119cdf6c14bfd9f1';
 export const SNAPSHOT_VERSION = '0.4.0-alpha.7';
