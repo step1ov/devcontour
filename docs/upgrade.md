@@ -2045,7 +2045,7 @@ same-vendor-allowed`) само выбирает этому автору ревь
   событием `contract-change.queue-resumed` (операция и причина), а не только
   запуском очереди. Миграции нет.
 
-### После 0.4.0-alpha.46
+### 0.4.0-alpha.47
 
 - **Перенос evidence кандидата на интеграцию (`integrationReuse`).**
   DevContour объявляет поддержку движку (`capabilities.integrationReuse`):
