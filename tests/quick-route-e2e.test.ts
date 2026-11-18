@@ -704,21 +704,41 @@ for (const [manager, mode] of [
       }),
   );
 
-/** Хэш и mtime каждого файла и каталога, включая .git; `skip` — относительные пути. */
+/**
+ * Хэш и mtime каждого файла и каталога, включая .git; `skip` — относительные
+ * пути. Запись, исчезнувшая во время обхода (фоновая уборка рабочих деревьев
+ * ещё идёт), даёт отметку `gone`: снимок отличается от следующего, и
+ * ожидание покоя продолжается, а не падает на ENOENT.
+ */
 function snapshot(root: string, skip: string[] = []) {
   const out: Record<string, string> = {};
+  const gone = (error: unknown) => (error as NodeJS.ErrnoException).code === 'ENOENT';
   const walk = (dir: string, rel: string) => {
-    for (const e of readdirSync(dir, { withFileTypes: true })) {
+    let entries;
+    try {
+      entries = readdirSync(dir, { withFileTypes: true });
+    } catch (error) {
+      if (!gone(error)) throw error;
+      out[(rel || '.') + '/'] = 'gone';
+      return;
+    }
+    for (const e of entries) {
       const r = rel ? rel + '/' + e.name : e.name;
       if (skip.includes(r)) continue;
       const path = join(dir, e.name);
-      const stat = lstatSync(path);
-      if (e.isSymbolicLink()) out[r] = 'link:' + readlinkSync(path) + ':' + stat.mtimeMs;
-      else if (e.isDirectory()) {
-        out[r + '/'] = 'dir:' + stat.mtimeMs;
-        walk(path, r);
-      } else
-        out[r] = createHash('sha256').update(readFileSync(path)).digest('hex') + ':' + stat.mtimeMs;
+      try {
+        const stat = lstatSync(path);
+        if (e.isSymbolicLink()) out[r] = 'link:' + readlinkSync(path) + ':' + stat.mtimeMs;
+        else if (e.isDirectory()) {
+          out[r + '/'] = 'dir:' + stat.mtimeMs;
+          walk(path, r);
+        } else
+          out[r] =
+            createHash('sha256').update(readFileSync(path)).digest('hex') + ':' + stat.mtimeMs;
+      } catch (error) {
+        if (!gone(error)) throw error;
+        out[r] = 'gone';
+      }
     }
   };
   walk(root, '');
