@@ -1,6 +1,6 @@
 import { join } from 'node:path';
 import { LeadWorkflow, WAITING_BASE_HELD, type WorkflowJob } from '../core/lead-workflow.ts';
-import { heldBaseOf } from '../core/work-status.ts';
+import { heldBaseOf, staleBaseStop } from '../core/work-status.ts';
 import { BASE_HELD_REFUSAL, SERVER_STOPPING, type DevContour } from '../core/service.ts';
 import { DomainError, type ChangeSet, type DevContourState } from '../core/model.ts';
 import { repositories, repository } from '../core/repositories.ts';
@@ -55,6 +55,17 @@ export class LeadRunner {
    */
   startRetry = { limit: 4, delayMs: 15_000 };
   private startWaits = new Map<string, { count: number; notBefore: number }>();
+  /**
+   * Стадия, ответившая «жду», не захватывается снова на каждом такте, пока
+   * не изменилось то, чего она ждёт (`waitPrint`), — с паузой, которая
+   * удваивается до `idleWait.maxMs`. Захват и возврат ожидающего задания —
+   * две записи состояния без изменения: ревизия данных росла несколько раз в
+   * секунду, и панель не получала «без изменений» ни на одном опросе (F60).
+   * Предел паузы — гарантия: ожидание, которого отпечаток не видит,
+   * продолжается не позже чем через него.
+   */
+  idleWait = { initialMs: 750, maxMs: 8_000 };
+  private idle = new Map<string, { print: string; notBefore: number; delayMs: number }>();
   /** Продолжение после ответа на вопрос исполнителя (режим `agent`). */
   readonly resumer: InputResumer;
   constructor(
@@ -141,6 +152,61 @@ export class LeadRunner {
       );
     if (!live) this.startWaits.delete(changeSetId);
   }
+  /**
+   * Отпечаток того, чего может ждать стадия задания: само задание (вход,
+   * попытки, восстановления), задачи его досок (статус, попытка,
+   * восстановление, класс отказа), ревизии досок, пауза очереди с её
+   * причинами и ожиданиями (проверка и удержание базы), остановка «база
+   * отстала» по сбоям такта; у ChangeSet — проверки с живостью их lease,
+   * доставки, приёмка, идущие попытки, совместная проверка цикла и пауза
+   * после отказа её начала (истечение паузы — тоже смена отпечатка). Без
+   * смены отпечатка повторный захват ожидающей стадии ничего не меняет
+   * (`idleWait`); то, чего отпечаток не видит (Git, время), стадия
+   * проверит не позже предела паузы.
+   */
+  private waitPrint(job: WorkflowJob, errors: () => ReturnType<typeof tickErrors>) {
+    const s = this.h.store.view();
+    const now = Date.now();
+    const changeSet =
+      job.kind === 'changeset' ? s.changeSets.find((c) => c.id === job.id) : undefined;
+    const boardIds = changeSet?.boardIds ?? [job.id];
+    const boards = s.boards.filter((b) => boardIds.includes(b.id));
+    const ids = new Set(boards.flatMap((b) => b.revisions.flatMap((r) => r.taskIds)));
+    const joint = changeSet ? this.joints.get(changeSet.id) : undefined;
+    return JSON.stringify([
+      job.stage,
+      job.inputDigest,
+      job.attempts,
+      job.repairs,
+      job.startedAt,
+      s.paused,
+      s.pauseReason,
+      s.pausedAt,
+      s.pauseActor,
+      s.pauseFailures,
+      s.waits?.map((w) => [w.kind, w.at, w.detail]),
+      s.baseMoves?.at,
+      // Остановку «база отстала» снимает такт по журналу сбоев (`pauseStep`).
+      job.kind === 'board' && s.paused && !s.pauseReason ? !!staleBaseStop(s, errors()) : null,
+      boards.map((b) => [b.id, b.revisions.length, b.revisions.at(-1)?.status]),
+      s.tasks
+        .filter((t) => ids.has(t.id))
+        .map((t) => [t.id, t.status, t.attempt, t.activeRunId, t.recovery?.status, t.failureKind]),
+      changeSet && [
+        changeSet.verifications.map((v) => [
+          v.id,
+          v.status,
+          v.status === 'active' && v.leaseUntil > now,
+        ]),
+        changeSet.acceptance?.at,
+        changeSet.deliveries?.map((d) => [d.id, d.status]),
+        changeSet.releaseId,
+        s.runs.some((r) => r.status === 'active'),
+        joint ? [joint.done, joint.failed] : null,
+        (this.startWaits.get(changeSet.id)?.notBefore ?? 0) > now,
+      ],
+    ]);
+  }
   tick() {
     if (this.pending) return this.pending;
     this.pending = this.advance().finally(() => {
@@ -159,16 +225,26 @@ export class LeadRunner {
         /* Причины — в записях прохода; задания идут дальше. */
       }
     const owners = [undefined, ...repositories(this.h.config).map((r) => r.id)];
+    // Сбои такта читаются один раз за такт и только если нужны отпечатку.
+    let errors: ReturnType<typeof tickErrors> | undefined;
+    const errorsOnce = () => (errors ??= tickErrors(this.h));
     for (const owner of owners)
       for (const saved of this.workflow.list(owner)) {
         if (this.stopping) return;
         if (!['queued', 'running'].includes(saved.status)) {
+          this.idle.delete(saved.key);
           // Закончившееся задание: паузы начала его ChangeSet не нужны.
           if (saved.kind === 'changeset') this.forgetStartWaits(saved.id, owner);
           continue;
         }
         // An operator-controlled workspace never spends model calls automatically.
         if (this.h.config.approvalMode === 'operator') continue;
+        // Ожидающая стадия без перемен в том, чего она ждёт, — не захват.
+        // Отпечаток — до исполнения: всё, что изменила сама стадия, снова
+        // захватывает её на следующем такте.
+        const idle = this.idle.get(saved.key);
+        const print = saved.status === 'queued' ? this.waitPrint(saved, errorsOnce) : undefined;
+        if (print !== undefined && idle?.print === print && Date.now() < idle.notBefore) continue;
         const job = this.workflow.claim(saved.key, owner);
         if (!job) {
           // Попытки исчерпаны прерываниями: причина последнего — в ошибке.
@@ -197,7 +273,15 @@ export class LeadRunner {
         try {
           const waiting = await this.execute(job, controller.signal);
           this.workflow.finish(job, waiting);
+          if (waiting && print !== undefined) {
+            const delayMs =
+              idle?.print === print
+                ? Math.min(idle.delayMs * 2, this.idleWait.maxMs)
+                : this.idleWait.initialMs;
+            this.idle.set(saved.key, { print, notBefore: Date.now() + delayMs, delayMs });
+          } else this.idle.delete(saved.key);
         } catch (e) {
+          this.idle.delete(saved.key);
           // Отказ снять паузу, пока сервер останавливается, — не провал
           // стадии: она ждёт доменного состояния (пауза остановки), и задание
           // возвращается в очередь без расхода попытки, как стадия «жду».
