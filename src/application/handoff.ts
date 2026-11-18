@@ -1006,6 +1006,11 @@ function boardDraft(boardId: string, ctx: HostContext): HostNextDraft | undefine
       params: {
         running,
         authorRuntime: restart.authorRuntime,
+        // Своя пауза ведущего поставлена до нового задания: цикл его стадии
+        // задач её снимет (`operatorDecided`) — ведущий решает, зная это.
+        ...(pausedByLead(state)
+          ? { leadPause: leadPauseNote(state) ? { reason: leadPauseNote(state)! } : {} }
+          : {}),
         ...(operation ? { operation } : {}),
         ...(others.length ? { others } : {}),
       },

@@ -82,6 +82,8 @@ export interface HintParamMap {
     running: boolean;
     /** Рантайм автора прежнего задания — тот же, что в `boardJobs.next` операции. */
     authorRuntime: string;
+    /** Действует своя пауза ведущего (с его причиной): цикл нового задания её снимет. */
+    leadPause?: { reason?: string };
     operation?: string;
     others?: string[];
   };
@@ -347,6 +349,9 @@ const en: Catalog = {
       : ''),
   'board-restart': (p, s) =>
     `The lead workflow job of board ${s.boardId!}${s.job ? ` (${s.job.status}, key ${s.job.key})` : ''} was started on an earlier input: ${p.operation ? `contract-change ${p.operation} rebound its tasks` : 'its tasks, contracts or execution policy changed'} after it started, so it will not continue (it closes as stale). Start a new job: workflow_start {"kind": "board", "id": ${JSON.stringify(s.boardId!)}, "authorRuntime": ${JSON.stringify(p.authorRuntime)}} with the DevContour server running; the new job checks a moved base itself (base-check) and continues dispatch.` +
+    (p.leadPause
+      ? ` The loop of the new job lifts your own pause (queue_set${p.leadPause.reason ? `: ${p.leadPause.reason}` : ''}) at stage 1: restart once its reason is resolved, or keep the job unstarted until then.`
+      : '') +
     (p.others?.length ? ` Restart the jobs of boards ${p.others.join(', ')} the same way.` : '') +
     (p.running ? ' An attempt is running: the server finishes it without a job.' : ''),
   'pause-lift': (p, s) =>
@@ -603,6 +608,9 @@ const ru: Catalog = {
       : ''),
   'board-restart': (p, s) =>
     `Задание ведущего доски ${s.boardId!}${s.job ? ` (${s.job.status}, ключ ${s.job.key})` : ''} начато на прежнем входе: ${p.operation ? `операция contract-change ${p.operation} перепривязала его задачи` : 'после его старта изменились задачи, контракты или политика исполнения'}, поэтому оно не продолжится (закроется как stale). Начните новое задание: workflow_start {"kind": "board", "id": ${JSON.stringify(s.boardId!)}, "authorRuntime": ${JSON.stringify(p.authorRuntime)}} при работающем сервере DevContour; новое задание само проверит перенесённую базу (base-check) и продолжит выдачу.` +
+    (p.leadPause
+      ? ` Цикл нового задания на стадии 1 снимет вашу собственную паузу (queue_set${p.leadPause.reason ? `: ${p.leadPause.reason}` : ''}): перезапускайте, когда её причина устранена, иначе не начинайте задание до тех пор.`
+      : '') +
     (p.others?.length ? ` Так же перезапустите задания досок ${p.others.join(', ')}.` : '') +
     (p.running ? ' Идёт попытка: сервер завершит её и без задания.' : ''),
   'pause-lift': (p, s) =>

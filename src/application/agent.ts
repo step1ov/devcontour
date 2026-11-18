@@ -62,8 +62,24 @@ const id = z.string().regex(/^[A-Za-z0-9_-]{1,80}$/);
 
 /** Маска секретов контура — та же, что у пакета ведущего и центра внимания. */
 const redactOf = (h: DevContour) => handoffRedactor(h.config, executionOf(h).engine.policy);
-/** Причина паузы ведущего под маской секретов контура (`queue_set`, CLI `queue --reason`). */
-export const leadReason = (h: DevContour, text: string) => redactOf(h)(text);
+/**
+ * Причина паузы ведущего под маской секретов контура (`queue_set`, CLI
+ * `queue --reason`). Предел `PAUSE_REASON_CHARS` проверяется по тексту
+ * ведущего; маска может удлинить текст (`[REDACTED]` длиннее значения) — тогда
+ * он усекается до предела, а не отклоняется.
+ */
+export const leadReason = (h: DevContour, text: string) => {
+  const raw = text.trim();
+  if ([...raw].length > PAUSE_REASON_CHARS)
+    throw new DomainError(
+      `Причина паузы длиннее ${PAUSE_REASON_CHARS} знаков: опишите её короче`,
+      400,
+    );
+  const chars = [...redactOf(h)(raw)];
+  return chars.length > PAUSE_REASON_CHARS
+    ? chars.slice(0, PAUSE_REASON_CHARS - 1).join('') + '…'
+    : chars.join('');
+};
 export { SERVER_STOPPING };
 export { oversized };
 export const agentInputs = {

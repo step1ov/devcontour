@@ -546,6 +546,24 @@ test('Пауза ведущего агента через queue_set хранит
     })) as { reason?: string };
     assert.equal(kept.reason, undefined);
     assert.equal(f.h.store.read().pauseActor, undefined);
+    // Предел — по тексту ведущего: маска, удлинившая текст, отказа не даёт,
+    // а длинный исходный текст отклоняется.
+    f.h.pause(false);
+    process.env.DC_PAUSE_SECRET = 'x9-secret';
+    try {
+      (f.h.config as unknown as Record<string, unknown>).environment = {
+        inherit: ['DC_PAUSE_SECRET'],
+      };
+      const many = Array.from({ length: 30 }, () => 'x9-secret').join(' ');
+      assert.ok(many.length <= 300);
+      await agent.run({ operation: 'queue_set', input: { paused: true, reason: many } });
+      const stored = f.h.store.read().pauseActor?.reason ?? '';
+      assert.ok([...stored].length <= 300, stored);
+      assert.doesNotMatch(stored, /x9-secret/);
+    } finally {
+      delete process.env.DC_PAUSE_SECRET;
+      delete (f.h.config as unknown as Record<string, unknown>).environment;
+    }
     // Новая пауза ведущего без причины прежнюю причину не наследует.
     f.h.pause(false);
     await agent.run({ operation: 'queue_set', input: { paused: true } });

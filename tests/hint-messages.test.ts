@@ -232,7 +232,11 @@ const samples: { [C in HintCode]: (HintSubject & Extract<HintOf, { code: C }>)[]
     },
     {
       code: 'board-restart',
-      params: { running: true, authorRuntime: 'claude' },
+      params: {
+        running: true,
+        authorRuntime: 'claude',
+        leadPause: { reason: 'waiting for the schema' },
+      },
       boardId: 'board-1',
       job,
     },
@@ -571,8 +575,11 @@ test('Подсказки шага: новая конфигурация setup п�
  * Текст `board-restart` называет рантайм автора прежнего задания
  * (`params.authorRuntime`, как `boardJobs.next` операции; F66, ревью 1);
  * прочие образцы байтово прежние.
+ * Текст `board-restart` под своей паузой ведущего называет, что цикл нового
+ * задания её снимет, с её причиной (`params.leadPause`; F66, ревью 2);
+ * прочие образцы байтово прежние.
  */
-const ENGLISH_SAMPLES_SHA256 = '5e7343a19d89e50abe6fda49f0155975f3a2348fcfdf0c09d4b45be3130c65f9';
+const ENGLISH_SAMPLES_SHA256 = 'd06e51d44c2529fd9c548d792f0c128b1f43731a623fc2815d5da3cc2eca2963';
 
 test('Подсказки шага: английские тексты образцов закреплены', () => {
   assert.equal(

@@ -2327,6 +2327,23 @@ test('session_handoff: перезапуск устаревшего задани�
     // Очередь идёт: перезапуск раньше ожидания задания X.
     f.h.pause(false);
     assert.equal(devcontourHandoff(f.h).host.next?.code, 'board-restart');
+    // Пауза человека: шаг остаётся его (queue_set), новое задание её без его
+    // решения не обходит.
+    tick();
+    f.h.pause(true);
+    const human = devcontourHandoff(f.h).host.next;
+    assert.notEqual(human?.code, 'board-restart', JSON.stringify(human));
+    assert.equal(human?.action, 'queue_set');
+    // Своя пауза ведущего: перезапуск называется и предупреждает, что цикл
+    // нового задания снимет эту паузу, с её причиной.
+    f.h.pause(false);
+    tick();
+    f.h.pause(true, 'operator', 'lead', 'Жду решения по схеме');
+    const own = devcontourHandoff(f.h).host.next;
+    assert.equal(own?.code, 'board-restart', JSON.stringify(own));
+    assert.deepEqual(own?.params.leadPause, { reason: 'Жду решения по схеме' });
+    assert.match(own?.detail ?? '', /lifts your own pause \(queue_set: Жду решения по схеме\)/);
+    f.h.pause(false);
     // Пакет доски X перезапуск чужой доски не называет.
     assert.notEqual(devcontourHandoff(f.h, { boardId: x }).host.next?.code, 'board-restart');
     // Доска, все задачи которой отменены, шага не даёт (F58), даже с
