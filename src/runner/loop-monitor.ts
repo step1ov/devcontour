@@ -64,7 +64,13 @@ export class LoopMonitor {
     // Время остановки монитора — не задержка основного потока.
     this.lastMono = this.mono();
     this.lastWall = this.wall();
-    this.timer = setInterval(() => this.check(), this.options.intervalMs ?? 1000);
+    // Интервал заметно короче порога задержки: `probe` меряет от последнего
+    // срабатывания интервала, и обычное опоздание таймера не должно выглядеть
+    // задержкой.
+    this.timer = setInterval(
+      () => this.check(),
+      this.options.intervalMs ?? Math.min(1000, Math.floor(this.stallMs / 4)),
+    );
     this.timer.unref();
   }
 
@@ -75,6 +81,23 @@ export class LoopMonitor {
 
   /** Разрыв с прошлой проверки; о задержке или скачке часов сообщает сразу. */
   check(): LoopGap | undefined {
+    return this.measure(true);
+  }
+
+  /**
+   * Проверка из синхронного кода (перед операцией хранилища, F74): о задержке
+   * сообщает, как `check`, но без неё отметку не сдвигает. Дойти до
+   * следующей операции — не значит отпустить основной поток: длинная
+   * синхронная работа из многих коротких шагов с операциями между ними иначе
+   * никогда не набрала бы разрыва, хотя интервалы продления всё это время
+   * стояли. Отметку сдвигают только `check` (интервал монитора, такт — код,
+   * до которого дошёл цикл событий) и замеченная задержка.
+   */
+  probe(): LoopGap | undefined {
+    return this.measure(false);
+  }
+
+  private measure(turned: boolean): LoopGap | undefined {
     const mono = this.mono(),
       wall = this.wall();
     const gap: LoopGap = {
@@ -83,14 +106,18 @@ export class LoopMonitor {
       monoMs: Math.round(mono - this.lastMono),
       wallMs: wall - this.lastWall,
     };
-    this.lastMono = mono;
-    this.lastWall = wall;
+    const jump = Math.abs(gap.wallMs - gap.monoMs) > this.jumpToleranceMs;
+    const stall = !jump && gap.monoMs >= this.stallMs;
+    if (turned || jump || stall) {
+      this.lastMono = mono;
+      this.lastWall = wall;
+    }
     // Сон или перевод часов — не перегрузка, даже если процесс и стоял.
-    if (Math.abs(gap.wallMs - gap.monoMs) > this.jumpToleranceMs) {
+    if (jump) {
       this.options.onClockJump(gap);
       return gap;
     }
-    if (gap.monoMs >= this.stallMs) {
+    if (stall) {
       this.options.onStall(gap);
       return gap;
     }

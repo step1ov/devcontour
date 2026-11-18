@@ -54,6 +54,7 @@ import {
   type ProjectionOptions,
 } from './projection.ts';
 import { approvalPolicyDigest, policyFromConfig } from './policy.ts';
+import { idleClaimGates } from './idle-claims.ts';
 import {
   changeSnapshot,
   snapshotDigest,
@@ -134,6 +135,13 @@ export function projectionOptions(h: DevContour): ProjectionOptions {
     roleScope: (task) => roleBinding(h.config, task.role, task.repositoryId)?.writePaths,
     contextPacks: (task) => taskPacks(h, task).map((p) => p.id),
     contractDigest: (id) => h.store.read().contracts.find((c) => c.id === id)?.digest,
+    // Истёкшая попытка не засчитана. В режиме `agent` задание ведущего цикла
+    // (workflow_start) повторяет её само (восстановление окружения), в
+    // режиме `operator` — только явный повтор.
+    expiryNote: (taskId) =>
+      h.config.approvalMode === 'operator'
+        ? `Истёк срок владения; попытка не засчитана. Повторите явно: devcontour retry --task ${taskId}.`
+        : `Истёк срок владения; попытка не засчитана. Задание ведущего цикла повторит её само; без задания — devcontour retry --task ${taskId}.`,
   };
 }
 
@@ -260,6 +268,9 @@ export function devcontourHost(h: DevContour, store: DevContourExecutionStore): 
       },
       // Активная поставка ChangeSet закрепила комбинацию: новые попытки сдвинули бы её.
       claimBarrier: (view) => {
+        // Такт сервера без перемен с прошлой пустой выдачи (F77).
+        if (idleClaimGates.get(h)?.holds())
+          return refusal('PAUSED', 'С прошлой выдачи без перемен: выдавать нечего');
         const delivery = state(view)
           .changeSets.flatMap((c) => (c.deliveries ?? []).map((d) => ({ c, d })))
           .find(({ d }) => d.status === 'active' && d.leaseUntil > Date.now());

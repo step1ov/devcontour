@@ -24,7 +24,7 @@ import { adapters, type AgentRequest } from '../src/runner/adapters.ts';
 import { repositories } from '../src/core/repositories.ts';
 import { git } from '../src/runner/process.ts';
 import { LoopMonitor, type LoopGap } from '../src/runner/loop-monitor.ts';
-import { LATE_HEARTBEAT, hostStarved, loopGaps, repairDecision } from '../src/core/repair.ts';
+import { LATE_HEARTBEAT, hostStarved, repairDecision } from '../src/core/repair.ts';
 import { DatabaseSync } from 'node:sqlite';
 
 const demos = demoPool(testDemo);
@@ -168,7 +168,7 @@ test('Монитор замечает настоящую блокировку ev
   assert.ok(stalls[0].monoMs >= 1990, String(stalls[0].monoMs));
 });
 
-test('Сервер записывает задержку раньше, чем истекает свою попытку, и повторяет её сам', async () => {
+test('Сервер записывает задержку и продлевает свою живую попытку раньше, чем её проверят продление и истечение (F74)', async () => {
   const seed = await demos.acquire();
   const configPath = join(seed.root, 'config.json');
   const raw = JSON.parse(readFileSync(configPath, 'utf8')) as Record<string, unknown>;
@@ -223,32 +223,25 @@ test('Сервер записывает задержку раньше, чем и
         'такт записал задержку до recovery',
       );
       await tick;
-      const deadline = Date.now() + 20_000;
-      while (
-        store.read().runs.find((r) => r.id === run.id)?.status === 'active' &&
-        Date.now() < deadline
-      )
-        await sleep(100);
-      const lost = store.read().runs.find((r) => r.id === run.id)!;
-      assert.equal(lost.status, 'expired', 'без продления аренда истекла');
+      // F74: задержка самого сервера не истекает его живую попытку — сроки
+      // своих попыток, действовавших в начале задержки, продлены раньше, чем
+      // их проверили продление и истечение.
+      assert.ok(scheduler.extendedAfterStall.includes(run.id), 'срок своей попытки продлён');
+      // Несколько продлений и тактов спустя попытка по-прежнему идёт.
+      await sleep(LEASE);
+      const live = store.read().runs.find((r) => r.id === run.id)!;
+      assert.equal(live.status, 'active', 'живая попытка не истекла');
       const events = store.events();
       const stall = events.find((e) => e.type === 'server.loop-stalled');
-      const expired = events.find((e) => e.type === 'runs.expired');
-      assert.ok(stall && expired, 'задержка и истечение записаны');
-      assert.ok(stall.id < expired.id, 'задержка записана до истечения');
+      assert.ok(stall, 'задержка записана');
+      assert.ok(!events.some((e) => e.type === 'runs.expired'), 'истечения не было');
+      assert.ok(
+        !events.some((e) => e.type === 'run.heartbeat-failed'),
+        'продление после задержки не отказывало',
+      );
       const data = stall.data as { owner: string; monoMs: number };
       assert.equal(data.owner, scheduler.owner);
       assert.ok(data.monoMs >= LEASE + 3000 - 50, String(data.monoMs));
-      // Сигнал окна сам по себе, без опоздавшего продления: записанная
-      // задержка владельца покрывает конец срока.
-      assert.equal(
-        hostStarved({ ...lost, error: undefined }, loopGaps(h)),
-        true,
-        'задержка владельца покрывает конец срока',
-      );
-      const decided = repairDecision(h, [{ id: task.id }], options);
-      assert.equal(decided?.action, 'retry', decided?.reason);
-      assert.equal(decided?.action === 'retry' && decided.hostStarved, true);
     } finally {
       release.abort();
       await scheduler.stop();
