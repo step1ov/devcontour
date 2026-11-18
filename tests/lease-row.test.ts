@@ -503,3 +503,48 @@ test('CLI storage-step-down отказывает, пока controller жив', a
   assert.notEqual(result.code, 0, result.stdout);
   assert.match(result.stderr, /остановите serve/);
 });
+
+test('F57: транзакция без записи документа не заставляет следующее чтение разбирать его заново', () => {
+  // Ловит: локальная запись (задание ведущего, срок задания) или продление
+  // без изменения документа поднимает счётчик, и кэш документа терялся —
+  // каждый такт простоя разбирал документ в 100 МБ заново.
+  const dir = temp();
+  const store = new Store(join(dir, 'state.sqlite'));
+  try {
+    store.change('board.created', (s) => {
+      s.boards.push({ id: 'B-1', title: 'Доска', createdAt: new Date(0).toISOString() } as never);
+      return {};
+    });
+    store.view();
+    const parses = countParses();
+    try {
+      for (const revision of ['data', 'lease'] as const) {
+        store.atomic(() =>
+          store.saveLocal('workflow-jobs', undefined, 'job-' + revision, { n: 1 }, revision),
+        );
+        store.view();
+        store.readShared();
+      }
+      assert.equal(parses.count, 0, 'локальные записи документ не меняли — разбора нет');
+      // Запись документа после них видна: кэш не устарел.
+      store.change('board.renamed', (s) => {
+        s.boards[0].title = 'Новая';
+        return {};
+      });
+      assert.equal(store.view().boards[0].title, 'Новая');
+    } finally {
+      parses.restore();
+    }
+    // Запись документа другим соединением тоже видна после локальной записи.
+    const other = new Store(join(dir, 'state.sqlite'));
+    other.change('board.renamed', (s) => {
+      s.boards[0].title = 'Чужая';
+      return {};
+    });
+    other.close();
+    store.atomic(() => store.saveLocal('workflow-jobs', undefined, 'job-after', { n: 2 }));
+    assert.equal(store.view().boards[0].title, 'Чужая');
+  } finally {
+    store.close();
+  }
+});

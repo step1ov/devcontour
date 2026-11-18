@@ -730,6 +730,8 @@ export class Store {
     return this.parseDocument(row.data).state;
   }
   private writeStored(state: DevContourState) {
+    // Запись в обход `written`: кэш документа не переносится на новый ключ.
+    this.committed = undefined;
     if (this.components) this.components.write(state);
     else this.db.prepare('UPDATE main.state SET data=? WHERE id=1').run(JSON.stringify(state));
   }
@@ -900,9 +902,19 @@ export class Store {
       value = action();
       if (value && typeof (value as any).then === 'function')
         throw new Error('Store.atomic cannot await external work');
-      const key = !outer && this.written ? this.versionKey() : undefined;
+      // Транзакция, не записавшая документ (продление сроков, строки аренды,
+      // роль controller, локальные записи), поднимает счётчики, но текст
+      // документа прежний: кэш на её начало переходит на новый ключ, иначе
+      // каждый такт простоя заново разбирал весь документ (F57). Ключ
+      // берётся до COMMIT — под локом записи, чужой записи между ними нет.
+      const carried =
+        !outer && !this.written && this.startKey && this.committed?.key === this.startKey
+          ? this.committed
+          : undefined;
+      const key = !outer && (this.written || carried) ? this.versionKey() : undefined;
       this.db.exec(outer ? `RELEASE ${point}` : 'COMMIT');
       if (key && this.written) this.committed = { key, ...this.written };
+      else if (key && carried) this.committed = { ...carried, key };
     } catch (error) {
       this.db.exec(outer ? `ROLLBACK TO ${point}; RELEASE ${point}` : 'ROLLBACK');
       this.cached = undefined;
