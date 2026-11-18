@@ -51,6 +51,7 @@ import {
   APPLIED_KEYS_NAMESPACE,
   DevContour,
   contractForks,
+  contractRedactionsOf,
   meaningRedactionsSinceConsolidation,
   newerRedaction,
   type AppliedConfigKeys,
@@ -1057,7 +1058,7 @@ export async function doctor(
   // закреплённой приёмки — предупреждение, а не блокировка. Новая редакция
   // с ним отклоняется до ревью (review-contract, contract-change).
   checks.push(...(await contractClosureChecks(config, state?.contracts ?? [])));
-  checks.push(...contractSizeChecks(state?.contracts ?? []));
+  checks.push(...contractSizeChecks(state?.contracts ?? [], state?.tasks ?? []));
   checks.push(...contractForkChecks(state?.contracts ?? []));
   // Состояние прочитано не полностью: контракты баз компонентов не видны, и
   // отсутствие находок закрепления ничего не доказывает.
@@ -1222,13 +1223,35 @@ export function checkoutsCheck(config: Config, root: string): Check {
  * `contractSize` (75 % предела: консолидировать) и после
  * `CONTRACT_CONSOLIDATE_AFTER` смысловых редакций документа с последней
  * консолидации; готовность не снимает.
+ *
+ * Советы — только по документу, который ещё будут поправлять: к одной из его
+ * редакций привязана открытая задача (не `done` и не `cancelled`), или задач
+ * у него нет вовсе — только что зарегистрированный под следующий этап
+ * контракт дешевле всего консолидировать до привязки. Документ, все задачи
+ * которого приняты или отменены, — исторический журнал: новые задачи
+ * привязываются к другим контрактам, и совет держал бы doctor в `degraded`
+ * без действия, которое что-то изменит.
  */
-export function contractSizeChecks(contracts: DevContourState['contracts']): Check[] {
+export function contractSizeChecks(
+  contracts: DevContourState['contracts'],
+  tasks: readonly Pick<DevContourState['tasks'][number], 'status' | 'contracts'>[] = [],
+): Check[] {
+  const bound = (t: (typeof tasks)[number], ids: Set<string>) =>
+    Array.isArray(t.contracts) && t.contracts.some((id) => ids.has(id));
+  const retired = (c: DevContourState['contracts'][number]) => {
+    const ids = new Set(
+      (c.source ? contractRedactionsOf(contracts, c.source, c.repositoryId) : [c]).map((x) => x.id),
+    );
+    const mine = tasks.filter((t) => bound(t, ids));
+    return mine.length > 0 && mine.every((t) => t.status === 'done' || t.status === 'cancelled');
+  };
   return (
     contracts
       // doctor читает состояние до разбора схемой: запись без текста документа
       // (незавершённая или чужой формы) не мерится, а не роняет весь doctor.
-      .filter((c) => typeof c.content === 'string' && !newerRedaction(contracts, c.id))
+      .filter(
+        (c) => typeof c.content === 'string' && !newerRedaction(contracts, c.id) && !retired(c),
+      )
       .flatMap((c) => {
         const size = contractSize(c.content);
         const name = `Контракт ${c.id} (${c.title}${c.source ? `, ${c.source}` : ''})`;

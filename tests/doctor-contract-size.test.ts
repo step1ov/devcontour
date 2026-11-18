@@ -194,3 +194,58 @@ test('F20 R3-M1: the merging redaction doctor asks for clears the fork warning',
   });
   assert.deepEqual(contractForkChecks([p, m1, m2, merged]), []);
 });
+
+test('F50: size and consolidation advice only for a contract that open work is bound to', () => {
+  const source = 'docs/contracts/journal.md';
+  // Документ у предела, с шестью поправками: оба совета на действующей редакции.
+  const chain = Array.from({ length: 7 }, (_, i) =>
+    contract(`J-${i + 1}`, CONTRACT_CONTENT_WARN, { source }),
+  );
+  const task = (id: string, status: string, contracts: string[]) => ({ id, status, contracts });
+  const ids = (tasks: ReturnType<typeof task>[]) =>
+    contractSizeChecks(chain, tasks as never).map((c) => c.id);
+  const both = ['contract-size:J-7', 'contract-consolidate:J-7'];
+  // Все задачи по документу приняты или отменены: исторический журнал,
+  // поправлять его некому — советы doctor не держат degraded.
+  assert.deepEqual(ids([task('T-1', 'done', ['J-2']), task('T-2', 'cancelled', ['J-7'])]), []);
+  // Открытая или черновая задача на любой редакции документа — советы есть.
+  for (const status of ['draft', 'ready', 'running', 'failed'])
+    assert.deepEqual(
+      ids([task('T-1', 'done', ['J-7']), task('T-3', status, ['J-3'])]),
+      both,
+      status,
+    );
+  // Задачи на другом контракте не делают этот документ действующим.
+  const other = contract('O-1', 1000, { source: 'docs/contracts/other.md' });
+  assert.deepEqual(
+    contractSizeChecks([...chain, other], [
+      task('T-1', 'done', ['J-7']),
+      task('T-4', 'ready', ['O-1']),
+    ] as never).map((c) => c.id),
+    [],
+  );
+  // Контракт без единой привязанной задачи — только что зарегистрирован под
+  // следующий этап: консолидировать его до привязки дешевле всего.
+  assert.deepEqual(ids([]), both);
+});
+
+test('F50: doctor() drops the advice of a contract whose bound tasks are all accepted', async () => {
+  const root = mkdtempSync(join(tmpdir(), 'devcontour-contract-size-'));
+  try {
+    const c = config();
+    const leader = { owner: 'server', leaseUntil: Date.now() + 60000 };
+    const tasks = [{ id: 'T-1', status: 'done', contracts: ['C-near'] }];
+    const report = await doctor(c, root, false, {
+      leader,
+      runs: [],
+      tasks,
+      contracts: [contract('C-near', CONTRACT_CONTENT_WARN)],
+    } as never);
+    assert.equal(
+      report.checks.some((x) => x.id === 'contract-size:C-near'),
+      false,
+    );
+  } finally {
+    rmSync(root, { recursive: true, force: true });
+  }
+});
