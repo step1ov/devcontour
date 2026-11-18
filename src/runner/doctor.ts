@@ -51,6 +51,7 @@ import {
   APPLIED_KEYS_NAMESPACE,
   DevContour,
   contractForks,
+  contractRedactionsOf,
   meaningRedactionsSinceConsolidation,
   newerRedaction,
   type AppliedConfigKeys,
@@ -1057,7 +1058,9 @@ export async function doctor(
   // закреплённой приёмки — предупреждение, а не блокировка. Новая редакция
   // с ним отклоняется до ревью (review-contract, contract-change).
   checks.push(...(await contractClosureChecks(config, state?.contracts ?? [])));
-  checks.push(...contractSizeChecks(state?.contracts ?? []));
+  checks.push(
+    ...contractSizeChecks(state?.contracts ?? [], Array.isArray(state?.tasks) ? state.tasks : []),
+  );
   checks.push(...contractForkChecks(state?.contracts ?? []));
   // Состояние прочитано не полностью: контракты баз компонентов не видны, и
   // отсутствие находок закрепления ничего не доказывает.
@@ -1222,13 +1225,58 @@ export function checkoutsCheck(config: Config, root: string): Check {
  * `contractSize` (75 % предела: консолидировать) и после
  * `CONTRACT_CONSOLIDATE_AFTER` смысловых редакций документа с последней
  * консолидации; готовность не снимает.
+ *
+ * Советы — только по документу, который ещё будут поправлять. Документ
+ * выведен из работы (исторический журнал), если к его действующей редакции
+ * (или к редакциям, которые она лишь консолидирует) привязаны задачи и все
+ * задачи всех его редакций приняты (`done`) или отменены. Новые задачи
+ * привязываются к другим контрактам, и совет держал бы doctor в `degraded`
+ * без действия, которое что-то изменит. Действующая редакция без своих
+ * задач — зарегистрирована под следующий этап: совет остаётся, до
+ * привязки консолидировать дешевле всего. Задача без статуса — открытая.
  */
-export function contractSizeChecks(contracts: DevContourState['contracts']): Check[] {
+export function contractSizeChecks(
+  contracts: DevContourState['contracts'],
+  tasks: readonly unknown[] = [],
+): Check[] {
+  // doctor читает состояние до разбора схемой: запись задачи чужой формы не
+  // роняет проверку; задача без списка контрактов ни к чему не привязана.
+  const records = tasks.flatMap((t) => {
+    const r = t as { status?: unknown; contracts?: unknown } | null;
+    return r && typeof r === 'object' && Array.isArray(r.contracts)
+      ? [{ status: r.status, contracts: r.contracts as unknown[] }]
+      : [];
+  });
+  const boundTo = (ids: Set<string>) =>
+    records.filter((t) => t.contracts.some((id) => ids.has(id as string)));
+  const redactions = (c: DevContourState['contracts'][number]) =>
+    c.source ? contractRedactionsOf(contracts, c.source, c.repositoryId) : [c];
+  // Действующая редакция и те, что она консолидирует звено за звеном
+  // (только редакции того же документа, как `equivalenceChain`):
+  // консолидация сохраняет привязки прежней редакции.
+  const equivalent = (c: DevContourState['contracts'][number]) => {
+    const byId = new Map(redactions(c).map((x) => [x.id, x]));
+    const ids = new Set([c.id]);
+    for (let x = c; x.consolidates && x.consolidates.from === x.previous;) {
+      const before = x.previous ? byId.get(x.previous) : undefined;
+      if (!before || ids.has(before.id)) break;
+      ids.add(before.id);
+      x = before;
+    }
+    return ids;
+  };
+  const retired = (c: DevContourState['contracts'][number]) => {
+    if (!boundTo(equivalent(c)).length) return false;
+    const all = new Set(redactions(c).map((x) => x.id));
+    return boundTo(all).every((t) => t.status === 'done' || t.status === 'cancelled');
+  };
   return (
     contracts
       // doctor читает состояние до разбора схемой: запись без текста документа
       // (незавершённая или чужой формы) не мерится, а не роняет весь doctor.
-      .filter((c) => typeof c.content === 'string' && !newerRedaction(contracts, c.id))
+      .filter(
+        (c) => typeof c.content === 'string' && !newerRedaction(contracts, c.id) && !retired(c),
+      )
       .flatMap((c) => {
         const size = contractSize(c.content);
         const name = `Контракт ${c.id} (${c.title}${c.source ? `, ${c.source}` : ''})`;

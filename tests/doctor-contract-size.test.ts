@@ -194,3 +194,166 @@ test('F20 R3-M1: the merging redaction doctor asks for clears the fork warning',
   });
   assert.deepEqual(contractForkChecks([p, m1, m2, merged]), []);
 });
+
+test('F50: size and consolidation advice only for a contract that open work is bound to', () => {
+  const source = 'docs/contracts/journal.md';
+  // Документ у предела, с шестью поправками: оба совета на действующей редакции.
+  const chain = Array.from({ length: 7 }, (_, i) =>
+    contract(`J-${i + 1}`, CONTRACT_CONTENT_WARN, { source }),
+  );
+  const task = (id: string, status: string, contracts: string[]) => ({ id, status, contracts });
+  const ids = (tasks: ReturnType<typeof task>[]) =>
+    contractSizeChecks(chain, tasks as never).map((c) => c.id);
+  const both = ['contract-size:J-7', 'contract-consolidate:J-7'];
+  // Все задачи по документу приняты или отменены: исторический журнал,
+  // поправлять его некому — советы doctor не держат degraded.
+  assert.deepEqual(ids([task('T-1', 'done', ['J-2']), task('T-2', 'cancelled', ['J-7'])]), []);
+  // Открытая или черновая задача на любой редакции документа — советы есть.
+  for (const status of ['draft', 'ready', 'running', 'failed'])
+    assert.deepEqual(
+      ids([task('T-1', 'done', ['J-7']), task('T-3', status, ['J-3'])]),
+      both,
+      status,
+    );
+  // Задачи на другом контракте не делают этот документ действующим.
+  const other = contract('O-1', 1000, { source: 'docs/contracts/other.md' });
+  assert.deepEqual(
+    contractSizeChecks([...chain, other], [
+      task('T-1', 'done', ['J-7']),
+      task('T-4', 'ready', ['O-1']),
+    ] as never).map((c) => c.id),
+    [],
+  );
+  // Контракт без единой привязанной задачи — только что зарегистрирован под
+  // следующий этап: консолидировать его до привязки дешевле всего.
+  assert.deepEqual(ids([]), both);
+});
+
+test('F50: doctor() drops the advice of a contract whose bound tasks are all accepted', async () => {
+  const root = mkdtempSync(join(tmpdir(), 'devcontour-contract-size-'));
+  try {
+    const c = config();
+    const leader = { owner: 'server', leaseUntil: Date.now() + 60000 };
+    const tasks = [{ id: 'T-1', status: 'done', contracts: ['C-near'] }];
+    const report = await doctor(c, root, false, {
+      leader,
+      runs: [],
+      tasks,
+      contracts: [contract('C-near', CONTRACT_CONTENT_WARN)],
+    } as never);
+    assert.equal(
+      report.checks.some((x) => x.id === 'contract-size:C-near'),
+      false,
+    );
+  } finally {
+    rmSync(root, { recursive: true, force: true });
+  }
+});
+
+test('F50 r1: a fresh redaction without its own tasks keeps the advice, a consolidation keeps the binding', () => {
+  const source = 'docs/contracts/journal.md';
+  const chain = Array.from({ length: 7 }, (_, i) =>
+    contract(`J-${i + 1}`, CONTRACT_CONTENT_WARN, { source }),
+  );
+  const ids = (cs: Contract[], tasks: unknown[]) =>
+    contractSizeChecks(cs, tasks as never).map((c) => c.id);
+  // Принятые задачи — только на прежней редакции; J-7 зарегистрирована под
+  // следующий этап и задач ещё не имеет: консолидировать её дешевле всего.
+  assert.deepEqual(ids(chain, [{ id: 'T-1', status: 'done', contracts: ['J-2'] }]), [
+    'contract-size:J-7',
+    'contract-consolidate:J-7',
+  ]);
+  // Консолидация J-7 равносильна ей: принятая задача на J-7 закрывает и её.
+  const consolidated = contract('J-8', CONTRACT_CONTENT_WARN, {
+    source,
+    previous: 'J-7',
+    consolidates: { from: 'J-7', review: 'R' },
+  });
+  assert.deepEqual(
+    ids([...chain, consolidated], [{ id: 'T-1', status: 'done', contracts: ['J-7'] }]),
+    [],
+  );
+  // Без задач на J-7 консолидация по-прежнему получает совет о размере.
+  assert.deepEqual(
+    ids([...chain, consolidated], [{ id: 'T-1', status: 'done', contracts: ['J-2'] }]),
+    ['contract-size:J-8'],
+  );
+});
+
+test('F50 r1: bound tasks are counted per component; a missing repositoryId is main', () => {
+  const source = 'docs/contracts/api.md';
+  const main = contract('M-1', CONTRACT_CONTENT_WARN, { source });
+  const mainExplicit = contract('M-1', CONTRACT_CONTENT_WARN, { source, repositoryId: 'main' });
+  const lib = contract('L-1', CONTRACT_CONTENT_WARN, { source, repositoryId: 'lib' });
+  const ids = (cs: Contract[], tasks: unknown[]) =>
+    contractSizeChecks(cs, tasks as never).map((c) => c.id);
+  // main закрыт принятой задачей, открытая задача — только у lib.
+  const tasks = [
+    { id: 'T-1', status: 'done', contracts: ['M-1'] },
+    { id: 'T-2', status: 'ready', contracts: ['L-1'] },
+  ];
+  assert.deepEqual(ids([main, lib], tasks), ['contract-size:L-1']);
+  assert.deepEqual(ids([mainExplicit, lib], tasks), ['contract-size:L-1']);
+  // Наоборот: lib закрыт, main открыт.
+  assert.deepEqual(
+    ids(
+      [main, lib],
+      [
+        { id: 'T-1', status: 'ready', contracts: ['M-1'] },
+        { id: 'T-2', status: 'done', contracts: ['L-1'] },
+      ],
+    ),
+    ['contract-size:M-1'],
+  );
+});
+
+test('F50 r1: malformed task records do not break doctor; a bound task without status is open', () => {
+  const c = contract('C-near', CONTRACT_CONTENT_WARN);
+  const ids = (tasks: unknown[]) => contractSizeChecks([c], tasks as never).map((x) => x.id);
+  const done = { id: 'T-1', status: 'done', contracts: ['C-near'] };
+  assert.deepEqual(ids([done, { id: 'T-2', status: 'ready' }]), []);
+  assert.deepEqual(ids([done, { id: 'T-3', status: 'ready', contracts: 'C-near' }]), []);
+  assert.deepEqual(ids([done, { id: 'T-4', contracts: ['C-near'] }]), ['contract-size:C-near']);
+  assert.deepEqual(ids([null, done]), []);
+});
+
+test('F50 r2: only a direct consolidation keeps the binding; a reference cycle terminates', () => {
+  const source = 'docs/contracts/journal.md';
+  const chain = Array.from({ length: 7 }, (_, i) =>
+    contract(`J-${i + 1}`, CONTRACT_CONTENT_WARN, { source }),
+  );
+  const done = [{ id: 'T-1', status: 'done', contracts: ['J-7'] }];
+  const ids = (cs: Contract[], tasks: unknown[]) =>
+    contractSizeChecks(cs, tasks as never).map((c) => c.id);
+  // Консолидация J-7, зарегистрированная не сразу за ней (previous J-6) или
+  // без previous, — не звено цепочки: принятая задача на J-7 её не закрывает.
+  for (const previous of ['J-6', undefined]) {
+    const j8 = contract('J-8', CONTRACT_CONTENT_WARN, {
+      source,
+      ...(previous ? { previous } : {}),
+      consolidates: { from: 'J-7', review: 'R' },
+    });
+    assert.ok(ids([...chain, j8], done).includes('contract-size:J-8'), String(previous));
+  }
+  // Повреждённые ссылки по кругу: проверка завершается.
+  const a = contract('A', CONTRACT_CONTENT_WARN, {
+    source: 'docs/contracts/loop.md',
+    previous: 'B',
+    consolidates: { from: 'B', review: 'R' },
+  });
+  const b = contract('B', CONTRACT_CONTENT_WARN, {
+    source: 'docs/contracts/loop.md',
+    previous: 'A',
+    consolidates: { from: 'A', review: 'R' },
+  });
+  assert.ok(Array.isArray(ids([a, b], [{ id: 'T-1', status: 'done', contracts: ['A', 'B'] }])));
+});
+
+test('F50 r2: a non-string id in a task contracts list does not hide its real binding', () => {
+  const c = contract('C-near', CONTRACT_CONTENT_WARN);
+  const ids = (tasks: unknown[]) => contractSizeChecks([c], tasks as never).map((x) => x.id);
+  assert.deepEqual(ids([{ id: 'T-1', status: 'done', contracts: [42, 'C-near'] }]), []);
+  assert.deepEqual(ids([{ id: 'T-1', status: 'ready', contracts: [42, 'C-near'] }]), [
+    'contract-size:C-near',
+  ]);
+});

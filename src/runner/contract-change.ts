@@ -1563,15 +1563,52 @@ export class ContractChanges {
   }
 
   /**
+   * Устаревшую операцию заменила более поздняя регистрация того же
+   * документа: редакция с тем же путём в том же репозитории, утверждённая
+   * после начала операции (другой операцией или без неё), или завершённая
+   * позднее начатая операция с тем же ключом. Продолжать её нечего:
+   * повтор нашёл бы документ уже зарегистрированным. Возвращает id
+   * заменившей записи. `all` и `unfinished` — уже прочитанные операции и
+   * их незавершённые регистрации, если вызывающий проверяет много операций.
+   */
+  supersededBy(
+    op: ContractChange,
+    contracts = this.h.store.read().contracts,
+    all = this.list(),
+    unfinished = this.unfinishedRegistrations(all),
+  ) {
+    if (op.status !== 'stale') return undefined;
+    const file = op.proposal?.file;
+    // Редакцию, которую зарегистрировала незавершённая операция (живая,
+    // отменённая, устаревшая — в том числе эта), закрепит или отвергнет она
+    // сама: заменой она не считается.
+    const registered = file
+      ? contracts.find(
+          (c) =>
+            c.source === file &&
+            (c.repositoryId ?? 'main') === op.owner &&
+            !unfinished.has(c.id) &&
+            c.approvedAt > op.startedAt,
+        )
+      : undefined;
+    if (registered) return registered.id;
+    return all.find(
+      (o) =>
+        o.id !== op.id &&
+        o.key === op.key &&
+        o.status === 'completed' &&
+        o.startedAt > op.startedAt,
+    )?.id;
+  }
+
+  /**
    * Редакции, которые зарегистрировала операция, не дошедшая до завершения
    * (живая, отменённая, заменённая, устаревшая): их переносит сама операция
    * или не переносит никто, но не снятие как контракта без операции.
    */
-  private unfinishedRegistrations() {
+  unfinishedRegistrations(all = this.list()) {
     return new Set(
-      this.list()
-        .filter((o) => o.contractId && o.status !== 'completed')
-        .map((o) => o.contractId!),
+      all.filter((o) => o.contractId && o.status !== 'completed').map((o) => o.contractId!),
     );
   }
 
