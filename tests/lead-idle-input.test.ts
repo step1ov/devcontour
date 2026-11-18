@@ -8,6 +8,7 @@ import { setTimeout as sleep } from 'node:timers/promises';
 import { controlled, inputDemos, inputFixture } from './input-fixture.ts';
 import { LeadRunner } from '../src/runner/lead-workflow.ts';
 import { LeadWorkflow } from '../src/core/lead-workflow.ts';
+import { executionOf } from '../src/harness/execution.ts';
 
 after(() => inputDemos.close());
 
@@ -39,6 +40,31 @@ test('F61: под паузой ведущего снятие блокирующ�
     await sleep(250);
     await lead.tick();
     assert.equal(claims, start, 'удержание под паузой ведущего');
+
+    // Задача с вопросом упала: отпечаток читает вопросы, но разбирает
+    // запросы только после записи данных.
+    const { engine } = executionOf(f.h);
+    let parses = 0;
+    const inputRequests = engine.inputRequests.bind(engine);
+    engine.inputRequests = (...args) => {
+      parses++;
+      return inputRequests(...args);
+    };
+    const print = () =>
+      (lead as unknown as { waitPrint(j: unknown, e: () => []): string }).waitPrint(
+        new LeadWorkflow(f.h).get(job.key, job.owner),
+        () => [],
+      );
+    const write = (i: number) =>
+      f.store.atomic(() => f.store.saveLocal('fixture-probe', undefined, 'k', i));
+    write(1);
+    print();
+    print();
+    assert.equal(parses, 1, 'два отпечатка без записи — один разбор');
+    write(2);
+    print();
+    assert.equal(parses, 2, 'после записи — новый разбор');
+    engine.inputRequests = inputRequests;
 
     f.service.cancel(
       { requestId: request.requestId, expectedVersion: request.version, reason: 'Not needed' },

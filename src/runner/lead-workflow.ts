@@ -169,6 +169,22 @@ export class LeadRunner {
     return s.paused && (s.pauseReason === 'operator' || s.pauseReason === 'runtime');
   }
   /**
+   * Блокирующие вопросы исполнителя по задачам: id задачи → id вопросов.
+   * Запись вопроса (ответ, снятие, замена) растит ревизию данных, поэтому
+   * карта перечитывается только после записи: долгое ожидание вопроса при
+   * упавшей задаче не разбирает все запросы на каждом такте.
+   */
+  private blockingQuestions() {
+    const revision = this.h.store.revision();
+    if (this.questions?.revision === revision) return this.questions.byWork;
+    const byWork = new Map<string, string[]>();
+    for (const r of executionOf(this.h).engine.inputRequests())
+      if (blocksWork(r)) byWork.set(r.workId, [...(byWork.get(r.workId) ?? []), r.id]);
+    this.questions = { revision, byWork };
+    return byWork;
+  }
+  private questions?: { revision: number; byWork: ReadonlyMap<string, readonly string[]> };
+  /**
    * Отпечаток того, чего может ждать стадия задания: само задание (вход,
    * попытки, восстановления), задачи его досок (статус, попытка,
    * восстановление, класс отказа) и их блокирующие вопросы исполнителя,
@@ -181,13 +197,6 @@ export class LeadRunner {
    * (`idleWait`); то, чего отпечаток не видит (Git, время), стадия
    * проверит не позже предела паузы.
    */
-  /** Блокирующие вопросы исполнителя по задачам: id задачи → id вопросов. */
-  private blockingQuestions() {
-    const byWork = new Map<string, string[]>();
-    for (const r of executionOf(this.h).engine.inputRequests())
-      if (blocksWork(r)) byWork.set(r.workId, [...(byWork.get(r.workId) ?? []), r.id]);
-    return byWork;
-  }
   private waitPrint(
     job: WorkflowJob,
     errors: () => ReturnType<typeof tickErrors>,
