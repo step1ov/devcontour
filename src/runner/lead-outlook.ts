@@ -416,7 +416,7 @@ export function stopperWarning(s: DevContourState, boardId: string) {
   return {
     jobStop: {
       taskId: stopper.id,
-      warning: `Задача ${stopper.id} ревизии доски ${boardId} отменена после выдачи (D46): любое задание ведущего этой ревизии остановится на ней, поэтому утверждённые здесь задачи никто не будет чинить и принимать; ${stopRoutes(stopper.id)}.`,
+      warning: `Задача ${stopper.id} ревизии доски ${boardId} ${stopper.cancelledBy === 'host' ? 'отменена ведущим после выдачи' : 'отменена человеком'} (D46): любое задание ведущего этой ревизии остановится на ней, поэтому утверждённые здесь задачи никто не будет чинить и принимать; ${stopRoutes(stopper.id)}.`,
     },
   };
 }

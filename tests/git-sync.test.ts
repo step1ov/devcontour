@@ -598,3 +598,57 @@ test('Отметка reused receipt сверяется с деревом result 
     f.cleanup();
   }
 });
+
+test('F73: перенос черновика одним clone и утверждение той же задачи другим не сливаются; перенос без встречного движения — сливается', () => {
+  const f = fixture();
+  try {
+    const a = f.create('alice'),
+      from = a.h.createBoard('Findings', '', 'main'),
+      to = a.h.createBoard('Mobile work', '', 'main');
+    const moved = a.h.addTask(from.id, input('Movable draft'));
+    const quiet = a.h.addTask(from.id, input('Quiet draft'));
+    syncGit(a.h, { member: 'alice' });
+    a.commit();
+    const b = f.create('bob', a);
+    syncGit(b.h, { member: 'bob' });
+    // Alice переносит оба черновика; Bob тем временем утверждает доску
+    // находок — и с ней переносимый черновик.
+    a.h.moveTask(moved.id, to.id, 'Triaged: belongs to the mobile board');
+    syncGit(a.h);
+    a.commit();
+    b.h.approve(from.id);
+    b.pull();
+    const before = canonical(b.store.read());
+    assert.throws(
+      () => syncGit(b.h),
+      new RegExp(`Задача ${moved.id} перенесена с доски ${from.id} на ${to.id}.*ready`),
+    );
+    assert.equal(canonical(b.store.read()), before, 'откат: база Bob не изменилась');
+    // Без встречного движения перенос сливается: второй черновик Alice
+    // переносит и сама утверждает на новой доске.
+    const c = f.create('carol', a);
+    syncGit(c.h, { member: 'carol' });
+    a.h.moveTask(quiet.id, to.id, 'Triaged: belongs to the mobile board too');
+    a.h.approve(to.id, [quiet.id]);
+    syncGit(a.h);
+    a.commit();
+    c.pull();
+    syncGit(c.h);
+    const s = c.store.read();
+    assert.ok(
+      s.boards
+        .find((x) => x.id === to.id)!
+        .revisions.at(-1)!
+        .taskIds.includes(quiet.id),
+    );
+    assert.ok(
+      !s.boards
+        .find((x) => x.id === from.id)!
+        .revisions.at(-1)!
+        .taskIds.includes(quiet.id),
+    );
+    assert.equal(s.tasks.find((t) => t.id === quiet.id)!.status, 'ready');
+  } finally {
+    f.cleanup();
+  }
+});

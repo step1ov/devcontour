@@ -2,7 +2,7 @@
 // перенос черновика на другую доску (F73), отмена выданной задачи и доска,
 // задание которой она остановила (F75), выпуск разобранных находок агентской
 // операцией plan_review (F76), ожидание досок заданием ChangeSet (F78).
-import { test } from 'node:test';
+import { after, test } from 'node:test';
 import assert from 'node:assert/strict';
 import { readFileSync, realpathSync } from 'node:fs';
 import { mkdir, mkdtemp, rm, writeFile } from 'node:fs/promises';
@@ -16,13 +16,20 @@ import { LeadWorkflow, WAITING_BOARDS } from '../src/core/lead-workflow.ts';
 import { Workspace } from '../src/core/workspace.ts';
 import { recordsFromState, stateFromRecords } from '../src/core/sync-state.ts';
 import { LeadRunner } from '../src/runner/lead-workflow.ts';
-import { cancelImpact } from '../src/runner/lead-outlook.ts';
+import { cancelImpact, stopperWarning } from '../src/runner/lead-outlook.ts';
 import { AgentService } from '../src/application/agent.ts';
-import { devcontourHandoff, handoffResponse } from '../src/application/handoff.ts';
+import {
+  devcontourHandoff,
+  devcontourHandoffWithin,
+  handoffResponse,
+} from '../src/application/handoff.ts';
 import { workflowStatus } from '../src/application/workflow-status.ts';
 import type { AgentAdapter, AgentRequest } from '../src/runner/adapters.ts';
 import { command } from '../src/runner/process.ts';
 import { cliCommand } from './cli-command.ts';
+import { controlled, inputDemos, inputFixture } from './input-fixture.ts';
+
+after(() => inputDemos.close());
 
 const finding = (path: string, title = 'Finding at ' + path) => ({
   kind: 'bug' as const,
@@ -572,52 +579,77 @@ test('F75: стадия 0 не останавливается на невыда�
   } finally {
     f.cleanup();
   }
-  const g = fixture();
-  try {
-    g.h.config.mode = 'local';
-    const b = g.h.createBoard('Race', '', 'main');
-    const issued = g.h.addTask(b.id, input('Issued'));
-    g.h.approve(b.id);
-    g.h.pause(false);
-    const run = g.h.claim('writer')!;
-    g.h.fail(run.id, run.token, 'gate failed', false, 'gate');
-    const replacement = g.h.addTask(b.id, input('Replacement'));
-    const flow = new LeadWorkflow(g.h);
-    const job = flow.start({ kind: 'board', id: b.id, authorRuntime: 'codex' });
-    // Ревьюер одобряет, а пока он думает, ведущий отменяет выданную задачу.
-    const proposals: Record<string, unknown>[] = [];
-    const approve = reviewer(proposals);
-    const racing = {
-      codex: {
-        ...approve.codex,
+  // Отмена во время ревью (её видит проверка после ревью) и отмена между
+  // проверкой после ревью и транзакцией утверждения (её видит только
+  // проверка внутри транзакции).
+  for (const when of ['review', 'commit'] as const) {
+    const g = fixture();
+    try {
+      g.h.config.mode = 'local';
+      const b = g.h.createBoard('Race', '', 'main');
+      const issued = g.h.addTask(b.id, input('Issued'));
+      g.h.approve(b.id);
+      g.h.pause(false);
+      const run = g.h.claim('writer')!;
+      g.h.fail(run.id, run.token, 'gate failed', false, 'gate');
+      const replacement = g.h.addTask(b.id, input('Replacement'));
+      const flow = new LeadWorkflow(g.h);
+      const job = flow.start({ kind: 'board', id: b.id, authorRuntime: 'codex' });
+      const cancel = () => g.h.cancel(issued.id, 'Cancelled during plan review', 'host');
+      const proposals: Record<string, unknown>[] = [];
+      const approve = reviewer(proposals);
+      let armed = false;
+      const racing = (name: 'codex' | 'claude'): AgentAdapter => ({
+        ...approve[name],
         async execute(r: AgentRequest) {
-          g.h.cancel(issued.id, 'Cancelled during plan review', 'host');
-          return approve.codex.execute(r);
+          if (when === 'review') cancel();
+          const result = await approve[name].execute(r);
+          armed = when === 'commit';
+          return result;
         },
-      },
-      claude: {
-        ...approve.claude,
-        async execute(r: AgentRequest) {
-          g.h.cancel(issued.id, 'Cancelled during plan review', 'host');
-          return approve.claude.execute(r);
-        },
-      },
-    };
-    const runner = new LeadRunner(g.h, g.root, racing);
-    const claimed = flow.claim(job.key, 'main')!;
-    await assert.rejects(
-      runner.execute(claimed, new AbortController().signal),
-      new RegExp(`^Error: ${issued.id}: `),
-    );
-    assert.equal(proposals.length, 1, 'ревью было');
-    assert.equal(
-      g.store.read().tasks.find((t) => t.id === replacement.id)!.status,
-      'draft',
-      'утверждение после отмены не записано',
-    );
-    await runner.stop();
-  } finally {
-    g.cleanup();
+      });
+      const runner = new LeadRunner(g.h, g.root, {
+        codex: racing('codex'),
+        claude: racing('claude'),
+      });
+      // Первая проверка задания после ревью — проверка перед транзакцией
+      // утверждения; следующая транзакция — само утверждение. Отмена — прямо
+      // перед ней, вне её (другой писатель), уже после проверки.
+      const workflow = (runner as unknown as { workflow: LeadWorkflow }).workflow;
+      const check = workflow.guard.bind(workflow);
+      let checked = false;
+      workflow.guard = (j: Parameters<typeof check>[0]) => {
+        if (armed) checked = true;
+        return check(j);
+      };
+      const atomic = g.h.store.atomic.bind(g.h.store);
+      let late = 0;
+      g.h.store.atomic = <T>(fn: () => T): T => {
+        if (checked) {
+          armed = checked = false;
+          late++;
+          cancel();
+        }
+        return atomic(fn);
+      };
+      const claimed = flow.claim(job.key, 'main')!;
+      await assert.rejects(
+        runner.execute(claimed, new AbortController().signal),
+        new RegExp(`^Error: ${issued.id}: `),
+      );
+      assert.equal(proposals.length, 1, 'ревью было');
+      if (when === 'commit') assert.equal(late, 1, 'отмена между проверкой и транзакцией');
+      const s = g.store.read();
+      assert.equal(s.tasks.find((t) => t.id === issued.id)!.status, 'cancelled');
+      assert.equal(
+        s.tasks.find((t) => t.id === replacement.id)!.status,
+        'draft',
+        'утверждение после отмены не записано',
+      );
+      await runner.stop();
+    } finally {
+      g.cleanup();
+    }
   }
 });
 
@@ -643,6 +675,62 @@ test('F73: Git sync не объединяет задачу на двух дос�
       () => stateFromRecords(f.h, state, recordsFromState(f.h, merged), new Map()),
       new RegExp(`Задача ${t.id} на двух досках`),
     );
+  } finally {
+    f.cleanup();
+  }
+});
+
+test('F78: пакет в пределе ответа ужимает ожидание ChangeSet без потери id вопросов; Markdown строится', async () => {
+  const runtimes = controlled();
+  const f = await inputFixture(runtimes);
+  try {
+    const { boardId } = f.askingTask('Asking A');
+    const flow = new LeadWorkflow(f.h);
+    const job = flow.start({ kind: 'board', id: boardId, authorRuntime: 'codex' });
+    const lead = new LeadRunner(f.h, f.root, runtimes);
+    await lead.tick(); // согласование (demo)
+    await lead.tick(); // выдача
+    await f.scheduler.drain();
+    await lead.tick();
+    await lead.tick();
+    await lead.stop();
+    const asked = flow.waitingOf(flow.get(job.key, job.owner));
+    assert.equal(asked?.kind, 'input', JSON.stringify(asked));
+    const requestIds = (asked as { requestIds: string[] }).requestIds;
+    const change = new Workspace(f.h).create({
+      title: 'Release r1',
+      description: 'Joint verification of the release boards.',
+      boardIds: [boardId],
+    });
+    flow.start({ kind: 'changeset', id: change.id, authorRuntime: 'codex' });
+    // Без предела — полный вид; в тесном пределе ожидание ужато, но причина
+    // `input` держит свои id, а Markdown пакета их называет.
+    for (const limit of [undefined, { bytes: 3000, format: 'md' as const }]) {
+      const { value } = devcontourHandoffWithin(f.h, {}, limit);
+      const [entry] = value.host.changesets ?? [];
+      assert.equal(entry?.changeSetId, change.id);
+      assert.deepEqual(entry.waiting.boards[0].blocker, { kind: 'input', requestIds });
+      assert.match(handoffResponse(value, 'md').markdown ?? '', new RegExp(requestIds[0]));
+    }
+  } finally {
+    await f.cleanup();
+  }
+});
+
+test('F75: черновик, отменённый человеком, — тоже стоппер ревизии; текст не называет его выданным', () => {
+  const f = fixture();
+  try {
+    const b = f.h.createBoard('Owner trimmed', '', 'main');
+    f.h.addTask(b.id, input('Keep'));
+    const drop = f.h.addTask(b.id, input('Drop'));
+    f.h.cancel(drop.id, 'Not needed by the owner', 'operator');
+    const warning = stopperWarning(f.store.read(), b.id).jobStop?.warning ?? '';
+    assert.match(warning, new RegExp(`${drop.id} ревизии доски .* отменена человеком \\(D46\\)`));
+    assert.doesNotMatch(warning, /после выдачи \(D46\)/);
+    const next = devcontourHandoff(f.h).host.next;
+    assert.equal(next?.code, 'plan-unapproved', JSON.stringify(next));
+    assert.equal((next?.params as { stopper?: string }).stopper, drop.id);
+    assert.match(next.detail, /was cancelled by a person or after issue \(D46\)/);
   } finally {
     f.cleanup();
   }

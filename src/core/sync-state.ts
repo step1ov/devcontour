@@ -580,6 +580,56 @@ export function receiptHolds(h: DevContour, s: DevContourState, t: Task) {
   }
 }
 
+/** Доска каждой задачи и запись задачи по записям всех областей. */
+function placementOf(groups: Iterable<Records>) {
+  const boards = new Map<string, string>();
+  const tasks = new Map<string, Records[string]>();
+  for (const records of groups)
+    for (const record of Object.values(records)) {
+      if (record.kind === 'board')
+        for (const r of record.data.revisions)
+          for (const id of r.taskIds) boards.set(id, record.data.id);
+      if (record.kind === 'task') tasks.set(record.data.id, record);
+    }
+  return { boards, tasks };
+}
+
+/**
+ * Перенос черновика (`moveTask`, F73) и движение задачи в другом clone не
+ * объединяются: записи доски и задачи сливаются по отдельности, и перенос
+ * одной стороны вместе с утверждением или выдачей другой давал бы
+ * утверждённую или выданную задачу на новой доске — в обход правила
+ * переноса (только невыданный черновик, D46). Перенос допустим, если
+ * задача после слияния — черновик, или другая сторона её запись не меняла
+ * (утвердил задачу на новой доске сам переносивший).
+ */
+export function assertMergedMoves(
+  base: Iterable<Records>,
+  local: Iterable<Records>,
+  remote: Iterable<Records>,
+  merged: Iterable<Records>,
+) {
+  const [b, l, r, m] = [base, local, remote, merged].map(placementOf);
+  for (const [id, to] of m.boards) {
+    const from = b.boards.get(id);
+    if (from === undefined || from === to) continue;
+    const task = m.tasks.get(id);
+    if (task?.kind !== 'task' || task.progress.status === 'draft') continue;
+    for (const [mover, other] of [
+      [l, r],
+      [r, l],
+    ])
+      if (
+        mover.boards.get(id) === to &&
+        other.boards.get(id) !== to &&
+        canonical(other.tasks.get(id)) !== canonical(b.tasks.get(id))
+      )
+        throw new Error(
+          `Задача ${id} перенесена с доски ${from} на ${to} в одном clone, а в другом изменилась (статус после слияния — ${task.progress.status}): перенос допустим только для невыданного черновика. Верните задачу на доску ${from} в clone, где её переносили, и повторите sync`,
+        );
+  }
+}
+
 // Shared records are peer attestations from a reviewed Git repository. They never
 // recreate worker credentials, leases, processes, local reports or workspace acceptance.
 export function stateFromRecords(

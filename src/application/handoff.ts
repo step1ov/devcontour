@@ -1994,8 +1994,10 @@ export function devcontourHandoffWithin(
           budget > 0 && i < 3 ? discussionOf(budget) : { requests: [], omitted: true },
         );
       }
-      // Последним уступает место ожидание ChangeSet: без текстов ошибок и id
-      // вопросов, только доски и вид причины (подробности — workflow_status).
+      // Последним уступает место ожидание ChangeSet: без текстов ошибок
+      // заданий (подробности — workflow_status). Id вопросов короткие и
+      // остаются: причина `input` без них не соответствовала бы своему виду,
+      // а Markdown пакета их перечисляет.
       if (
         changesets &&
         bytes(handoffResponse({ pack: fitted, host, locale }, limit.format)) > limit.bytes
@@ -2007,7 +2009,7 @@ export function devcontourHandoffWithin(
             boards: c.waiting.boards.map((b) => ({
               boardId: b.boardId,
               ...(b.job ? { job: b.job } : {}),
-              blocker: { kind: b.blocker.kind } as BoardBlocker,
+              blocker: errorless(b.blocker),
             })),
           },
         }));
@@ -2040,6 +2042,10 @@ export function handoffResponse(value: DevContourHandoff, format: HandoffFormat)
       }
     : { format, pack, host, commands };
 }
+
+/** Причина ожидания доски без текста ошибки задания (пакет в пределе ответа). */
+const errorless = (b: BoardBlocker): BoardBlocker =>
+  b.kind === 'job-failed' ? { kind: 'job-failed' } : b;
 
 /** Причина ожидания доски ChangeSet в Markdown пакета. */
 function blockerText(b: BoardBlocker) {
