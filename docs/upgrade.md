@@ -2045,7 +2045,7 @@ same-vendor-allowed`) само выбирает этому автору ревь
   событием `contract-change.queue-resumed` (операция и причина), а не только
   запуском очереди. Миграции нет.
 
-### После 0.4.0-alpha.45
+### 0.4.0-alpha.46
 
 - **Движок devcontour-harness 0.1.0-alpha.50.** Зависимость закреплена на
   точной версии из npm. `stateVersion`, `policyVersion` и `manifestVersion`
