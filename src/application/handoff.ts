@@ -704,7 +704,9 @@ function boardDraft(boardId: string, ctx: HostContext): HostNextDraft | undefine
   const job = jobs.find((j) => ctx.current(j));
   const error = job?.error ? { error: job.error } : {};
   // Доска без неотменённых задач (см. выше): шаг — только остановка D46
-  // упавшего задания, повторяемого или исчерпанного.
+  // упавшего задания (`cancelledStop`): `job-cancelled-task`, пока попытки
+  // задания остались, и `job-exhausted`, когда остановка та же, а попытки
+  // исчерпаны. Без такой остановки шага нет.
   if (closed) {
     if (job?.status !== 'failed') return undefined;
     const { outlook: loop } = loopAhead(h, state, { ...asLead(job), status: 'queued' });

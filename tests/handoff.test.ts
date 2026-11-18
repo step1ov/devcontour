@@ -30,12 +30,16 @@ import { loopAhead, pauseStep, tickErrors } from '../src/runner/lead-outlook.ts'
 import { LeadWorkflow } from '../src/core/lead-workflow.ts';
 import { BASE_HELD_DETAIL } from '../src/runner/base-check.ts';
 import { DevContourExecutionStore } from '../src/harness/store.ts';
+import { executionOf } from '../src/harness/execution.ts';
 import { projectionOptions } from '../src/harness/host.ts';
 import {
   AGENT_HANDOFF_BYTES,
   HANDOFF_FULL_HINT,
+  boardStep,
   devcontourHandoff,
   devcontourHandoffWithin,
+  harnessOf,
+  hostContext,
   handoffRedactor,
   handoffResponse,
   withoutIdleControllerStop,
@@ -2177,6 +2181,45 @@ test('session_handoff: паузу снимут задания двух досо�
     assert.equal(next?.code, 'pause-lift', JSON.stringify(next));
     assert.equal(next?.boardId, live.id);
     assert.equal(next?.job?.key, liveJob.key);
+  } finally {
+    f.cleanup();
+  }
+});
+
+test('session_handoff: доска без задач ревизии — не «все задачи отменены»: шаг доски остаётся рядом с действующим заданием', () => {
+  const f = fixture();
+  try {
+    const flow = new LeadWorkflow(f.h);
+    const empty = f.h.createBoard('Emptied board', '', 'main');
+    f.h.addTask(empty.id, input('Approved task'));
+    f.h.approve(empty.id);
+    const job = flow.start({ kind: 'board', id: empty.id, authorRuntime: 'codex', maxAttempts: 3 });
+    flow.fail(flow.claim(job.key, job.owner)!, 'plan review runtime unavailable');
+    const live = f.h.createBoard('Running board', '', 'main');
+    f.h.addTask(live.id, input('Running board task'));
+    f.h.approve(live.id);
+    flow.start({ kind: 'board', id: live.id, authorRuntime: 'codex', maxAttempts: 3 });
+    // Ревизия без задач: ни одной отменённой — доска не брошена.
+    f.store.change('fixture.empty-revision', (s) => {
+      s.boards.find((b) => b.id === empty.id)!.revisions.at(-1)!.taskIds = [];
+    });
+    const harness = harnessOf(f.h);
+    const { store } = executionOf(f.h);
+    const step = store.read((v) => {
+      const ctx = hostContext(f.h, harness, v, store.stateOf(v), () => devcontourHandoff(f.h).pack);
+      assert.deepEqual(
+        [...new Set(ctx.jobs.filter(ctx.live).map((j) => j.id))],
+        [live.id],
+        'действующее задание — у другой доски',
+      );
+      return boardStep(empty.id, ctx);
+    });
+    assert.ok(step, 'у доски без задач шаг есть');
+    assert.equal(step.boardId, empty.id);
+    assert.ok(
+      ['fix-input', 'workflow_start', 'workflow_retry', 'decide'].includes(step.action),
+      JSON.stringify(step),
+    );
   } finally {
     f.cleanup();
   }
