@@ -3250,8 +3250,8 @@ export function App() {
                                   {check.kind === 'not-applicable'
                                     ? notApplicableLine(check.notApplicable)
                                     : verdictWord(check)}
-                                  {check.reused ? ` · ${REUSED_LABEL}` : ''}{' '}
-                                  · <code>{check.sha.slice(0, 12)}</code>
+                                  {check.reused ? ` · ${REUSED_LABEL}` : ''} ·{' '}
+                                  <code>{check.sha.slice(0, 12)}</code>
                                 </li>
                               ),
                             )}
