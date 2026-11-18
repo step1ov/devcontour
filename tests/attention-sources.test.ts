@@ -452,6 +452,118 @@ test('S13 упавшая операция изменения контракта 
   }
 });
 
+test('S13 устаревшая операция: карточка называет отказ, заменённая позднее зарегистрированной редакцией — снята', async () => {
+  const f = fixture();
+  try {
+    const op = 'CC-' + randomUUID();
+    const later = 'CC-' + randomUUID();
+    const stale = (id: string, file: string) => ({
+      id,
+      key: digest({ owner: 'main', source: file }),
+      owner: 'main',
+      status: 'stale',
+      version: 3,
+      step: 2,
+      order: 3,
+      proposal: { title: 'API', file },
+      error: 'Рабочая ветка сдвинулась (aaaa → bbbb): начните операцию заново по текущей редакции',
+      held: [],
+      startedAt: '2026-01-01T00:00:00.000Z',
+      history: [{ at: '2026-01-01T00:01:00.000Z', step: 'review', event: 'stale' }],
+    });
+    f.store.atomic(() => {
+      f.store.saveLocal('contract-change', 'main', op, stale(op, 'docs/api.md'));
+      f.store.saveLocal('contract-change', 'main', later, stale(later, 'docs/other.md'));
+    });
+    const card = byKey(await engineItems(f), `contract-change:${op}`)!;
+    assert.ok(card, 'не заменённая устаревшая операция видна ведущему');
+    assert.match(card.title, /устарело/);
+    assert.match(card.reason, new RegExp(`contract-change --id ${op} --abandon`));
+    // Тот же документ зарегистрирован позднее: другой операцией или без неё.
+    f.store.change('fixture.registered', (s) => {
+      s.contracts.push({
+        id: 'C-api-later',
+        repositoryId: 'main',
+        title: 'API',
+        content: 'api',
+        digest: 'd'.repeat(64),
+        source: 'docs/api.md',
+        approvedAt: '2026-01-02T00:00:00.000Z',
+      });
+      // Регистрация того же пути до начала операции её не заменяет.
+      s.contracts.push({
+        id: 'C-other-earlier',
+        repositoryId: 'main',
+        title: 'Other',
+        content: 'other',
+        digest: 'e'.repeat(64),
+        source: 'docs/other.md',
+        approvedAt: '2025-12-31T00:00:00.000Z',
+      });
+      return {};
+    });
+    const items = await engineItems(f);
+    assert.equal(byKey(items, `contract-change:${op}`), undefined, 'заменённая — не внимание');
+    assert.ok(byKey(items, `contract-change:${later}`), 'более ранняя регистрация не заменяет');
+    // По ключу: завершённая позднее начатая операция того же документа.
+    const done = 'CC-' + randomUUID();
+    f.store.atomic(() =>
+      f.store.saveLocal('contract-change', 'main', done, {
+        ...stale(done, 'docs/other.md'),
+        status: 'completed',
+        startedAt: '2026-01-03T00:00:00.000Z',
+        finishedAt: '2026-01-03T00:05:00.000Z',
+      }),
+    );
+    assert.equal(byKey(await engineItems(f), `contract-change:${later}`), undefined);
+  } finally {
+    f.cleanup();
+  }
+});
+
+test('S13 заменённая устаревшая операция, всё ещё удерживающая задачу, остаётся с отказом', async () => {
+  const f = fixture();
+  try {
+    const b = f.h.createBoard('Board');
+    const held = f.h.addTask(b.id, input('Held'));
+    f.h.approve(b.id);
+    const op = 'CC-' + randomUUID();
+    f.h.hold([held.id], op, 'contract change');
+    f.store.atomic(() =>
+      f.store.saveLocal('contract-change', 'main', op, {
+        id: op,
+        key: digest({ owner: 'main', source: 'docs/api.md' }),
+        owner: 'main',
+        status: 'stale',
+        version: 3,
+        proposal: { title: 'API', file: 'docs/api.md' },
+        error: 'начните операцию заново по текущей редакции',
+        held: [held.id],
+        startedAt: '2026-01-01T00:00:00.000Z',
+        history: [{ at: '2026-01-01T00:01:00.000Z', step: 'review', event: 'stale' }],
+      }),
+    );
+    f.store.change('fixture.registered', (s) => {
+      s.contracts.push({
+        id: 'C-api-later',
+        repositoryId: 'main',
+        title: 'API',
+        content: 'api',
+        digest: 'd'.repeat(64),
+        source: 'docs/api.md',
+        approvedAt: '2026-01-02T00:00:00.000Z',
+      });
+      return {};
+    });
+    const card = byKey(await engineItems(f), `contract-change:${op}`)!;
+    assert.ok(card, 'удержание задачи не скрывается');
+    assert.match(card.reason, new RegExp(`contract-change --id ${op} --abandon`));
+    assert.deepEqual(card.impact.taskIds, [held.id]);
+  } finally {
+    f.cleanup();
+  }
+});
+
 test('S14 ожидание блокировки контекста и подтверждения переноса базы', async () => {
   const f = fixture();
   try {

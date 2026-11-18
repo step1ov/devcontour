@@ -1563,6 +1563,36 @@ export class ContractChanges {
   }
 
   /**
+   * Устаревшую операцию заменила более поздняя регистрация того же
+   * документа: редакция с тем же путём в том же репозитории, утверждённая
+   * после начала операции (другой операцией или без неё), или завершённая
+   * позднее начатая операция с тем же ключом. Продолжать её нечего:
+   * повтор нашёл бы документ уже зарегистрированным. Возвращает id
+   * заменившей записи.
+   */
+  supersededBy(op: ContractChange, contracts = this.h.store.read().contracts) {
+    if (op.status !== 'stale') return undefined;
+    const file = op.proposal?.file;
+    const registered = file
+      ? contracts.find(
+          (c) =>
+            c.source === file &&
+            (c.repositoryId ?? op.owner) === op.owner &&
+            c.id !== op.contractId &&
+            c.approvedAt > op.startedAt,
+        )
+      : undefined;
+    if (registered) return registered.id;
+    return this.list().find(
+      (o) =>
+        o.id !== op.id &&
+        o.key === op.key &&
+        o.status === 'completed' &&
+        o.startedAt > op.startedAt,
+    )?.id;
+  }
+
+  /**
    * Редакции, которые зарегистрировала операция, не дошедшая до завершения
    * (живая, отменённая, заменённая, устаревшая): их переносит сама операция
    * или не переносит никто, но не снятие как контракта без операции.

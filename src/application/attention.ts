@@ -722,12 +722,20 @@ const contractChangeSource: AttentionSourceRule = {
   collect: (ctx) => {
     const { h } = engineOf(ctx);
     const changes = new ContractChanges(h, ctx.root ?? '');
+    // Задачи, которые операция действительно удерживает (а не только
+    // перечислила когда-то): их удержание снимает лишь отказ от операции.
+    const holding = (op: { id: string }) =>
+      ctx.state.tasks.some((t) => t.hold?.operation === op.id && open(t));
     return changes
       .list()
       .filter(
         (op) =>
           op.status === 'failed' ||
-          op.status === 'stale' ||
+          // Устаревшая операция, чей документ позднее зарегистрирован, не
+          // требует действия и уходит из внимания (история её хранит), пока
+          // не удерживает задачи.
+          (op.status === 'stale' &&
+            (holding(op) || !changes.supersededBy(op, ctx.state.contracts))) ||
           changes.stalledWait(op) ||
           changes.interrupted(op, ctx.now),
       )
@@ -766,7 +774,15 @@ const contractChangeSource: AttentionSourceRule = {
               ? `Процесс, ведший операцию, прервался на шаге ${changes.view(op).next ?? '—'}; продолжите: contract-change --id ${op.id}`
               : stalled
                 ? `Операции ${(op.waitingFor ?? []).join(', ')}, которых ждёт перенос базы, больше не идут к базе. Продолжите: contract-change --id ${op.id} — перенос, отказ с выходом или новое ожидание`
-                : (op.error ?? 'Причина не записана'),
+                : op.status === 'stale'
+                  ? // Команда — впереди: длинная причина обрезается по пределу
+                    // карточки, а продолжить устаревшую операцию нельзя.
+                    `${
+                      changes.supersededBy(op, ctx.state.contracts)
+                        ? 'Документ уже зарегистрирован позднее, но операция удерживает задачи'
+                        : 'Продолжить устаревшую операцию нельзя'
+                    }: отмените её — contract-change --id ${op.id} --abandon — и при необходимости начните новую по текущей редакции. ${op.error ?? 'Причина не записана'}`
+                  : (op.error ?? 'Причина не записана'),
           ),
           since: entered,
           subject: { kind: 'operation', id: op.id, href: hrefs.contracts() },
