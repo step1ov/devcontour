@@ -357,6 +357,70 @@ export class LeadWorkflow {
     for (const id of fresh) stale.delete(id);
     return stale;
   }
+  /**
+   * Задания досок, начатые по прежнему входу, которые уже не продолжатся
+   * (F66): действующее задание (queued, running) с устаревшим входом — то же,
+   * что `staleBoards` (очередь закроет его `stale` лишь при следующем взятии
+   * стадии), — или уже закрытое `stale`, если оно последнее задание доски и
+   * его вход сменила записанная перепривязка задач после его старта
+   * (`rebound`: операция изменения контракта). Давно брошенная доска со
+   * `stale` без такой перепривязки сюда не входит. Доска с заданием по
+   * текущему входу, доска со всеми отменёнными задачами и доска, вход
+   * которой не построить, не входят. Чтение, без записи.
+   */
+  invalidated(
+    boardIds: readonly string[] | undefined,
+    s: DevContourState = this.h.store.read(),
+    rebound: (boardId: string, since: string) => boolean = () => false,
+  ) {
+    const active = this.staleBoards(s);
+    const fresh = new Set<string>();
+    const latest = new Map<string, WorkflowJob>();
+    const inputs = new Map<string, { digest: string; owner?: string } | undefined>();
+    const bound = (id: string) => {
+      if (!inputs.has(id))
+        try {
+          inputs.set(id, this.input('board', id, s));
+        } catch (error) {
+          if (!(error instanceof DomainError)) throw error;
+          inputs.set(id, undefined);
+        }
+      return inputs.get(id);
+    };
+    for (const owner of [undefined, ...repositories(this.h.config).map((r) => r.id)])
+      for (const job of this.list(owner)) {
+        if (job.kind !== 'board' || (boardIds && !boardIds.includes(job.id))) continue;
+        const seen = latest.get(job.id);
+        if (!seen || job.startedAt > seen.startedAt) latest.set(job.id, job);
+        const input = bound(job.id);
+        if (input && input.digest === job.inputDigest && input.owner === job.owner)
+          fresh.add(job.id);
+      }
+    const closed = (id: string) => {
+      const ids = s.boards.find((b) => b.id === id)?.revisions.at(-1)?.taskIds ?? [];
+      return (
+        !!ids.length && ids.every((t) => s.tasks.find((x) => x.id === t)?.status === 'cancelled')
+      );
+    };
+    return [...latest.values()]
+      .filter(
+        (job) =>
+          !fresh.has(job.id) &&
+          !!bound(job.id) &&
+          !closed(job.id) &&
+          (active.get(job.id)?.key === job.key ||
+            (job.status === 'stale' && rebound(job.id, job.startedAt))),
+      )
+      .map((job) => ({
+        boardId: job.id,
+        key: job.key,
+        ...(job.owner ? { repositoryId: job.owner } : {}),
+        status: job.status,
+        stage: job.stage,
+        startedAt: job.startedAt,
+        authorRuntime: job.authorRuntime,
+      }));
+  }
   get(key: string, owner?: string) {
     return domain(() => this.queue().get(key, owner)) as WorkflowJob;
   }

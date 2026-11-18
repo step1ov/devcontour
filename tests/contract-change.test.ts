@@ -15,7 +15,9 @@ import { type AgentAdapter, type AgentRequest } from '../src/runner/adapters.ts'
 import { readyTasks } from '../src/core/graph.ts';
 import { command } from '../src/runner/process.ts';
 import { reviewers, stage } from './contract-change-fixture.ts';
-import { withQuotedGitPaths } from './helpers.ts';
+import { input, withQuotedGitPaths } from './helpers.ts';
+import { LeadWorkflow } from '../src/core/lead-workflow.ts';
+import { devcontourHandoff } from '../src/application/handoff.ts';
 import { cliCommand } from './cli-command.ts';
 
 test('A contract change runs as one command: review, rebind, plan review, base and release', async () => {
@@ -564,4 +566,60 @@ test('A contract artifact with a Cyrillic path moves to the base: it is not work
       await s.remove();
     }
   });
+});
+
+test('F66: a rebind that invalidates a running board job names the job and the restart; session_handoff proposes it before an unrelated plan', async () => {
+  const s = await stage();
+  try {
+    const lead = new LeadWorkflow(s.h);
+    const job = lead.start({ kind: 'board', id: s.board.id, authorRuntime: 'codex' });
+    const running = lead.claim(job.key, job.owner);
+    assert.equal(running?.status, 'running');
+    // Несвязанная доска с несогласованным планом.
+    const other = s.h.createBoard('Unrelated plan');
+    s.h.addTask(other.id, input('Unrelated draft'));
+    // Очередь шла: перенос базы операцией оставляет её на ожидании проверки базы.
+    s.h.pause(false);
+    const started = await s.changes().start(s.proposal, 'codex');
+    const done = await s.changes().advance((started as { operation: ContractChange }).operation.id);
+    assert.equal(done.status, 'completed', done.error);
+    // Результат операции называет задание, которое перепривязка сделала
+    // устаревшим, и шаг: новое задание доски.
+    assert.deepEqual(
+      done.boardJobs?.jobs.map((j) => ({ boardId: j.boardId, key: j.key, status: j.status })),
+      [{ boardId: s.board.id, key: job.key, status: 'running' }],
+    );
+    assert.match(
+      done.boardJobs?.next ?? '',
+      new RegExp(
+        `workflow_start \\{"kind": "board", "id": "${s.board.id}", "authorRuntime": "codex"\\}`,
+      ),
+    );
+    const handoff = devcontourHandoff(s.h, {});
+    assert.deepEqual(handoff.host.liveBoards, []);
+    const next = handoff.host.next;
+    assert.equal(next?.action, 'workflow_start', JSON.stringify(next));
+    assert.equal(next?.code, 'board-restart');
+    assert.equal(next?.boardId, s.board.id);
+    assert.equal(next?.job?.key, job.key);
+    assert.equal(next?.params.operation, done.id);
+    assert.match(next?.detail ?? '', new RegExp(done.id));
+    // Очередь на ожидании проверки базы, которое снимает только задание
+    // доски: шаг тот же — перезапуск, а не решение о чужом плане.
+    s.store.change('fixture', (st) => {
+      const at = new Date().toISOString();
+      st.paused = true;
+      st.pauseReason = 'base-check';
+      st.pausedAt = at;
+      st.waits = [{ kind: 'base-check', at, detail: 'База перенесена: проверка gates' }];
+      return {};
+    });
+    assert.equal(devcontourHandoff(s.h, {}).host.next?.code, 'board-restart');
+    // Новое задание по текущему входу снимает и шаг, и запись операции.
+    lead.start({ kind: 'board', id: s.board.id, authorRuntime: 'codex' });
+    assert.equal(s.changes().view(s.changes().get(done.id)).boardJobs, undefined);
+    assert.notEqual(devcontourHandoff(s.h, {}).host.next?.code, 'board-restart');
+  } finally {
+    await s.remove();
+  }
 });

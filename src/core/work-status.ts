@@ -72,6 +72,14 @@ export const pausedByLead = (
   state.pauseActor?.by === 'lead' &&
   state.pauseActor.at === state.pausedAt;
 
+/** Предел короткой причины паузы ведущего (`queue_set {"reason"}`), в знаках. */
+export const PAUSE_REASON_CHARS = 300;
+
+/** Причина действующей паузы ведущего, если он её назвал. */
+export const leadPauseNote = (
+  state: Pick<DevContourState, 'paused' | 'pauseReason' | 'pausedAt' | 'pauseActor'>,
+) => (pausedByLead(state) ? state.pauseActor?.reason : undefined);
+
 /** Ожидание проверки базы, перенос которой задел приёмку или настройку контура (`base.check.held`). */
 export const heldBaseWait = (detail: string | undefined) =>
   !!detail && /меняет приёмку или настройку контура/.test(detail);
@@ -286,7 +294,10 @@ export function queueStopView(
     switch (reason) {
       case 'operator':
         return [
-          lead ? 'Выдача остановлена ведущим агентом (queue_set)' : 'Выдача остановлена человеком',
+          lead
+            ? 'Выдача остановлена ведущим агентом (queue_set)' +
+              (state.pauseActor?.reason ? ': ' + state.pauseActor.reason : '')
+            : 'Выдача остановлена человеком',
           agent && !lead
             ? 'Паузу человека снимает пользователь («Запустить очередь» в панели); ведущий агент без его решения её не снимает'
             : start,

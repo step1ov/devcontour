@@ -223,6 +223,24 @@ const samples: { [C in HintCode]: (HintSubject & Extract<HintOf, { code: C }>)[]
     { code: 'board-start', params: { running: true }, boardId: 'board-1', job },
     { code: 'board-start', params: { running: false }, boardId: 'board-1' },
   ],
+  'board-restart': [
+    {
+      code: 'board-restart',
+      params: { running: false, authorRuntime: 'codex', operation: 'CC-1', others: ['board-2'] },
+      boardId: 'board-1',
+      job: { ...job, status: 'running' },
+    },
+    {
+      code: 'board-restart',
+      params: {
+        running: true,
+        authorRuntime: 'claude',
+        leadPause: { reason: 'waiting for the schema' },
+      },
+      boardId: 'board-1',
+      job,
+    },
+  ],
   'pause-lift': [
     {
       code: 'pause-lift',
@@ -548,8 +566,20 @@ test('Подсказки шага: новая конфигурация setup п�
  * неизвестным диапазоном подтверждает оператор (ревью 3).
  * Текст `stale-base` называет, как готовить следующий этап при идущей доске
  * (черновики вне рабочей ветки, F52); прочие образцы байтово прежние.
+ * Добавлены образцы кода `board-restart` (задание доски устарело после
+ * перепривязки задач операцией изменения контракта, F66); прочие образцы
+ * байтово прежние.
+ * Правка черновика (edit-task --file) сохраняет и поля со значением по
+ * умолчанию; очистка — только явным значением (F65, ревью 1); прочие
+ * образцы байтово прежние.
+ * Текст `board-restart` называет рантайм автора прежнего задания
+ * (`params.authorRuntime`, как `boardJobs.next` операции; F66, ревью 1);
+ * прочие образцы байтово прежние.
+ * Текст `board-restart` под своей паузой ведущего называет, что цикл нового
+ * задания её снимет, с её причиной (`params.leadPause`; F66, ревью 2);
+ * прочие образцы байтово прежние.
  */
-const ENGLISH_SAMPLES_SHA256 = 'd605a46d83e5d9b1101881b19832b9ad0ea72f14cb89383c337ec3caa91730da';
+const ENGLISH_SAMPLES_SHA256 = 'd06e51d44c2529fd9c548d792f0c128b1f43731a623fc2815d5da3cc2eca2963';
 
 test('Подсказки шага: английские тексты образцов закреплены', () => {
   assert.equal(

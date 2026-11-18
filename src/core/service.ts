@@ -48,6 +48,7 @@ import {
   heldBaseOf,
   heldBaseWait,
   pausedByLead,
+  PAUSE_REASON_CHARS,
 } from './work-status.ts';
 import { assertDag, descendants, latestTaskId, impactGraph } from './graph.ts';
 import {
@@ -1007,6 +1008,23 @@ function planPath(path: PropertyKey[]) {
     'план'
   );
 }
+/**
+ * Поля постановки, которые схема правки (`taskIngest`) требует или заполняет
+ * значением по умолчанию: без переноса из текущей задачи частичный файл
+ * правки отверг бы правку или молча сбросил бы зависимости и контракты.
+ * Необязательные поля без умолчания правка сохраняет и так (`editTask`).
+ */
+const TASK_KEPT_FIELDS = [
+  'title',
+  'description',
+  'role',
+  'acceptance',
+  'repositoryId',
+  'scope',
+  'dependsOn',
+  'contracts',
+] as const;
+
 export class DevContour {
   constructor(
     readonly store: Store,
@@ -1558,6 +1576,23 @@ export class DevContour {
       throw new DomainError(label + ': ' + roleScopeAdvice(this.config, task, added), 400);
   }
   /**
+   * Постановка правки из файла (`edit-task --file`): каждое поле постановки,
+   * которого в файле нет, остаётся как у текущей задачи — и обязательные
+   * (`title`, `description`, `role`, `acceptance`), и со значением по
+   * умолчанию (`repositoryId`, `scope`, `dependsOn`, `contracts`): частичный
+   * файл не сбрасывает зависимости и контракты. Очистить поле можно только
+   * явным значением (`"dependsOn": []`). Необязательные поля без умолчания
+   * сохраняет `editTask`. Агентская `task_edit` по-прежнему принимает
+   * постановку целиком.
+   */
+  static keptTaskFields(current: Task, input: unknown): unknown {
+    if (!input || typeof input !== 'object' || Array.isArray(input)) return input;
+    const out: Record<string, unknown> = { ...(input as Record<string, unknown>) };
+    for (const key of TASK_KEPT_FIELDS)
+      if (!(key in out) && current[key] !== undefined) out[key] = current[key];
+    return out;
+  }
+  /**
    * `expectedScopeDigest` — область проверок (gates, потребители), которую
    * видел правящий: она вне digest постановки, и без неё правка со
    * старыми gates молча вернула бы чужую правку одних gates.
@@ -2055,8 +2090,23 @@ export class DevContour {
     value: boolean,
     reason: 'operator' | 'shutdown' = 'operator',
     by: 'operator' | 'lead' = 'operator',
+    /** Короткая причина паузы ведущего (`queue_set {"reason"}`); пустая — без причины. */
+    note?: string,
   ) {
     const { store, engine } = executionOf(this);
+    const why = note?.trim() || undefined;
+    if (why !== undefined) {
+      if (!value || reason !== 'operator' || by !== 'lead')
+        throw new DomainError(
+          'Причину паузы записывает только пауза ведущего агента (queue_set {"paused": true, "reason": …}, CLI queue --pause --by host --reason …)',
+          400,
+        );
+      if ([...why].length > PAUSE_REASON_CHARS)
+        throw new DomainError(
+          `Причина паузы длиннее ${PAUSE_REASON_CHARS} знаков: опишите её короче`,
+          400,
+        );
+    }
     return domain(() =>
       store.host(value ? 'scheduler.paused' : 'scheduler.started', (ht) => {
         // Запуск очереди из любого процесса (CLI, отдельный MCP, панель) не
@@ -2141,12 +2191,18 @@ export class DevContour {
         // Кто поставил паузу `operator`: ведущий агент — отметкой со временем
         // паузы; решение человека и снятие паузы отметку убирают.
         const lead = value && reason === 'operator' && by === 'lead' && control.pausedAt;
-        if (lead) ht.state.pauseActor = { by: 'lead', at: control.pausedAt! };
+        if (lead)
+          ht.state.pauseActor = {
+            by: 'lead',
+            at: control.pausedAt!,
+            ...(why ? { reason: why } : {}),
+          };
         else if (!value || reason === 'operator') delete ht.state.pauseActor;
         const result = {
           paused: control.paused,
           reason: control.pauseReason,
           ...(lead ? { by: 'lead' as const } : {}),
+          ...(lead && why ? { note: why } : {}),
         };
         ht.journal(result);
         return result;

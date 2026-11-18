@@ -3,7 +3,7 @@ import { DatabaseSync } from 'node:sqlite';
 import { closeSync, existsSync, mkdirSync, openSync, readSync } from 'node:fs';
 import { dirname, resolve } from 'node:path';
 import { pathToFileURL } from 'node:url';
-import { emptyState, type DevContourState, type AuditEvent } from './model.ts';
+import { DomainError, emptyState, type DevContourState, type AuditEvent } from './model.ts';
 /**
  * Пауза, записанная прежней версией, читается по её правилам.
  *
@@ -50,6 +50,45 @@ function walMode(path: string) {
   }
   return header[18] === 2 && header[19] === 2;
 }
+
+/** Сколько соединение writer ждёт блокировку базы, прежде чем отказать. */
+export const BUSY_TIMEOUT_MS = 20_000;
+/**
+ * Ожидание блокировки соединением только для чтения — короче: чтение
+ * повторяет попытку (`readOnlyRead`), и худший случай остаётся заметно
+ * меньше предела вызова инструмента агента.
+ */
+export const READ_ONLY_BUSY_TIMEOUT_MS = 4_000;
+
+/**
+ * Отказ SQLite из-за блокировки: базу держит другой процесс (обычно
+ * работающий serve). Это временная занятость, а не неисправность.
+ */
+export function isDatabaseBusy(error: unknown) {
+  // node:sqlite называет код SQLite (`errcode`): основной код SQLITE_BUSY (5)
+  // или SQLITE_LOCKED (6), включая расширенные. Без кода — по тексту.
+  const errcode = (error as { errcode?: unknown } | null)?.errcode;
+  if (typeof errcode === 'number') return [5, 6].includes(errcode & 0xff);
+  return /database is locked|database table is locked|SQLITE_BUSY|SQLITE_LOCKED/i.test(
+    error instanceof Error ? error.message : String(error),
+  );
+}
+
+/**
+ * Совет при занятой базе. Работающий serve — штатный writer: занятость под
+ * нагрузкой временная, и его не останавливают — повторяют команду.
+ */
+export const DATABASE_BUSY_ADVICE =
+  'База состояния временно занята другим процессом DevContour (обычно работающим serve, под нагрузкой). Это не сбой: повторите операцию через несколько секунд; останавливать serve не нужно.';
+
+/**
+ * Отказ из-за занятой базы — как отказ домена 503 с советом повторить
+ * (`code: DATABASE_BUSY`, `retryable`); прочие ошибки — без изменений.
+ */
+export const busyAsDomain = (error: unknown): unknown =>
+  isDatabaseBusy(error) && !(error instanceof DomainError)
+    ? new DomainError(DATABASE_BUSY_ADVICE, 503, { code: 'DATABASE_BUSY', retryable: true })
+    : error;
 
 /**
  * Адрес базы для соединения только для чтения. Даже такое соединение с базой
@@ -327,6 +366,10 @@ export class Store {
       if (path !== ':memory:') mkdirSync(dirname(path), { recursive: true });
       this.db = new DatabaseSync(path);
     }
+    // Ожидание блокировки — до первого запроса: уже чтение схемы ниже берёт
+    // разделяемую блокировку, и без таймаута занятая writer база (режим
+    // DELETE, восстановление WAL) отказывала сразу «database is locked».
+    this.db.exec(`PRAGMA busy_timeout=${readOnly ? READ_ONLY_BUSY_TIMEOUT_MS : BUSY_TIMEOUT_MS};`);
     if (
       !locations?.length &&
       this.db.prepare("SELECT name FROM sqlite_master WHERE type='table' AND name='owner'").get()
@@ -352,7 +395,6 @@ export class Store {
       }
     }
     if (readOnly) {
-      this.db.exec('PRAGMA busy_timeout=20000;');
       if (
         !this.db
           .prepare("SELECT name FROM main.sqlite_master WHERE type='table' AND name='state'")
@@ -372,7 +414,6 @@ export class Store {
       }
       return;
     }
-    this.db.exec('PRAGMA busy_timeout=20000;');
     // Центральная база без компонентов: запрошенный DELETE не понижает уже
     // включённый WAL. Выход из WAL требует исключительного доступа, а
     // работающий сервер держит базу открытой в WAL — команда подготовки из
@@ -387,8 +428,13 @@ export class Store {
       `${keepWal ? '' : `PRAGMA journal_mode=${journalMode ?? (locations?.length ? 'DELETE' : 'WAL')};`} PRAGMA synchronous=FULL; PRAGMA secure_delete=ON;`,
     );
     this.db.exec(
-      'CREATE TABLE IF NOT EXISTS state (id INTEGER PRIMARY KEY CHECK(id=1), data TEXT NOT NULL); CREATE TABLE IF NOT EXISTS events (id INTEGER PRIMARY KEY AUTOINCREMENT, at TEXT NOT NULL, type TEXT NOT NULL, data TEXT NOT NULL); CREATE TABLE IF NOT EXISTS revision (id INTEGER PRIMARY KEY CHECK(id=1), n INTEGER NOT NULL, lease INTEGER NOT NULL DEFAULT 0); INSERT OR IGNORE INTO revision (id,n) VALUES(1,0);',
+      'CREATE TABLE IF NOT EXISTS state (id INTEGER PRIMARY KEY CHECK(id=1), data TEXT NOT NULL); CREATE TABLE IF NOT EXISTS events (id INTEGER PRIMARY KEY AUTOINCREMENT, at TEXT NOT NULL, type TEXT NOT NULL, data TEXT NOT NULL); CREATE TABLE IF NOT EXISTS revision (id INTEGER PRIMARY KEY CHECK(id=1), n INTEGER NOT NULL, lease INTEGER NOT NULL DEFAULT 0);',
     );
+    // Начальные строки — только в новой базе: `INSERT OR IGNORE` берёт
+    // блокировку записи даже без вставки, и открытие существующей базы ради
+    // чтения ждало бы writer, занятого долгой транзакцией.
+    if (!this.db.prepare('SELECT 1 FROM main.revision WHERE id=1').get())
+      this.db.exec('INSERT OR IGNORE INTO main.revision (id,n) VALUES(1,0)');
     // Таблица ревизии первой редакции не имела счётчика сроков владения.
     if (
       !(this.db.prepare('PRAGMA main.table_info(revision)').all() as { name: string }[]).some(
@@ -396,9 +442,10 @@ export class Store {
       )
     )
       this.db.exec('ALTER TABLE main.revision ADD COLUMN lease INTEGER NOT NULL DEFAULT 0');
-    this.db
-      .prepare('INSERT OR IGNORE INTO main.state (id,data) VALUES(1,?)')
-      .run(JSON.stringify(emptyState()));
+    if (!this.db.prepare('SELECT 1 FROM main.state WHERE id=1').get())
+      this.db
+        .prepare('INSERT OR IGNORE INTO main.state (id,data) VALUES(1,?)')
+        .run(JSON.stringify(emptyState()));
     if (locations?.length) {
       try {
         this.components = new ComponentStorage(this.db, locations, path);

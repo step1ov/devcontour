@@ -1,6 +1,6 @@
 {
   "name": "devcontour",
-  "version": "0.4.0-alpha.45",
+  "version": "0.4.0-alpha.46",
   "description": "Local control plane for AI-agent development: contracts, task graphs, isolated runs, gates, review and acceptance",
   "keywords": [
     "ai-agents",
@@ -85,7 +85,7 @@
     "@xyflow/react": "12.11.6",
     "class-variance-authority": "^0.7.1",
     "clsx": "^2.1.1",
-    "devcontour-harness": "0.1.0-alpha.49",
+    "devcontour-harness": "0.1.0-alpha.50",
     "fast-xml-parser": "5.11.1",
     "lucide-react": "1.46.0",
     "react": "19.3.0",

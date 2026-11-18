@@ -1,4 +1,4 @@
-import { heldBaseOf } from '../core/work-status.ts';
+import { PAUSE_REASON_CHARS, heldBaseOf } from '../core/work-status.ts';
 import { Preparation } from '../core/preparation.ts';
 import { preparationInputs, type PreparationOperation } from '../core/preparation-model.ts';
 import {
@@ -62,6 +62,24 @@ const id = z.string().regex(/^[A-Za-z0-9_-]{1,80}$/);
 
 /** Маска секретов контура — та же, что у пакета ведущего и центра внимания. */
 const redactOf = (h: DevContour) => handoffRedactor(h.config, executionOf(h).engine.policy);
+/**
+ * Причина паузы ведущего под маской секретов контура (`queue_set`, CLI
+ * `queue --reason`). Предел `PAUSE_REASON_CHARS` проверяется по тексту
+ * ведущего; маска может удлинить текст (`[REDACTED]` длиннее значения) — тогда
+ * он усекается до предела, а не отклоняется.
+ */
+export const leadReason = (h: DevContour, text: string) => {
+  const raw = text.trim();
+  if ([...raw].length > PAUSE_REASON_CHARS)
+    throw new DomainError(
+      `Причина паузы длиннее ${PAUSE_REASON_CHARS} знаков: опишите её короче`,
+      400,
+    );
+  const chars = [...redactOf(h)(raw)];
+  return chars.length > PAUSE_REASON_CHARS
+    ? chars.slice(0, PAUSE_REASON_CHARS - 1).join('') + '…'
+    : chars.join('');
+};
 export { SERVER_STOPPING };
 export { oversized };
 export const agentInputs = {
@@ -126,7 +144,17 @@ export const agentInputs = {
     })
     .strict(),
   changeset_create: z.object({ changeSet: changeSetInput }).strict(),
-  queue_set: z.object({ paused: z.boolean() }).strict(),
+  queue_set: z
+    .object({
+      paused: z.boolean(),
+      /** Короткая причина паузы ведущего: её видят вид очереди, центр внимания и пакет. */
+      reason: z.string().trim().min(1).max(PAUSE_REASON_CHARS).optional(),
+    })
+    .strict()
+    .refine((v) => v.paused || v.reason === undefined, {
+      message: 'reason names why the lead pauses: only with paused true',
+      path: ['reason'],
+    }),
   preview_status: z.strictObject({}),
   feasibility_spike: spikeInput,
   feasibility_spikes: z.strictObject({ repositoryId: id.optional() }),
@@ -270,7 +298,7 @@ export const descriptions: Record<AgentOperation, string> = {
   value_report:
     'Read the effect report: accepted tasks, first try, sent back by checks/review, approval-to-merge time, known spend per accepted task (API-equivalent estimate), environment failures and recorded interventions. Omit repositoryId for the whole workspace. Bounds are explicit: "lower" means at least, a range means unknown inputs, null/unknown is never zero; under 20 no percentages, under 5 no medians. JSON only; summary detail omits per-task rows and evidence links (the CLI report has them). Read-only, no model calls.',
   session_handoff:
-    'Read the context handoff pack for a new lead session; start every new lead session with it instead of recalling the previous one. One store snapshot: task counts and limits, queue pause and who lifts it, controller, running and unfinished attempts, open tasks with their next step, stops and decisions awaiting the lead or user, recent failures, budgets and the next step of the board. Board lead workflow jobs count as the graph jobs: their repairs and planned retries are in the pack. next.command names harness CLI commands, never run them; host.next is the DevContour step decided from state by the rules of the lead job loop (also when the running server holds the controller role), with host.next.loop saying what the loop does next: wait for a live job (including one that lifts the queue pause), decide when the loop would stop the job (repair budget or failure class: fix or retry the task by hand first) or the attempts of the job are spent, workflow_retry {key, repositoryId} for a failed job a retry would move on, workflow_start for a board with an approved plan and no job for its current input, decide with decision plan for a board whose plan is not approved (draft tasks: choose the scope, e.g. review-plan --tasks, never workflow_start for the whole plan; a live job of another board comes before it when its loop acts next or it needs a decision, not when its loop only waits for tasks), no step at all for a board whose tasks are all cancelled (no wait, retry, start or job-settled for its job, live, failed, exhausted, stale or completed) unless its failed job stopped on a task cancelled after issue (job-cancelled-task, or job-exhausted when its attempts are spent), fix-input when workflow_start would be refused, queue_set for an operator pause no job lifts, operator in approvalMode operator. For a writer question: answer-input when a blocking question waits for an answer (the lead answers with input_answer only when no floor applies and approvalMode is agent; otherwise the operator answers in the panel: code answer-operator, params.proposed false — propose the answer with input_propose when the contracts and accepted files decide it, the operator confirms it in one click; true — your proposal waits for the operator, replace it only if the facts changed), apply-input when a saved answer is not applied or went stale (input_context, input_review, input_target, input_apply; a rejected review is corrected first; in approvalMode agent with a running server DevContour runs that chain itself after the answer: code apply-auto, wait while it runs — do not run it yourself — and apply-input when it stopped, params.phase failed, blocked or needs-lead with params.detail) or, with code apply-carry, when the answer of a superseded question waits to be carried into its task (params.order: draft — carry while the task is a draft, then approve; unreleased — pause, approve, carry, lift the pause; now — carry before the next attempt; only a carry the engine would allow now, into a task neither cancelled nor done; while attempts run on its board the step is wait with params.active, and the chain starts after they end; for an approved task while the queue runs or its pause is one a job loop lifts, it is first queue_set with params.pause, since the queue would issue the task without the answer (under a user pause set before the job started, which the loop lifts and a lead pause does not replace, it is wait with params.userPause and input.actor operator: ask the user to pause again with devcontour queue --pause, without starting the queue first); a waiting carry ranks like wait, and on the plan path a failed job of another board comes before it), apply-moved when the stop of a saved answer no longer holds (the spec changed after the question not only by a contract-change rebinding, or another attempt ran: input_apply would be refused; action operator and params.operatorAnswers true when only the operator may cancel or supersede the question), close-follow-up for an open non-blocking follow-up (input_cancel to accept the assumption, or correct the board and input_supersede). host.next has a stable code and params (only what its other fields lack); detail is its text in the hintLocale language of the config (English when unset), commands and JSON verbatim. When pack.next is a lead or user decision outside the queue, host.next invents no queue step (workflow_start, queue_set), only steps of that board: wait for its live job when the job loop acts next (a loop that only waits for tasks does not hide the decision), workflow_retry of its failed job, or a job or plan decision. repairs lists live jobs first, then jobs for the current input, then newest first. Omit boardId for the whole workspace; boardId may be a unique prefix of the board id (the short form of logs and the panel), an ambiguous prefix is refused with the candidates. host.verifications lists up to five ChangeSet jobs whose joint verification runs now (verificationId, startedAt, elapsedMs; the job stays queued meanwhile). host.discussion lists up to five unresolved requests to the lead from task discussions as redacted excerpts (the rest via discussion_inbox with nextCursor, full text via discussion_read; omitted when none fit the response limit); resolve each with discussion_resolve. intentions are your own notes, the only text not from the store: trimmed, empty ones dropped, at most 20 non-empty, longer than 1000 chars clipped and counted in truncated. format md returns the same pack as Markdown. Over the response limit, entries are dropped in the pack order and counted in truncated (bySize), and full names the CLI that prints the whole pack. Not the ChangeSet delivery handoff (devcontour handoff --changeset). Read-only, no model calls.',
+    'Read the context handoff pack for a new lead session; start every new lead session with it instead of recalling the previous one. One store snapshot: task counts and limits, queue pause and who lifts it, controller, running and unfinished attempts, open tasks with their next step, stops and decisions awaiting the lead or user, recent failures, budgets and the next step of the board. Board lead workflow jobs count as the graph jobs: their repairs and planned retries are in the pack. next.command names harness CLI commands, never run them; host.next is the DevContour step decided from state by the rules of the lead job loop (also when the running server holds the controller role), with host.next.loop saying what the loop does next: wait for a live job (including one that lifts the queue pause), decide when the loop would stop the job (repair budget or failure class: fix or retry the task by hand first) or the attempts of the job are spent, workflow_retry {key, repositoryId} for a failed job a retry would move on, workflow_start for a board with an approved plan and no job for its current input (code board-restart, params.operation, when its job was started on an earlier input, e.g. rebound by a completed contract-change: it does not continue, and the restart comes before a plan decision of another board), decide with decision plan for a board whose plan is not approved (draft tasks: choose the scope, e.g. review-plan --tasks, never workflow_start for the whole plan; a live job of another board comes before it when its loop acts next or it needs a decision, not when its loop only waits for tasks), no step at all for a board whose tasks are all cancelled (no wait, retry, start or job-settled for its job, live, failed, exhausted, stale or completed) unless its failed job stopped on a task cancelled after issue (job-cancelled-task, or job-exhausted when its attempts are spent), fix-input when workflow_start would be refused, queue_set for an operator pause no job lifts, operator in approvalMode operator. For a writer question: answer-input when a blocking question waits for an answer (the lead answers with input_answer only when no floor applies and approvalMode is agent; otherwise the operator answers in the panel: code answer-operator, params.proposed false — propose the answer with input_propose when the contracts and accepted files decide it, the operator confirms it in one click; true — your proposal waits for the operator, replace it only if the facts changed), apply-input when a saved answer is not applied or went stale (input_context, input_review, input_target, input_apply; a rejected review is corrected first; in approvalMode agent with a running server DevContour runs that chain itself after the answer: code apply-auto, wait while it runs — do not run it yourself — and apply-input when it stopped, params.phase failed, blocked or needs-lead with params.detail) or, with code apply-carry, when the answer of a superseded question waits to be carried into its task (params.order: draft — carry while the task is a draft, then approve; unreleased — pause, approve, carry, lift the pause; now — carry before the next attempt; only a carry the engine would allow now, into a task neither cancelled nor done; while attempts run on its board the step is wait with params.active, and the chain starts after they end; for an approved task while the queue runs or its pause is one a job loop lifts, it is first queue_set with params.pause, since the queue would issue the task without the answer (under a user pause set before the job started, which the loop lifts and a lead pause does not replace, it is wait with params.userPause and input.actor operator: ask the user to pause again with devcontour queue --pause, without starting the queue first); a waiting carry ranks like wait, and on the plan path a failed job of another board comes before it), apply-moved when the stop of a saved answer no longer holds (the spec changed after the question not only by a contract-change rebinding, or another attempt ran: input_apply would be refused; action operator and params.operatorAnswers true when only the operator may cancel or supersede the question), close-follow-up for an open non-blocking follow-up (input_cancel to accept the assumption, or correct the board and input_supersede). host.next has a stable code and params (only what its other fields lack); detail is its text in the hintLocale language of the config (English when unset), commands and JSON verbatim. When pack.next is a lead or user decision outside the queue, host.next invents no queue step (workflow_start, queue_set), only steps of that board: wait for its live job when the job loop acts next (a loop that only waits for tasks does not hide the decision), workflow_retry of its failed job, or a job or plan decision. repairs lists live jobs first, then jobs for the current input, then newest first. Omit boardId for the whole workspace; boardId may be a unique prefix of the board id (the short form of logs and the panel), an ambiguous prefix is refused with the candidates. host.verifications lists up to five ChangeSet jobs whose joint verification runs now (verificationId, startedAt, elapsedMs; the job stays queued meanwhile). host.discussion lists up to five unresolved requests to the lead from task discussions as redacted excerpts (the rest via discussion_inbox with nextCursor, full text via discussion_read; omitted when none fit the response limit); resolve each with discussion_resolve. intentions are your own notes, the only text not from the store: trimmed, empty ones dropped, at most 20 non-empty, longer than 1000 chars clipped and counted in truncated. format md returns the same pack as Markdown. Over the response limit, entries are dropped in the pack order and counted in truncated (bySize), and full names the CLI that prints the whole pack. Not the ChangeSet delivery handoff (devcontour handoff --changeset). Read-only, no model calls.',
   requirements_snapshot:
     'Read REQ sections from committed repository HEAD. Bind returned digest/text to a task and a configured test gate.',
   requirements_report:
@@ -295,7 +323,7 @@ export const descriptions: Record<AgentOperation, string> = {
   task_create:
     "Add a draft task to an active board; DAG and component ownership are validated. In a product change the task is bound to task.preparation.changeId when given (changeId alone is enough; supplied digests must equal the current approved ones), otherwise to the change of the board's tasks, otherwise to the active change; a change other than that of the board's live tasks is refused; the response names the binding. An accepted board takes no tasks: open the next stage with plan_import and its boardId; board_correct only changes accepted results.",
   task_edit:
-    "Edit a draft task using the specDigest read from task_briefing. Stale edits are rejected. gates and consumers are not part of specDigest: they are pinned separately as scopeDigest (returned here and by task_briefing) by plan review and approval, so a gates-only edit returns the same specDigest and a new scopeDigest, and a plan reviewed before the edit is not approved. Pass expectedScopeDigest (from task_briefing) whenever the edit carries gates or consumers: a mismatch is refused like a stale specDigest, otherwise an edit from a stale view could silently revert another gates edit. A gates-only edit counts as a draft edit for discussion_resolve. task.preparation.changeId rebinds the task to that product change (changeId alone is enough; stale supplied digests are refused, as is a change other than that of the board's other live tasks); without it the task keeps its own change. The response names the binding.",
+    "Edit a draft task using the specDigest read from task_briefing. task is the full TaskInput: omitted defaulted fields (repositoryId, scope, dependsOn, contracts) fall back to their defaults (CLI edit-task --file keeps omitted fields instead). Stale edits are rejected. gates and consumers are not part of specDigest: they are pinned separately as scopeDigest (returned here and by task_briefing) by plan review and approval, so a gates-only edit returns the same specDigest and a new scopeDigest, and a plan reviewed before the edit is not approved. Pass expectedScopeDigest (from task_briefing) whenever the edit carries gates or consumers: a mismatch is refused like a stale specDigest, otherwise an edit from a stale view could silently revert another gates edit. A gates-only edit counts as a draft edit for discussion_resolve. task.preparation.changeId rebinds the task to that product change (changeId alone is enough; stale supplied digests are refused, as is a change other than that of the board's other live tasks); without it the task keeps its own change. The response names the binding.",
   task_retry:
     'Explicitly retry a failed or cancelled task within the attempt budget. Diagnose the failure first.',
   task_assign: 'Assign a task to a team member. Assignment is not a distributed lease.',
@@ -307,8 +335,7 @@ export const descriptions: Record<AgentOperation, string> = {
     'Create a correction after board acceptance, preserving history and recalculating transitive impact.',
   changeset_create:
     'Declare a shared change across boards. Set releaseId to bind product release acceptance to the workspace INTENT map and mandatory joint tests. Verification and acceptance remain separate operations.',
-  queue_set:
-    'Pause or resume issuance of tasks. Resuming may invoke configured models in a running server; this does not launch a server or cancel active runs.',
+  queue_set: `Pause or resume issuance of tasks. The pause is recorded as the lead's; reason (with paused true, up to ${PAUSE_REASON_CHARS} chars) says why, and the queue view, the attention center and session_handoff show it. Resuming may invoke configured models in a running server; this does not launch a server or cancel active runs.`,
   feasibility_spike:
     'Run a bounded feasibility experiment before implementation: the given argv of an oracle or prototype at a pinned commit, per input size (DEVCONTOUR_SPIKE_SIZE) and seed, under a time limit. Stores commands, versions, times, outcome and limits of inference. A timeout is inconclusive for that method and budget; it never proves hardness or permits weakening a requirement.',
   feasibility_spikes:
@@ -322,7 +349,7 @@ export const descriptions: Record<AgentOperation, string> = {
   recovery_decide:
     'Record the lead decision for a recovery episode (two failures on one property) with the expected record version: add confirmed cases under the pinned oracle, one retry with a new hypothesis, a proposal for normal review (strengthen checker, split task), a product conflict for the user, or an environment stop. Never resets attempts.',
   contract_change_status:
-    'Read a contract-change operation: its step, holds, history, earlier redactions and the next step. Read-only.',
+    'Read a contract-change operation: its step, holds, history, earlier redactions and the next step. A completed operation whose rebinding left board lead jobs on an earlier input lists them in boardJobs (jobs, next: workflow_start for each board). Read-only.',
   contract_change_revise:
     'Revise a failed, stale or waiting contract change to the current committed redaction with the expected record version. An optional proposal replaces the stored one for the same contract (same file or inline title, repositoryId and component) — new text, artifacts, checks, underTest — after the start pre-checks (artifact pinning, import closure, check declaration) and before any model call. Before side effects the same operation is re-reviewed with its holds and history kept; after them a linked successor takes the holds over. Effects are never rolled back.',
   discussion_read:
@@ -893,8 +920,21 @@ export class AgentService {
         const value = agentInputs.queue_set.parse(input);
         if (!value.paused && this.options.stopping?.()) throw new DomainError(SERVER_STOPPING, 409);
         // Паузу записывает актёр вызова — ведущий агент, а не человек.
-        h.pause(value.paused, 'operator', 'lead');
-        return { ...value, queue: queueStopOf(h), serverRequiredForExecution: true };
+        // Причина — текст ведущего: в хранилище и ответе — под маской
+        // секретов. Причину паузы, которой не было (пауза человека осталась
+        // его решением), ответ не повторяет.
+        const set = h.pause(
+          value.paused,
+          'operator',
+          'lead',
+          value.reason === undefined ? undefined : leadReason(h, value.reason),
+        );
+        return {
+          paused: value.paused,
+          ...('note' in set && set.note ? { reason: set.note } : {}),
+          queue: queueStopOf(h),
+          serverRequiredForExecution: true,
+        };
       }
       default:
         throw new DomainError('Неизвестная операция', 400);

@@ -490,6 +490,127 @@ test('Пауза ведущего агента через queue_set записа
   }
 });
 
+test('Пауза ведущего агента через queue_set хранит короткую причину; вид остановки её называет (F64)', async () => {
+  const f = fixture();
+  try {
+    f.h.pause(false);
+    const agent = new AgentService(f.h, f.root);
+    const set = (await agent.run({
+      operation: 'queue_set',
+      input: { paused: true, reason: '  Жду ревью контракта оплаты  ' },
+    })) as { queue: QueueStopView };
+    assert.equal(set.queue.by, 'lead');
+    assert.equal(
+      set.queue.stopReason,
+      'Выдача остановлена ведущим агентом (queue_set): Жду ревью контракта оплаты',
+    );
+    assert.equal(f.h.store.read().pauseActor?.reason, 'Жду ревью контракта оплаты');
+    const journal = f.h.store
+      .events()
+      .filter((e) => e.type === 'scheduler.paused')
+      .at(-1);
+    assert.equal((journal?.data as { note?: string }).note, 'Жду ревью контракта оплаты');
+    // Предел длины и причина только у паузы.
+    await assert.rejects(
+      agent.run({ operation: 'queue_set', input: { paused: true, reason: 'x'.repeat(301) } }),
+    );
+    await assert.rejects(
+      agent.run({ operation: 'queue_set', input: { paused: false, reason: 'Причина' } }),
+    );
+    // Причина — текст ведущего: значение секрета контура не сохраняется и не
+    // возвращается.
+    f.h.pause(false);
+    const secret = 'dc-pause-secret-value';
+    process.env.DC_PAUSE_SECRET = secret;
+    try {
+      (f.h.config as unknown as Record<string, unknown>).environment = {
+        inherit: ['DC_PAUSE_SECRET'],
+      };
+      const masked = (await agent.run({
+        operation: 'queue_set',
+        input: { paused: true, reason: `Токен ${secret} истёк` },
+      })) as { reason?: string; queue: QueueStopView };
+      assert.doesNotMatch(f.h.store.read().pauseActor?.reason ?? '', new RegExp(secret));
+      assert.match(f.h.store.read().pauseActor?.reason ?? '', /Токен .+ истёк/);
+      assert.doesNotMatch(JSON.stringify(masked), new RegExp(secret));
+    } finally {
+      delete process.env.DC_PAUSE_SECRET;
+      delete (f.h.config as unknown as Record<string, unknown>).environment;
+    }
+    // Пауза ведущего поверх паузы человека не записана — и причина не
+    // повторяется в ответе.
+    f.h.pause(true);
+    const kept = (await agent.run({
+      operation: 'queue_set',
+      input: { paused: true, reason: 'Не записанная причина' },
+    })) as { reason?: string };
+    assert.equal(kept.reason, undefined);
+    assert.equal(f.h.store.read().pauseActor, undefined);
+    // Предел — по тексту ведущего: маска, удлинившая текст, отказа не даёт,
+    // а длинный исходный текст отклоняется.
+    f.h.pause(false);
+    process.env.DC_PAUSE_SECRET = 'x9-secret';
+    try {
+      (f.h.config as unknown as Record<string, unknown>).environment = {
+        inherit: ['DC_PAUSE_SECRET'],
+      };
+      const many = Array.from({ length: 30 }, () => 'x9-secret').join(' ');
+      assert.ok(many.length <= 300);
+      await agent.run({ operation: 'queue_set', input: { paused: true, reason: many } });
+      const stored = f.h.store.read().pauseActor?.reason ?? '';
+      assert.ok([...stored].length <= 300, stored);
+      assert.doesNotMatch(stored, /x9-secret/);
+    } finally {
+      delete process.env.DC_PAUSE_SECRET;
+      delete (f.h.config as unknown as Record<string, unknown>).environment;
+    }
+    // Новая пауза ведущего без причины прежнюю причину не наследует.
+    f.h.pause(false);
+    await agent.run({ operation: 'queue_set', input: { paused: true } });
+    assert.equal(f.h.store.read().pauseActor?.reason, undefined);
+    // Снятие паузы убирает отметку вместе с причиной.
+    f.h.pause(false);
+    assert.equal(f.h.store.read().pauseActor, undefined);
+  } finally {
+    f.cleanup();
+  }
+});
+
+test('CLI queue --pause --by host --reason записывает причину паузы ведущего (F64)', async () => {
+  const root = await realpath(await mkdtemp(join(tmpdir(), 'devcontour-queue-reason-')));
+  const repo = join(root, 'repo'),
+    data = join(root, 'data');
+  try {
+    await mkdir(repo);
+    await mkdir(data);
+    await git(repo, 'init', '-b', 'main');
+    await writeFile(join(repo, 'README.md'), 'Queue fixture');
+    await git(repo, 'add', '.');
+    await git(repo, 'commit', '-m', 'fixture');
+    const c = config({ repository: repo });
+    await writeFile(join(data, 'config.json'), JSON.stringify(c));
+    const h = new DevContour(new Store(join(data, 'state.sqlite')), c);
+    h.pause(false);
+    h.store.close();
+    const cli = [...cliCommand(), 'queue', '--data', data];
+    const paused = await command(
+      [...cli, '--pause', '--by', 'host', '--reason', 'Жду решения по схеме'],
+      process.cwd(),
+    );
+    assert.equal(paused.code, 0, paused.stderr);
+    const out = JSON.parse(paused.stdout) as QueueStopView;
+    assert.equal(out.by, 'lead');
+    assert.match(out.stopReason ?? '', /Жду решения по схеме/);
+    // Причину записывает только пауза ведущего.
+    const human = await command([...cli, '--pause', '--reason', 'Пауза человека'], process.cwd());
+    assert.notEqual(human.code, 0);
+    assert.match(human.stderr, /--reason/);
+  } finally {
+    if (root.startsWith(await realpath(tmpdir())) && root.includes('devcontour-queue-reason-'))
+      await rm(root, { recursive: true, force: true });
+  }
+});
+
 test('Пауза ведущего поверх паузы человека не переписывает решение человека', async () => {
   const f = fixture();
   try {
