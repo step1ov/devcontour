@@ -256,4 +256,9 @@ const outcome = !process.exitCode
             ? `failed: ${cause}`
             : 'failed'
     } (${total}s)`;
-console.error(`check${isFast ? ':fast' : ''}: ${outcome}`);
+// Without ps at the end no leaked descendant was looked for: say so, as a
+// note rather than a failure.
+const leakNote = processes.leakCheckSkipped
+  ? '; process leak check not performed (ps unavailable)'
+  : '';
+console.error(`check${isFast ? ':fast' : ''}: ${outcome}${leakNote}`);
