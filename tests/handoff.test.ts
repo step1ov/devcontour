@@ -2015,11 +2015,169 @@ test('session_handoff: упавшее задание доски, все зада
         assert.notEqual(next?.action, 'workflow_retry', label);
         assert.equal(next?.boardId, live.id, label + ': ' + JSON.stringify(next));
         assert.equal(next?.job?.key, liveJob.key, label);
-        // Ожидание действующего задания (снимает начальную паузу или ведёт стадию).
+        // Ожидание действующего задания: его цикл снимет начальную паузу. Без
+        // решения пакета — шаг паузы; при решении о плане — шаг задания,
+        // цикл которого действует.
         assert.equal(next?.action, 'wait', label);
+        assert.equal(next?.code, findings ? 'job-live' : 'pause-lift', label);
+        assert.deepEqual(next?.loop, { step: 'lift-pause', pause: 'initial' }, label);
         assert.doesNotMatch(next.detail, new RegExp(deadJob.key), label);
       } finally {
         f.cleanup();
       }
     }
+});
+
+test('session_handoff: решение о плане не прячется за заданием другой доски, цикл которого лишь ждёт задач', () => {
+  const f = fixture();
+  try {
+    const flow = new LeadWorkflow(f.h);
+    const findings = f.h.createBoard('Findings', '', 'main');
+    f.h.addTask(findings.id, input('Old approved task'));
+    f.h.approve(findings.id);
+    const finding = f.h.addTask(findings.id, input('Finding')).id;
+    const other = f.h.createBoard('Running board', '', 'main');
+    f.h.addTask(other.id, input('Running board task'));
+    f.h.approve(other.id);
+    const started = flow.start({
+      kind: 'board',
+      id: other.id,
+      authorRuntime: 'codex',
+      maxAttempts: 3,
+    });
+    // Стадия 2: цикл ждёт задач. Пауза снята — снимать циклу нечего.
+    const job = atStage(f.h, started.key, started.owner, 2);
+    f.h.pause(false);
+    assert.equal(loopAhead(f.h, f.store.read(), job).outlook.step, 'wait');
+    const value = devcontourHandoff(f.h);
+    assert.deepEqual(value.host.liveBoards, [other.id]);
+    assert.equal(value.pack.next.action, 'review-plan');
+    assert.equal(value.pack.next.workId, finding);
+    assert.equal(value.host.next?.action, 'decide', JSON.stringify(value.host.next));
+    assert.equal(value.host.next?.decision, 'plan');
+    assert.equal(value.host.next?.boardId, findings.id);
+    assert.deepEqual(value.host.next?.plan?.drafts, [finding]);
+  } finally {
+    f.cleanup();
+  }
+});
+
+test('session_handoff: пакет одной доски — решение о плане без заданий других досок', () => {
+  const f = fixture();
+  try {
+    const flow = new LeadWorkflow(f.h);
+    const findings = f.h.createBoard('Findings', '', 'main');
+    f.h.addTask(findings.id, input('Old approved task'));
+    f.h.approve(findings.id);
+    f.h.addTask(findings.id, input('Finding'));
+    const other = f.h.createBoard('Running board', '', 'main');
+    f.h.addTask(other.id, input('Running board task'));
+    f.h.approve(other.id);
+    flow.start({ kind: 'board', id: other.id, authorRuntime: 'codex', maxAttempts: 3 });
+    // Без области шаг — задание другой доски: его цикл снимет паузу.
+    assert.equal(devcontourHandoff(f.h).host.next?.boardId, other.id);
+    const scoped = devcontourHandoff(f.h, { boardId: findings.id }).host.next;
+    assert.equal(scoped?.decision, 'plan', JSON.stringify(scoped));
+    assert.equal(scoped?.boardId, findings.id);
+  } finally {
+    f.cleanup();
+  }
+});
+
+test('session_handoff: задание доски, все задачи которой отменены до выдачи, — не шаг при любом состоянии', () => {
+  for (const variant of ['exhausted', 'completed', 'stale', 'live'] as const) {
+    const f = fixture();
+    try {
+      const flow = new LeadWorkflow(f.h);
+      const dead = f.h.createBoard('Replaced plan', '', 'main');
+      const drafts = ['First draft', 'Second draft'].map((t) => f.h.addTask(dead.id, input(t)).id);
+      for (const id of drafts) f.h.cancel(id, 'Replaced by another board', 'host');
+      // Задание по текущему входу доски (уже без неотменённых задач).
+      const job = flow.start({
+        kind: 'board',
+        id: dead.id,
+        authorRuntime: 'codex',
+        maxAttempts: 3,
+      });
+      if (variant === 'exhausted')
+        atStage(f.h, job.key, job.owner, 0, {
+          status: 'failed',
+          attempts: 3,
+          error: 'review failed',
+        });
+      else if (variant !== 'live') atStage(f.h, job.key, job.owner, 2, { status: variant });
+      // Открытая работа — давняя доска находок с решением о плане.
+      const findings = f.h.createBoard('Findings', '', 'main');
+      f.h.addTask(findings.id, input('Old approved task'));
+      f.h.approve(findings.id);
+      f.h.addTask(findings.id, input('Finding'));
+      f.h.pause(false);
+      const value = devcontourHandoff(f.h);
+      assert.equal(value.host.liveBoards.includes(dead.id), variant === 'live', variant);
+      const next = value.host.next;
+      assert.notEqual(next?.boardId, dead.id, variant + ': ' + JSON.stringify(next));
+      assert.equal(next?.decision, 'plan', variant + ': ' + JSON.stringify(next));
+      assert.equal(next?.boardId, findings.id, variant);
+    } finally {
+      f.cleanup();
+    }
+  }
+});
+
+test('session_handoff: исчерпанное задание доски, все задачи которой отменены, — job-exhausted только на остановке D46', async () => {
+  const f = fixture();
+  try {
+    const b = f.h.createBoard('Everything cut', '', 'main');
+    const stopped = f.h.addTask(b.id, input('Fails its gate'));
+    const other = f.h.addTask(b.id, input('Dropped'));
+    f.h.approve(b.id);
+    const flow = new LeadWorkflow(f.h);
+    const job = flow.start({ kind: 'board', id: b.id, authorRuntime: 'codex', maxAttempts: 3 });
+    f.h.pause(false);
+    const run = f.h.claim('test')!;
+    assert.equal(run.taskId, stopped.id);
+    f.h.fail(run.id, run.token, 'gate failed', false, 'gate');
+    f.h.cancel(stopped.id, 'Not worth it', 'host');
+    f.h.cancel(other.id, 'Not needed', 'host');
+    const runner = new LeadRunner(f.h, f.root);
+    for (let i = 0; i < 4; i++) await runner.tick();
+    await runner.stop();
+    const failed = flow.get(job.key, job.owner);
+    assert.equal(failed.status, 'failed');
+    atStage(f.h, job.key, job.owner, failed.stage, {
+      status: 'failed',
+      attempts: failed.maxAttempts,
+    });
+    const next = devcontourHandoff(f.h, {}).host.next;
+    assert.equal(next?.code, 'job-exhausted', JSON.stringify(next));
+    assert.equal(next?.action, 'decide');
+    assert.equal(next?.boardId, b.id);
+    assert.equal(next?.job?.key, job.key);
+  } finally {
+    f.cleanup();
+  }
+});
+
+test('session_handoff: паузу снимут задания двух досок — шаг называет доску, работа которой ещё будет', async () => {
+  const f = fixture();
+  try {
+    const flow = new LeadWorkflow(f.h);
+    const live = f.h.createBoard('Replacement', '', 'main');
+    f.h.addTask(live.id, input('Replacement task'));
+    f.h.approve(live.id);
+    const liveJob = flow.start({ kind: 'board', id: live.id, authorRuntime: 'codex' });
+    // Задание доски без неотменённых задач начато позже: в списке оно первое.
+    await new Promise((resolve) => setTimeout(resolve, 5));
+    const dead = f.h.createBoard('Replaced plan', '', 'main');
+    f.h.cancel(f.h.addTask(dead.id, input('Draft')).id, 'Replaced by another board', 'host');
+    flow.start({ kind: 'board', id: dead.id, authorRuntime: 'codex' });
+    const value = devcontourHandoff(f.h);
+    assert.deepEqual(value.host.liveBoards, [dead.id, live.id], 'новое задание — первым');
+    const next = value.host.next;
+    assert.equal(next?.code, 'pause-lift', JSON.stringify(next));
+    assert.equal(next?.boardId, live.id);
+    assert.equal(next?.job?.key, liveJob.key);
+  } finally {
+    f.cleanup();
+  }
 });

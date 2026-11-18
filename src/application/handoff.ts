@@ -654,6 +654,12 @@ export function boardStep(boardId: string, ctx: HostContext): HandoffHostNext | 
   return step && withDetail(ctx.h, step);
 }
 
+/** Все задачи текущей ревизии доски отменены: работы на ней не будет. */
+function closedBoard(state: State, boardId: string) {
+  const tasks = boardTasks(state, boardId)?.tasks;
+  return !!tasks?.length && tasks.every((t) => t.status === 'cancelled');
+}
+
 function boardDraft(boardId: string, ctx: HostContext): HostNextDraft | undefined {
   const { h, state } = ctx;
   // Принятая ревизия без открытых задач: заданию доски делать нечего.
@@ -663,12 +669,19 @@ function boardDraft(boardId: string, ctx: HostContext): HostNextDraft | undefine
     done.tasks.every((t) => t.status === 'done' || t.status === 'cancelled')
   )
     return undefined;
+  // Все задачи ревизии отменены (план брошен или заменён другой доской):
+  // ожидание, повтор или старт задания ничего не продвинут — цикл лишь
+  // попробовал бы принять доску, которую принять нельзя. Шаг остаётся только
+  // у задания, стоящего на задаче, отменённой после выдачи (D46): его
+  // законные пути — повтор задачи или новая ревизия доски.
+  const closed = closedBoard(ctx.state, boardId);
   const jobs = ctx.jobs.filter((j) => j.id === boardId);
   const live = jobs.find(ctx.live);
   if (live) {
     const { stage, outlook: loop } = loopAhead(h, state, asLead(live));
     const cancelled = cancelledStop(boardId, ctx, live, loop, {}, true);
     if (cancelled) return cancelled;
+    if (closed) return undefined;
     if (loop.step === 'stop')
       return {
         action: 'decide',
@@ -690,12 +703,9 @@ function boardDraft(boardId: string, ctx: HostContext): HostNextDraft | undefine
   }
   const job = jobs.find((j) => ctx.current(j));
   const error = job?.error ? { error: job.error } : {};
-  // Все задачи ревизии отменены (план брошен или заменён другой доской):
-  // повтор задания, его старт или вход доски ничего не продвинут — цикл лишь
-  // попробовал бы принять доску, которую принять нельзя. Шаг остаётся только
-  // у задания, стоящего на задаче, отменённой после выдачи (D46): его
-  // законные пути — повтор задачи или новая ревизия доски.
-  if (done?.tasks.length && done.tasks.every((t) => t.status === 'cancelled')) {
+  // Доска без неотменённых задач (см. выше): шаг — только остановка D46
+  // упавшего задания, повторяемого или исчерпанного.
+  if (closed) {
     if (job?.status !== 'failed') return undefined;
     const { outlook: loop } = loopAhead(h, state, { ...asLead(job), status: 'queued' });
     const cancelled = cancelledStop(boardId, ctx, job, loop, error);
@@ -1118,13 +1128,17 @@ function hostNext(ctx: HostContext): HandoffHostNext | undefined {
  * пока решение о плане другой доски (о будущем объёме) ждёт.
  */
 function liveJobStep(ctx: HostContext, except: string | undefined): HandoffHostNext | undefined {
-  const { pack } = ctx;
+  // Пакет одной доски: другие доски вне его области.
+  if (ctx.pack.graphId) return undefined;
   const boards = [...new Set(ctx.jobs.filter(ctx.live).map((j) => j.id))].filter(
-    (id) => id !== except && (!pack.graphId || id === pack.graphId),
+    (id) => id !== except,
   );
+  // Ожидание задания, цикл которого лишь ждёт задач, решение не прячет (как
+  // в `hostStep`): раньше него — только решение по заданию или ожидание
+  // цикла, который сам что-то сделает.
   return boards
     .map((id) => boardStep(id, ctx))
-    .filter((x): x is HandoffHostNext => !!x && x.decision !== 'plan' && !!x.job)
+    .filter((x): x is HandoffHostNext => !!x?.job && (x.action !== 'wait' || acts(x.loop)))
     .sort((a, b) => rank(a) - rank(b))[0];
 }
 
