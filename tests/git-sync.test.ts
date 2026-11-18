@@ -552,3 +552,49 @@ test('CLI exposes sync, status and assignment against an explicit workspace', ()
     f.cleanup();
   }
 });
+
+test('Отметка reused receipt сверяется с деревом result SHA в Git клона: подменённое дерево — откат синхронизации', () => {
+  const f = fixture();
+  try {
+    const a = f.create('alice'),
+      board = a.h.createBoard('Reused board', '', 'main');
+    const t = a.h.addTask(board.id, input());
+    complete(a, t.id);
+    syncGit(a.h, { member: 'alice' });
+    a.commit();
+    const b = f.create('bob', a),
+      before = canonical(b.store.read());
+    const receipt = join(
+      b.repo,
+      '.devcontour/receipts',
+      readdirSync(join(b.repo, '.devcontour/receipts'))[0],
+    );
+    type Check = { kind: string; phase: string; consumer?: string; reused?: object };
+    type Record = { data: { candidateSha: string; resultSha: string; checks: Check[] } };
+    const mark = (tree: string) =>
+      rewrite(receipt, (r: Record) => {
+        const own = r.data.checks.find(
+          (c) => c.kind === 'test' && c.phase === 'integration' && !c.consumer,
+        )!;
+        own.reused = { sha: r.data.candidateSha, tree };
+      });
+    // SHA кандидата и результата согласованы (validateReceipt пропускает),
+    // дерево — нет: отказ даёт только сверка с Git этого клона.
+    mark('e'.repeat(40));
+    assert.throws(
+      () => syncGit(b.h, { member: 'bob' }),
+      /дерево reused не равно дереву result SHA/,
+    );
+    assert.equal(canonical(b.store.read()), before);
+    // Настоящее дерево result SHA, закоммиченное в Git, — синхронизация проходит.
+    const sha = (JSON.parse(readFileSync(receipt, 'utf8')) as Record).data.resultSha;
+    mark(git(b.repo, 'rev-parse', `${sha}^{tree}`));
+    git(b.repo, 'commit', '-qam', 'Receipt with reused mark');
+    syncGit(b.h, { member: 'bob' });
+    const done = b.store.read().tasks.find((x) => x.id === t.id)!;
+    assert.equal(done.status, 'done');
+    assert.ok(done.sharedCompletion?.receipt.checks.some((c) => c.reused));
+  } finally {
+    f.cleanup();
+  }
+});
