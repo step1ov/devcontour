@@ -60,7 +60,7 @@ export async function startWorkspace(
           );
           try {
             const h = new DevContour(runtimeStore, config),
-              scheduler = new Scheduler(h, root);
+              scheduler = new Scheduler(h, root, undefined, { instance: options.instance });
             await scheduler.init();
             return { h, scheduler };
           } catch (error) {

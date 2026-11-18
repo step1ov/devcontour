@@ -80,6 +80,7 @@ const operations = [
   'recovery_decide',
   'contract_change_status',
   'contract_change_revise',
+  'contract_change_ack_correction',
   'input_list',
   'input_show',
   'input_answer',

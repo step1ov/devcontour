@@ -722,6 +722,8 @@ export type PanelProgress = {
     passed: number;
     failed: number;
     notApplicable?: number;
+    /** Записи интеграции, взятые из кандидата: не запуски. */
+    reused?: number;
     tasks: number;
     phases: string[];
   }[];
@@ -892,7 +894,15 @@ export function ProgressPanel({
                           .join(' · ')}
                       </td>
                       <td className="tabular border-b p-2 text-right align-top">{g.tasks}</td>
-                      <td className="tabular border-b p-2 text-right align-top">{g.passed}</td>
+                      <td className="tabular border-b p-2 text-right align-top">
+                        {g.passed}
+                        {g.reused ? (
+                          <span className="text-muted-foreground">
+                            {' '}
+                            +{g.reused} взято из кандидата
+                          </span>
+                        ) : null}
+                      </td>
                       <td className="tabular border-b p-2 text-right align-top">
                         {g.failed ? <span className="text-destructive">{g.failed}</span> : g.failed}
                       </td>

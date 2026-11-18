@@ -23,6 +23,8 @@ import {
 import { adapters, type AgentAdapter } from './adapters.ts';
 import { pinArtifacts } from './contract-artifacts.ts';
 import { contractImpact } from './contract-impact.ts';
+import { effectiveWriteArea } from '../core/workflow.ts';
+import { pathsOverlap } from 'devcontour-harness/contracts';
 import { updateBase } from './base-update.ts';
 import { planRepin, stalePins } from './context.ts';
 import { applyConfig, busyWork } from './reconfigure.ts';
@@ -176,6 +178,17 @@ export type ContractChange = {
   boards: string[];
   /** Принятые задачи прежней редакции: их меняет корректировка, а не операция. */
   corrections: string[];
+  /**
+   * Чем изменение касается каждой принятой задачи из `corrections` (F69) и
+   * закрыта ли корректировка. Задача, которой изменение касается только
+   * привязкой (изменённые артефакты вне её области записи, текст и проверки
+   * прежние), закрывается сразу. Остальные открыты, пока ведущий не закроет
+   * каждую командой `contract-change --id ID --ack-correction TASK --reason`;
+   * открытые видны в центре внимания и в `session_handoff`
+   * (`host.corrections`) у завершённой операции. У операций прежних версий
+   * поля нет: их список не отслеживается.
+   */
+  correctionDetails?: ContractCorrection[];
   history: {
     at: string;
     step: Step | 'start';
@@ -188,6 +201,98 @@ export type ContractChange = {
     review?: { id: string; artifact: string };
   }[];
 };
+
+/** Чем изменение контракта касается принятой задачи. */
+export type CorrectionEffect =
+  /** Изменённые артефакты — в области записи задачи (её же файлы). */
+  | 'scope'
+  /** Изменился текст документа (`sections` — какие разделы). */
+  | 'document'
+  /** Сменились договор проверки или реализация под тестом. */
+  | 'checks';
+
+export interface ContractCorrection {
+  taskId: string;
+  /** Пусто — изменение касается задачи только привязкой. */
+  effects: CorrectionEffect[];
+  /** Изменённые разделы документа. */
+  sections?: string[];
+  /** Изменённые артефакты в области записи задачи. */
+  paths?: string[];
+  /** Изменённые артефакты вне её области записи. */
+  outside?: string[];
+  /** Чем изменение касается задачи — одной строкой. */
+  reason: string;
+  /** Корректировка закрыта: сразу (`auto`, только привязка) или ведущим. */
+  closed?: { at: string; by: 'auto' | 'lead'; reason: string };
+}
+
+/** Предел причины закрытия корректировки. */
+const ACK_REASON = 2000;
+
+/**
+ * Корректировки принятых задач по отчёту `contractImpact` (F69): чем
+ * изменение касается каждой задачи. Задачи привязаны к контракту целиком,
+ * поэтому изменение текста или проверок касается каждой; артефакт касается
+ * задачи, когда он в её действующей области записи того же компонента.
+ */
+export function correctionsOf(
+  h: DevContour,
+  impact: Pick<Awaited<ReturnType<typeof contractImpact>>, 'changes' | 'tasks' | 'repositoryId'>,
+  at = new Date().toISOString(),
+): ContractCorrection[] {
+  const tasks = h.store.read().tasks;
+  const changed = impact.changes.artifacts.filter((a) => a.change !== 'same').map((a) => a.path);
+  const sections = impact.changes.document ? (impact.changes.sections ?? []) : [];
+  return impact.tasks.direct
+    .filter((t) => t.status === 'done')
+    .map((d) => {
+      const task = tasks.find((t) => t.id === d.id);
+      const same = !!task && repository(h.config, task.repositoryId).id === impact.repositoryId;
+      const area = task && same ? effectiveWriteArea(h.config, task) : [];
+      const paths = changed.filter((p) => !area || area.some((a) => pathsOverlap(a, p)));
+      const outside = changed.filter((p) => !paths.includes(p));
+      const effects: CorrectionEffect[] = [
+        ...(paths.length ? (['scope'] as const) : []),
+        ...(impact.changes.document ? (['document'] as const) : []),
+        ...(impact.changes.checks ? (['checks'] as const) : []),
+      ];
+      const parts = [
+        ...(paths.length
+          ? [`изменены артефакты в области записи задачи: ${paths.join(', ')}`]
+          : []),
+        ...(impact.changes.document
+          ? [
+              `изменён текст документа${sections.length ? ` (разделы: ${sections.join('; ')})` : ''}`,
+            ]
+          : []),
+        ...(impact.changes.checks ? ['изменены договор проверки или реализация под тестом'] : []),
+      ];
+      const reason = clipAtBoundary(
+        effects.length
+          ? parts.join('; ')
+          : `только привязка — содержание, касающееся задачи, не изменилось${
+              outside.length
+                ? ` (изменённые артефакты вне её области записи: ${outside.join(', ')})`
+                : ''
+            }`,
+        DETAIL,
+      );
+      return {
+        taskId: d.id,
+        effects,
+        ...(sections.length && impact.changes.document ? { sections } : {}),
+        ...(paths.length ? { paths } : {}),
+        ...(outside.length ? { outside } : {}),
+        reason,
+        ...(effects.length ? {} : { closed: { at, by: 'auto' as const, reason } }),
+      };
+    });
+}
+
+/** Открытые корректировки операции: завершённой и с отслеживаемым списком. */
+export const openCorrections = (op: Pick<ContractChange, 'status' | 'correctionDetails'>) =>
+  op.status === 'completed' ? (op.correctionDetails ?? []).filter((c) => !c.closed) : [];
 
 /** Предел подробности записи истории и текста ошибки операции. */
 const DETAIL = 500;
@@ -211,6 +316,8 @@ export type ContractChangeView = Omit<ContractChange, 'token' | 'leaseUntil'> & 
     demoted?: string[];
   }[];
   continued?: ContractChangeView[];
+  /** Корректировки записаны версией без `correctionDetails`. */
+  correctionsHint?: string;
   /** Задания досок, устаревшие после перепривязки, и шаг (`ContractChanges.boardJobs`). */
   boardJobs?: {
     jobs: ReturnType<LeadWorkflow['invalidated']>;
@@ -281,6 +388,13 @@ export class ContractChanges {
       next: stepsOf(op)[op.step] ?? null,
       ...(mapping.length ? { mapping } : {}),
       ...(boardJobs ? { boardJobs } : {}),
+      // Операция прежней версии: список корректировок без причин и закрытия.
+      ...(op.corrections?.length && !op.correctionDetails
+        ? {
+            correctionsHint:
+              'corrections recorded before correction tracking: no per-task effects, nothing to acknowledge; check these accepted tasks by hand',
+          }
+        : {}),
     };
   }
 
@@ -686,6 +800,13 @@ export class ContractChanges {
           current.held.filter((t) => !held.includes(t)),
         );
         current.held = held;
+        // Корректировки — по новой редакции: шаг hold не повторяется.
+        if (current.mode !== 'consolidate') {
+          current.corrections = impact.tasks.direct
+            .filter((t) => t.status === 'done')
+            .map((t) => t.id);
+          current.correctionDetails = correctionsOf(this.h, impact);
+        }
         current.step = stepsOf(current).indexOf('drain');
         current.status = 'queued';
         current.error = undefined;
@@ -761,6 +882,69 @@ export class ContractChanges {
         operation: this.view(next),
         previous: this.view(current),
       };
+    });
+  }
+
+  /**
+   * Закрыть корректировки принятых задач завершённой операции (F69): ведущий
+   * проверил, что принятый результат не требует изменения, или завёл для
+   * него задачу. `taskIds` — список задач или `all` (все открытые) с одной
+   * причиной; причина обязательна и хранится в каждой корректировке.
+   * Закрытие всё или ничего: неизвестная задача (404), уже закрытая или
+   * незавершённая операция (409) — отказ без записи.
+   */
+  ackCorrection(id: string, taskIds: readonly string[] | 'all', reason: string) {
+    const text = reason.trim();
+    if (text.length < 10 || text.length > ACK_REASON)
+      throw new DomainError(
+        `reason: от 10 до ${ACK_REASON} символов — почему принятый результат не требует изменения или какой задачей он исправляется`,
+        400,
+      );
+    if (taskIds !== 'all' && !taskIds.length)
+      throw new DomainError('Укажите задачи корректировок (через запятую) или all', 400);
+    return this.h.store.atomic(() => {
+      const op = this.get(id);
+      if (!op.correctionDetails)
+        throw new DomainError(
+          op.corrections?.length
+            ? `Корректировки операции ${op.id} записаны версией без отслеживания: закрывать нечего`
+            : `У операции ${op.id} корректировок нет`,
+          404,
+        );
+      if (op.status !== 'completed')
+        throw new DomainError(
+          `Операция ${op.id} в состоянии ${op.status}: корректировки закрываются после её завершения`,
+          409,
+        );
+      const items =
+        taskIds === 'all'
+          ? op.correctionDetails.filter((c) => !c.closed)
+          : [...new Set(taskIds)].map((taskId) => {
+              const item = op.correctionDetails!.find((c) => c.taskId === taskId);
+              if (!item)
+                throw new DomainError(
+                  `Задачи ${taskId} нет среди корректировок операции ${op.id}: ${(op.corrections ?? []).join(', ') || 'их нет'}`,
+                  404,
+                );
+              if (item.closed)
+                throw new DomainError(
+                  `Корректировка ${taskId} уже закрыта (${item.closed.by}, ${item.closed.at})`,
+                  409,
+                );
+              return item;
+            });
+      if (!items.length)
+        throw new DomainError(`Открытых корректировок у операции ${op.id} нет`, 409);
+      const at = new Date().toISOString();
+      for (const item of items) item.closed = { at, by: 'lead', reason: text };
+      this.log(
+        op,
+        'release',
+        'correction-acked',
+        clipAtBoundary(`${items.map((c) => c.taskId).join(', ')}: ${text}`, DETAIL),
+      );
+      this.save(op);
+      return this.view(op);
     });
   }
 
@@ -922,6 +1106,8 @@ export class ContractChanges {
             op.mode === 'consolidate'
               ? []
               : impact.tasks.direct.filter((t) => t.status === 'done').map((t) => t.id);
+          current.correctionDetails =
+            op.mode === 'consolidate' ? [] : correctionsOf(this.h, impact);
         });
         return {};
       }

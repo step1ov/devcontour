@@ -1084,7 +1084,10 @@ async function main() {
     return;
   }
   attachJournal(h);
-  const scheduler = new Scheduler(h, root);
+  // Экземпляр сервера — до планировщика: владелец его роли controller
+  // начинается с экземпляра (F71), по нему пакет передачи узнаёт свой сервер.
+  const serving = ['serve', 'demo'].includes(operation) ? serverInstance() : undefined;
+  const scheduler = new Scheduler(h, root, undefined, { instance: serving });
   const workspace = new Workspace(h, new IntentService(h));
   const workspaceRunner = new WorkspaceRunner(h, root);
   if (agentOperations.includes(operation)) {
@@ -1271,6 +1274,16 @@ async function main() {
           : undefined;
         if (args.includes('--id') && args.includes('--abandon'))
           result = changes.abandon(option('--id', ''));
+        else if (args.includes('--id') && args.includes('--ack-correction'))
+          // Закрыть корректировку принятой задачи завершённой операции (F69).
+          // TASK, список через запятую или all — с одной причиной.
+          result = changes.ackCorrection(
+            option('--id', ''),
+            option('--ack-correction', '') === 'all'
+              ? 'all'
+              : option('--ack-correction', '').split(',').filter(Boolean),
+            option('--reason', ''),
+          );
         else if (args.includes('--id') && args.includes('--revise')) {
           // Пересмотр берёт текущий закоммиченный HEAD явно и сверяет версию
           // записи, прочитанную ведущим.
@@ -1707,7 +1720,7 @@ async function main() {
   const port = Number(option('--port', process.env.PORT ?? '4317'));
   if (!Number.isInteger(port) || (port !== 0 && port < 1024) || port > 65535)
     throw new Error('Некорректный port');
-  const instance = serverInstance();
+  const instance = serving ?? serverInstance();
   const app = await serve(h, scheduler, {
     port,
     dev: args.includes('--dev'),

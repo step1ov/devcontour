@@ -245,6 +245,8 @@ export function policyFromConfig(
     runTimeoutMs: config.runTimeoutMs,
     ...(config.stallSweep ? { stallSweep: config.stallSweep } : {}),
     ...(config.gateTimeoutFloorMs ? { gateTimeoutFloorMs: config.gateTimeoutFloorMs } : {}),
+    // Перенос evidence кандидата — только заданный: без поля digest прежний.
+    ...(config.integrationReuse ? { integrationReuse: config.integrationReuse } : {}),
     ...(config.inputPolicy
       ? {
           inputPolicy: {

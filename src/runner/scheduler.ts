@@ -28,11 +28,13 @@ import { reserveRepositories } from './ownership.ts';
 import { serveReconfigure } from './reconfigure.ts';
 import { checkoutRootOption, checkoutRoots, workspaceCheckoutRoot } from './checkout-root.ts';
 import { LoopMonitor, type LoopGap } from './loop-monitor.ts';
+import { serveControllerOwner } from './server-record.ts';
 
 export { classifyFailure } from 'devcontour-harness';
 
 export class Scheduler {
-  readonly owner = randomUUID();
+  /** Владелец роли controller; у сервера — с его экземпляром (`serveControllerOwner`). */
+  readonly owner: string;
   private timer?: NodeJS.Timeout;
   private built?: { execution: Execution; runner: Runner };
   /**
@@ -61,7 +63,10 @@ export class Scheduler {
     readonly h: DevContour,
     readonly root: string,
     readonly runtimes: typeof adapters = adapters,
-  ) {}
+    options: { instance?: string } = {},
+  ) {
+    this.owner = options.instance ? serveControllerOwner(options.instance) : randomUUID();
+  }
 
   /**
    * Исполнитель очереди для текущей конфигурации. Конфигурация меняется

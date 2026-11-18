@@ -19,6 +19,7 @@ import { basename, dirname, join } from 'node:path';
 import { DatabaseSync } from 'node:sqlite';
 import { controllerRow, effectiveLeader, readOnlyLocation } from '../core/store.ts';
 import { processAlive } from './resources.ts';
+import { osToolEnv } from './os-tools.ts';
 
 export interface ServerRecord {
   pid: number;
@@ -31,6 +32,31 @@ export const serverRecordPath = (root: string) => join(root, 'server.json');
 
 /** Идентификатор экземпляра сервера: его отдаёт `GET /api/server`. */
 export const serverInstance = () => randomUUID();
+
+/**
+ * Владелец роли controller планировщика сервера: начинается с экземпляра
+ * сервера (F71). По нему чтение из другого процесса (CLI session-handoff)
+ * узнаёт, что роль держит сервер, записанный в `server.json`.
+ */
+export const serveControllerOwner = (instance: string) => `serve:${instance}:${randomUUID()}`;
+
+/**
+ * Роль controller с владельцем `owner` держит работающий сервер этого
+ * каталога данных: запись `server.json` есть, её процесс жив и запущен не
+ * позже записи (pid не переиспользован процессом, начатым после неё), а
+ * владелец — планировщик этого экземпляра. Свежесть срока роли проверяет
+ * вызывающий. Время запуска, которое не прочитать, сверку не отменяет:
+ * остаётся проверка экземпляра.
+ */
+export function heldByServer(root: string, owner: string) {
+  const record = readServerRecord(root);
+  if (!record || !owner.startsWith(`serve:${record.instance}:`) || !processAlive(record.pid))
+    return false;
+  const started = Date.parse(processStartTime(record.pid) ?? '');
+  const recorded = Date.parse(record.startedAt);
+  // lstart — с точностью до секунды.
+  return !(Number.isFinite(started) && Number.isFinite(recorded) && started > recorded + 1000);
+}
 
 export function writeServerRecord(root: string, record: ServerRecord) {
   const path = serverRecordPath(root);
@@ -229,6 +255,8 @@ function psField(pid: number, field: 'command' | 'lstart') {
   try {
     const out = execFileSync('ps', ['-o', field + '=', '-p', String(pid)], {
       encoding: 'utf8',
+      // Дата lstart — в локали C: её читает `Date.parse` (`heldByServer`).
+      env: osToolEnv(),
       stdio: ['ignore', 'pipe', 'ignore'],
     }).trim();
     return out || undefined;

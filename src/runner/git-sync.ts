@@ -28,6 +28,7 @@ import {
   mergeValue,
   recordKey,
   recordSchema,
+  type CompletionReceipt,
   type Records,
   type SyncIdentity,
 } from '../core/sync-model.ts';
@@ -221,6 +222,21 @@ function assertCommitContains(path: string, sha: string, targetBranch: string) {
     );
   }
 }
+/**
+ * Отметка receipt «взято из кандидата» (`checks[].reused`): общее дерево —
+ * дерево result SHA в Git этого клона. Иначе receipt несогласован, и
+ * синхронизация его не принимает.
+ */
+export function assertReusedTrees(
+  path: string,
+  receipt: Pick<CompletionReceipt, 'taskId' | 'resultSha' | 'checks'>,
+) {
+  const marked = receipt.checks.filter((c) => c.reused);
+  if (!marked.length) return;
+  const tree = git(path, 'rev-parse', `${receipt.resultSha}^{tree}`);
+  if (marked.some((c) => c.reused!.tree !== tree))
+    throw new Error(`Receipt ${receipt.taskId}: дерево reused не равно дереву result SHA`);
+}
 function validateGitResults(
   h: DevContour,
   old: DevContourState,
@@ -235,6 +251,7 @@ function validateGitResults(
     assertCommitContains(repo.path, t.resultSha!, repo.targetBranch);
     git(repo.path, 'cat-file', '-e', `${receipt.candidateSha}^{commit}`);
     git(repo.path, 'merge-base', '--is-ancestor', receipt.candidateSha, receipt.resultSha);
+    assertReusedTrees(repo.path, receipt);
     if (old.tasks.some((p) => p.id === t.id && p.status === 'done')) continue;
     const scope = scopeList.find((s) => s.owner === taskOwner(t))!;
     for (const key of [`tasks/${t.id}`, `receipts/${t.sharedCompletion!.receipt.id}`]) {

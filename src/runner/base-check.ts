@@ -1,6 +1,7 @@
 import { execFileSync } from 'node:child_process';
 import { randomUUID } from 'node:crypto';
 import {
+  HarnessError,
   changedPaths,
   gateBasis,
   gateDecisions,
@@ -17,7 +18,7 @@ import { CONSUMER_VERSION } from '../harness/host.ts';
 import { git, isAncestor } from './process.ts';
 import { controllerBoundary } from './checks.ts';
 import { checkoutRootOption, workspaceCheckoutRoot } from './checkout-root.ts';
-import { journalError } from './board-coverage.ts';
+import { gatesOutcome, interruptionLine, journalError, outcomeFields } from './board-coverage.ts';
 import {
   reviewedContractDocument,
   reviewedRedaction,
@@ -46,6 +47,16 @@ export interface BaseCheck {
   at: string;
   /** Прогонов этой базы под этим договором (нет поля — один). */
   tries?: number;
+  /**
+   * Проверка прервана (сигнал или срок фазы, `runGatesAt`): gate в тот момент
+   * и причина. `passed` — false, как прежде; прерванный и неисполненные gates
+   * остаются в `failures` для совместимости, но провалом не названы.
+   */
+  interrupted?: { gate?: string; reason: string };
+  /** Gates, не исполненные после прерывания. */
+  skipped?: string[];
+  /** Предупреждения пробы портов ресурсов (порт только на wildcard-адресе). */
+  warnings?: string[];
   /**
    * Основание каждого gate профиля (`gateBasis` harness: определение,
    * ресурсы, предпосылки, окружение, lifecycle, изоляция, версия harness).
@@ -440,6 +451,9 @@ export async function checkBase(
   if (touched.length) return hold('base.check.held', heldBaseDetail(touched), { paths: touched });
   const { engine } = executionOf(h);
   const failed: string[] = [];
+  // Прерванные проверки (срок фазы): исход их gates неизвестен.
+  const interrupted: string[] = [];
+  const warnings: string[] = [];
   // Перенесённые результаты, на которые опирается снятие (`base.checked`).
   const carriedBy: { repositoryId: string; sha: string; gates: string[] }[] = [];
   for (const base of bases) {
@@ -493,7 +507,10 @@ export async function checkBase(
         ...(plan.blocked ? { carryBlocked: plan.blocked } : {}),
         ...(tries > 1 ? { retry: tries - 1 } : {}),
       });
-      let result: Pick<Awaited<ReturnType<typeof runGatesAt>>, 'gates' | 'failures' | 'evidence'>;
+      let result: Pick<
+        Awaited<ReturnType<typeof runGatesAt>>,
+        'gates' | 'failures' | 'evidence' | 'interrupted' | 'skipped' | 'warnings'
+      >;
       try {
         // Всё перенесено — исполнять нечего. Сейчас недостижимо: harness
         // требует test gate без `when`; ветка — защита от смены этого правила.
@@ -558,6 +575,7 @@ export async function checkBase(
           return false;
         }
       });
+      const outcome = gatesOutcome(result);
       const saved: BaseCheck = {
         repositoryId: base.repositoryId,
         sha: base.sha,
@@ -569,6 +587,7 @@ export async function checkBase(
         evidence: [...result.evidence, ...plan.evidence],
         at: new Date().toISOString(),
         tries,
+        ...outcomeFields(outcome),
         ...(providersHeld
           ? {
               basis: plan.basis,
@@ -578,11 +597,15 @@ export async function checkBase(
           : { providers: { ...plan.providers, '@moved': 'during-check' } }),
         ...(plan.carried.length ? { carried: plan.carried } : {}),
       };
+      // Отмена вызывающим (остановка сервера) посреди gate — не исход базы:
+      // запись не пишется, прежняя (и её счёт попыток) остаётся.
+      const cancelled = !!outcome.interrupted && !!signal?.aborted;
       try {
-        h.store.atomic(() => {
-          guard();
-          h.store.saveLocal(BASE_CHECK, base.repositoryId, base.sha, saved);
-        });
+        if (!cancelled)
+          h.store.atomic(() => {
+            guard();
+            h.store.saveLocal(BASE_CHECK, base.repositoryId, base.sha, saved);
+          });
       } catch (error) {
         // Начатая проверка кончается событием и тогда, когда исход не
         // записался: иначе её последний переход живости висел бы как идущий.
@@ -622,12 +645,27 @@ export async function checkBase(
               }
             : {}),
           ...(saved.passed ? {} : { failures: saved.failures.map((f) => f.gate) }),
+          // Прерванная проверка — не провал gates: закрывающее событие то же
+          // (`passed: false`), причина и неисполненные gates названы.
+          ...(outcome.interrupted ? { reason: 'interrupted' } : {}),
+          ...outcomeFields(outcome),
         },
         true,
       );
+      // Отмена вызывающим: повтор не начинается, попытка не засчитана.
+      if (cancelled)
+        throw new HarnessError(
+          'CANCELLED',
+          'Проверка базы прервана: ' + (outcome.interrupted?.reason ?? 'отмена'),
+        );
       record = saved;
     }
-    for (const f of record.failures) failed.push(`${base.repositoryId}/${f.gate}`);
+    const outcome = gatesOutcome(record);
+    for (const f of outcome.failed) failed.push(`${base.repositoryId}/${f.gate}`);
+    const cut = interruptionLine(base.repositoryId, outcome);
+    if (cut) interrupted.push(cut);
+    if (!record.passed)
+      for (const w of outcome.warnings) warnings.push(`${base.repositoryId}: ${w}`);
     if (record.carried?.length)
       carriedBy.push({
         repositoryId: base.repositoryId,
@@ -655,7 +693,7 @@ export async function checkBase(
       const repo = repository(h.config, b.repositoryId);
       if (targetSha(repo.path, repo.targetBranch) !== b.sha) return 'moved';
     }
-    if (failed.length) return 'failed';
+    if (failed.length || interrupted.length) return 'failed';
     h.store.appendEvent('base.checked', {
       bases,
       // Gates, чей результат перенесён с проверки предка, а не исполнен (D51).
@@ -667,11 +705,21 @@ export async function checkBase(
     h.pause(false);
     return 'cleared';
   });
+  if (decision === 'failed' && !failed.length)
+    return hold(
+      'base.check.waiting',
+      `Проверка базы прервана: ${interrupted.join('; ')}${warnings.length ? `; предупреждения: ${warnings.join('; ')}` : ''}. Gates не провалены — их исход неизвестен: если срок фазы мал для профиля, увеличьте runTimeoutMs (doctor называет фазу), устраните нагрузку среды; цикл ведущего повторит проверку один раз; если и повтор прерван, а переносить нечего, попросите пользователя запустить очередь в панели («Подтвердить и запустить»)`,
+      { interrupted, ...(warnings.length ? { warnings } : {}) },
+    );
   if (decision === 'failed')
     return hold(
       'base.check.waiting',
-      `Проверка базы не пройдена: ${failed.join(', ')}. Исправьте базу и выполните base-update (ведущий агент — с --by host); если провал вызван средой — устраните её: цикл ведущего повторит проверку один раз; если и повтор не прошёл, а переносить нечего, попросите пользователя запустить очередь в панели («Подтвердить и запустить»)`,
-      { failures: failed },
+      `Проверка базы не пройдена: ${failed.join(', ')}${interrupted.length ? `; прервана: ${interrupted.join('; ')}` : ''}${warnings.length ? `; предупреждения: ${warnings.join('; ')}` : ''}. Исправьте базу и выполните base-update (ведущий агент — с --by host); если провал вызван средой — устраните её: цикл ведущего повторит проверку один раз; если и повтор не прошёл, а переносить нечего, попросите пользователя запустить очередь в панели («Подтвердить и запустить»)`,
+      {
+        failures: failed,
+        ...(interrupted.length ? { interrupted } : {}),
+        ...(warnings.length ? { warnings } : {}),
+      },
     );
   return decision === 'cleared';
 }

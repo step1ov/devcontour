@@ -497,3 +497,39 @@ test('Attention card: a long or masked proposal is not confirmable from the card
     await f.cleanup();
   }
 });
+
+test('F72: input_propose takes the request version as version (the field input_show returns) or expectedVersion; both differing is refused', async () => {
+  const f = await inputFixture(controlled({ critical: true }));
+  try {
+    const { requestId } = await question(f);
+    const agent = new AgentService(f.h, f.root);
+    const run = (input: unknown) => agent.execute({ operation: 'input_propose', input });
+    const { version } = f.service.show({ requestId });
+    const proposal = {
+      requestId,
+      text: 'Keep the registered contract: return JSON as now.',
+      optionId: 'json',
+      reasoning: 'The registered API contract fixes JSON and the accepted file already returns it.',
+    };
+    // Без версии и с разными значениями двух полей — отказ схемы.
+    assert.equal(await codeOf(() => run(proposal)), '400:-');
+    assert.equal(
+      await codeOf(() => run({ ...proposal, version, expectedVersion: version + 1 })),
+      '400:-',
+    );
+    // version — синоним: сверка та же, устаревшая версия — конфликт.
+    assert.equal(
+      await codeOf(() => run({ ...proposal, version: version + 1 })),
+      '409:REVISION_CONFLICT',
+    );
+    const saved = run({ ...proposal, version }) as { changed: boolean };
+    assert.equal(saved.changed, true);
+    assert.equal(
+      (run({ ...proposal, version, expectedVersion: version }) as { changed: boolean }).changed,
+      false,
+    );
+    assert.equal(f.service.show({ requestId }).proposal?.text, proposal.text);
+  } finally {
+    await f.cleanup();
+  }
+});

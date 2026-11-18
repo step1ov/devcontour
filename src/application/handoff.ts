@@ -29,6 +29,8 @@ import {
   type WorkflowJob as HarnessJob,
 } from 'devcontour-harness';
 import { z } from 'zod';
+import { dirname, resolve } from 'node:path';
+import { heldByServer } from '../runner/server-record.ts';
 import { DomainError, type Config, type DevContourState } from '../core/model.ts';
 import type { DevContour } from '../core/service.ts';
 import { LeadWorkflow, jointWaiting, type WorkflowJob } from '../core/lead-workflow.ts';
@@ -50,7 +52,11 @@ import {
   staleBaseStop,
 } from '../core/work-status.ts';
 import { executionOf, toDomain } from '../harness/execution.ts';
-import { ContractChanges } from '../runner/contract-change.ts';
+import {
+  ContractChanges,
+  openCorrections,
+  type CorrectionEffect,
+} from '../runner/contract-change.ts';
 import { resolveIdPrefix } from '../core/id-prefix.ts';
 import type { DevContourExecutionStore } from '../harness/store.ts';
 
@@ -220,7 +226,53 @@ export interface DevContourHandoff {
       startedAt: string;
       elapsedMs: number;
     }[];
+    /**
+     * Открытые корректировки принятых задач завершённых операций изменения
+     * контракта (F69): до пяти, старые операции первыми; `more` — сколько
+     * ещё. Каждая закрывается `command` после проверки принятого результата.
+     */
+    corrections?: {
+      items: {
+        operation: string;
+        taskId: string;
+        effects: CorrectionEffect[];
+        command: string;
+      }[];
+      more?: number;
+    };
   };
+}
+
+/** Предел записей `host.corrections`. */
+const HANDOFF_CORRECTIONS = 5;
+
+/** Открытые корректировки (`host.corrections`); с `boardId` — задачи этой доски. */
+function correctionsOfHandoff(
+  h: DevContour,
+  state: State,
+  boardId?: string,
+): DevContourHandoff['host']['corrections'] {
+  const ids =
+    boardId === undefined
+      ? undefined
+      : new Set(state.boards.find((b) => b.id === boardId)?.revisions.flatMap((r) => r.taskIds));
+  const all = new ContractChanges(h, '')
+    .list()
+    .filter((op) => op.status === 'completed')
+    .sort((a, b) => ((a.finishedAt ?? '') < (b.finishedAt ?? '') ? -1 : 1))
+    .flatMap((op) =>
+      openCorrections(op)
+        .filter((c) => !ids || ids.has(c.taskId))
+        .map((c) => ({
+          operation: op.id,
+          taskId: c.taskId,
+          effects: c.effects,
+          command: `contract_change_ack_correction {"id": "${op.id}", "taskIds": ["${c.taskId}"], "reason": "…"}`,
+        })),
+    );
+  if (!all.length) return undefined;
+  const items = all.slice(0, HANDOFF_CORRECTIONS);
+  return { items, ...(all.length > items.length ? { more: all.length - items.length } : {}) };
 }
 
 /** Предел записей `host.verifications`. */
@@ -378,10 +430,14 @@ export function harnessOf(h: DevContour) {
 /**
  * Остановка выдачи «очередь ведёт другой controller» (`CONTROLLER_BUSY`) в
  * пакете без открытых поручений: выдавать нечего, а сервер, держащий роль
- * controller, — обычное состояние, а не шаг ведущего.
+ * controller, — обычное состояние, а не шаг ведущего. С открытыми
+ * поручениями остановка снимается, когда роль держит работающий сервер
+ * этого workspace (`serve`, F71): очередь ведёт он сам, действия ведущего
+ * не нужно. Чужой или неизвестный владелец и истёкший срок роли остаются
+ * остановкой.
  */
-export function withoutIdleControllerStop(pack: HandoffPack): HandoffPack {
-  if (pack.summary.open || !pack.controller?.live) return pack;
+export function withoutIdleControllerStop(pack: HandoffPack, serve = false): HandoffPack {
+  if (!pack.controller?.live || (pack.summary.open && !serve)) return pack;
   const stops = pack.stops.filter((s) => s.code !== 'CONTROLLER_BUSY');
   if (stops.length < pack.stops.length) return { ...pack, stops };
   // Остановку отбросил предел пакета: она — среди `truncated.stops`.
@@ -1663,6 +1719,14 @@ export function devcontourHandoffWithin(
       // если предел её отбросил (`withHeldBaseStop`).
       const full: { queueStop?: HandoffPack['stops'][number] } = {};
       const errors = h.store.latestEvents(['scheduler.error'], 50);
+      // Роль controller со свежим сроком держит работающий сервер этого
+      // workspace (F71): его остановка CONTROLLER_BUSY — не шаг ведущего.
+      const lease = v.controller();
+      const serveController =
+        !!lease &&
+        lease.leaseUntil > Date.now() &&
+        h.store.file !== ':memory:' &&
+        heldByServer(dirname(resolve(h.store.file)), lease.owner);
       const stale = staleBaseStop(state, errors);
       // Чем снимается пауза того же снимка: им пакет называет паузу вместо
       // команды harness (`withQueuePauseText`).
@@ -1694,7 +1758,7 @@ export function devcontourHandoffWithin(
           withStaleBaseStop(
             withHeldBaseStop(
               withoutShutdownFailures(
-                withoutIdleControllerStop(raw),
+                withoutIdleControllerStop(raw, serveController),
                 scopedRuns(state, options?.graphId),
               ),
               state,
@@ -1781,10 +1845,12 @@ export function devcontourHandoffWithin(
         }
       };
       const verifications = verificationsOf(h, state, boardId);
+      const corrections = correctionsOfHandoff(h, state, boardId);
       const withDiscussion = (discussion: DevContourHandoff['host']['discussion']) => ({
         ...(next ? { next } : {}),
         liveBoards,
         ...(verifications ? { verifications } : {}),
+        ...(corrections ? { corrections } : {}),
         ...(discussion ? { discussion } : {}),
       });
       let budget = limit
@@ -1893,6 +1959,18 @@ function hostMarkdown(host: DevContourHandoff['host'], commands: Record<string, 
       (v) =>
         `- Идёт совместная проверка ChangeSet ${v.changeSetId}: ${v.verificationId}, ${v.elapsedMs < 60_000 ? '<1' : Math.floor(v.elapsedMs / 60_000)} мин (задание ${v.job.key} — ${v.job.status}, стадия ${v.job.stage})`,
     ),
+    ...(host.corrections
+      ? [
+          `- Корректировки принятых задач после изменения контракта: ${host.corrections.items
+            .map(
+              (c) =>
+                `${c.taskId} (${c.operation}${c.effects.length ? ': ' + c.effects.join(', ') : ''})`,
+            )
+            .join(
+              ', ',
+            )}${host.corrections.more ? ` и ещё ${host.corrections.more}` : ''} — закрыть: \`${host.corrections.items[0].command}\``,
+        ]
+      : []),
     ...(host.discussion
       ? [
           host.discussion.requests.length

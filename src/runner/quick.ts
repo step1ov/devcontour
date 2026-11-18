@@ -423,6 +423,8 @@ export function quickResult(
           ...(e.kind === 'not-applicable' && e.notApplicable
             ? { notApplicable: notApplicableSummary(e.notApplicable) }
             : {}),
+          // Взято из кандидата при том же дереве: PASS без исполнения.
+          ...(e.reusedEvidence ? { reused: true as const } : {}),
         }));
     const ids = new Set(runs.map((r) => r.id));
     const board = state.boards.find((b) => b.revisions.some((r) => r.taskIds.includes(task.id)));
