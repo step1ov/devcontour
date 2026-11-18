@@ -1,5 +1,6 @@
 import { technicalReview } from 'devcontour-harness';
 import { attemptNumbers } from '../core/attempt-numbers.ts';
+import { clipAtBoundary } from '../core/clip.ts';
 import { reviewExecutionOf, toDomain } from '../harness/execution.ts';
 import { runtimeAdapters } from '../harness/adapters.ts';
 import { carriedTaskIds } from '../core/work-status.ts';
@@ -287,6 +288,41 @@ export function checksWarnings(
 type Author = 'codex' | 'claude';
 type Runtimes = Record<Author, AgentAdapter>;
 
+/** Предел текста отказа ревью: столько хранит ошибка задания очереди. */
+const REJECTION_LIMIT = 1000;
+/**
+ * Текст отказа ревью. Он доходит до ведущего через ошибку задания (предел
+ * 1000 знаков в очереди), и длинная сводка вытесняла ссылку на находки
+ * (F54). Целиком идут префикс, указание по невыполнимым обязательствам,
+ * число находок и каталог решения; сокращаются сводка и тексты находок
+ * выполнимости — каждая не больше половины остатка. Окончание
+ * «Артефакты: <каталог>» разбирает операция изменения контракта.
+ */
+export function rejectionMessage(r: {
+  summary: string;
+  feasibility: string[];
+  open: number;
+  opened: number;
+  artifact: string;
+}) {
+  const prefix = 'Независимое ревью отклонено: ';
+  const guide = r.feasibility.length
+    ? ' Добавьте ограничения области входов и ресурсов, допущения или измените требование.'
+    : '';
+  const pointer =
+    ` Открытых находок: ${r.open}, из них новых в этом раунде: ${r.opened};` +
+    ` ответ ревьюера раунда — review.json в каталоге решения. Артефакты: ${r.artifact}`;
+  const fit = (text: string, n: number) => (n <= 1 ? '' : clipAtBoundary(text, n));
+  const budget = Math.max(0, REJECTION_LIMIT - prefix.length - guide.length - pointer.length);
+  const feasibility = r.feasibility.length
+    ? ` Обязательства невыполнимы или неизмеримы в заявленном виде: ${r.feasibility.join('; ')}.`
+    : '';
+  const summary = fit(
+    r.summary + '.',
+    budget - Math.min(feasibility.length, Math.floor(budget / 2)),
+  );
+  return prefix + summary + fit(feasibility, budget - summary.length) + guide + pointer;
+}
 // Попытки накапливаются: держим последние, чтобы состояние не росло без предела.
 const MAX_CONTRACT_ATTEMPTS = 60;
 function recordContractAttempt(h: DevContour, attempt: ContractAttempt) {
@@ -362,8 +398,8 @@ export const CONSOLIDATION_SUBJECT = 'contract consolidation';
  * иначе консолидация отклонялась бы за давно утверждённое.
  */
 const consolidationReview = [
-  `This is a consolidation of a registered contract: "content" rewrites the current registered text "previous.content" of the same file into a clean description of the current behaviour. It must mean exactly the same: no rule dropped, weakened, widened or added; no wording that a later amendment replaced brought back (a replaced rule stays replaced, read the old text as a whole, later amendments override earlier ones); every token in "ids" keeps its meaning; headings and anchors that sibling contracts reference ("siblings") stay. Pinned "artifacts", "checks" and "underTest" are byte-identical to the current redaction: read them as context, they are not the subject.`,
-  `Build the complete mapping from the old text to the new one: for every section and every normative rule of the old text, where it is in the new text (heading or anchor) or which rule it was merged into as a duplicate, and why the meaning is the same. Write the whole mapping into the summary, one line per item in the form "old → new": the left side names the old heading and the ids of the item, the right side names the heading, anchor or id where it is in the new text (or "merged into" one of them). The controller rejects a summary in which any old id or heading is not on the left side of such a line. If "incompleteMapping" is present, the previous summary missed the items it names. "inputs" are open questions of implementers about this contract: the new text must not answer them differently from the old one.`,
+  `This is a consolidation of a registered contract: "content" rewrites the current registered text "previous.content" of the same file into a clean description of the current behaviour. It must mean exactly the same: no rule dropped, weakened, widened or added; no wording that a later amendment replaced brought back (a replaced rule stays replaced, read the old text as a whole, later amendments override earlier ones); every token in "ids" and in "references" keeps its meaning and its context; headings and anchors that sibling contracts reference ("siblings") stay. Pinned "artifacts", "checks" and "underTest" are byte-identical to the current redaction: read them as context, they are not the subject.`,
+  `Build the complete mapping from the old text to the new one: for every section and every normative rule of the old text, where it is in the new text (heading or anchor) or which rule it was merged into as a duplicate, and why the meaning is the same. Write the whole mapping into the summary in lines of the form "old → new" (several pairs on one line are separated by ";"): the left side names at most one old heading and the rule ids of the item, the right side names the heading, anchor or id where the item is defined in the new text. A rule merged into another one is written "old id → merged into <id>" (or "слито в <id>"), the phrase opening the right side, with the id of the rule that now holds it. A journal entry that the new text folds into the rule it changed (the rule now cites it) is a merge: "DEC-040 → merged into REQ-1". An id that the old text labels but that is not a rule of this document, whose entry text stays in the new text in another layout, is written "id → reference" (or "→ ссылка"); the controller refuses it for heading labels and for entries whose text is gone, and you must never use it for a rule. Merges and references are recorded and rest on your judgement. Several old ids may share one line when the target on the right still defines each of them: the target heading's own text (up to the next heading), or the section where the target id is defined, contains the definition of each id, not just a mention. Name a heading by its full text, its anchor, its leading label (such as "REQ-4" for "REQ-4. Prices"), or for a numbered section by "§2.1", its number with the first word ("10. Known") or its quoted title without the number; the document title is a heading too. "ids" are the rules the old text defines (in a heading, as the first ids of a paragraph, list item or table cell, or as a "REQ-3. Text" label): each needs such a line. "references" are the other ids of the old text (decisions, test cases, other documents' rules): they keep their meaning and context and need no line while they stay in the new text verbatim. A token in "references" that actually states a rule in the old text is a rule: map it like a rule, and reject the consolidation if its rule is dropped or changed. The controller rejects a summary in which any id of "ids" or any old heading with its own text is not on the left side of such a line, or in which a rule of "ids" is no longer defined in the new text without a "merged into" or "reference" line. If "incompleteMapping" is present, the previous summary missed the items it names ("gaps" lists all of them). "inputs" are open questions of implementers about this contract: the new text must not answer them differently from the old one.`,
   `Return approved=false with a blocking finding with rule "${CONSOLIDATION}" for each dropped, weakened, widened or added rule, each resurrected pre-amendment wording, each changed meaning of an id, each sibling reference that no longer resolves, or when you cannot complete the mapping. Do not judge feasibility, verifiability or wording quality of rules that did not change and do not ask for improvements: a consolidation that keeps the meaning is approved even if the contract itself could be better.`,
 ];
 
@@ -544,11 +580,13 @@ async function review(
       (f) => f.status === 'open' && f.severity === 'blocking' && f.rule === FEASIBILITY,
     );
     throw new DomainError(
-      `Независимое ревью отклонено: ${record.summary}.` +
-        (feasibility.length
-          ? ` Обязательства невыполнимы или неизмеримы в заявленном виде: ${feasibility.map((f) => f.message).join('; ')}. Добавьте ограничения области входов и ресурсов, допущения или измените требование.`
-          : '') +
-        ` Артефакты: ${artifact}`,
+      rejectionMessage({
+        summary: record.summary,
+        feasibility: feasibility.map((f) => f.message),
+        open: record.findings.filter((f) => f.status === 'open').length,
+        opened: opened.length,
+        artifact,
+      }),
     );
   }
   return {
@@ -577,6 +615,7 @@ export function reviewConsolidationRound(
     previous: { id: string; content: string };
     content: string;
     ids: string[];
+    references: string[];
     artifacts?: unknown[];
     checks?: unknown;
     underTest?: string[];

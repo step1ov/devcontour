@@ -212,14 +212,19 @@ test('Экран этапа называет последнюю причину �
     }
     const stale = await read();
     assert.equal(stale?.stopReason, 'База прогонов отстала');
-    assert.equal(stale?.action, 'Устраните причину и выполните devcontour queue --start');
+    // Режим агента: запуск — команда ведущего, а не человека.
+    assert.equal(
+      stale?.action,
+      'Устраните причину и выполните queue_set {"paused": false} (devcontour queue --start --by host)',
+    );
     // Перенос базы устраняет причину: очередь ждёт проверки базы, а экран не
     // советует уже выполненный base-update.
     f.h.baseUpdated([{ repositoryId: 'main', from: 'a', to: 'b' }]);
     const waiting = await read();
     assert.equal(waiting?.reason, 'base-check');
     assert.doesNotMatch(waiting?.stopReason ?? '', /base-update|отстала/);
-    assert.equal(waiting?.action, 'Проверьте базу gates, затем выполните devcontour queue --start');
+    // Режим агента без задания доски: базу проверит workflow, не ведущий.
+    assert.match(waiting?.action ?? '', /^Базу проверит workflow доски: .*workflow_start/);
     assert.equal(f.h.store.events()[0]?.type, 'base.updated');
     f.h.pause(false);
     f.h.store.change('scheduler.error', (s) => {
@@ -233,7 +238,7 @@ test('Экран этапа называет последнюю причину �
       'Выдача остановлена человеком',
       'пауза оператора не выдаёт прежний сбой за причину',
     );
-    assert.equal(operator?.action, 'devcontour queue --start');
+    assert.match(operator?.action ?? '', /^Паузу человека снимает пользователь/);
   } finally {
     await app.close();
     await scheduler.stop();

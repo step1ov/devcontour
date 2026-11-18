@@ -1,3 +1,4 @@
+import { clipAtBoundary } from '../core/clip.ts';
 import { randomUUID } from 'node:crypto';
 import { readFile, writeFile } from 'node:fs/promises';
 import { readFileSync, renameSync, rmSync } from 'node:fs';
@@ -21,19 +22,21 @@ import {
 import { adapters, type AgentAdapter } from './adapters.ts';
 import { pinArtifacts } from './contract-artifacts.ts';
 import { contractImpact } from './contract-impact.ts';
-import { STALE_BASE, updateBase } from './base-update.ts';
+import { updateBase } from './base-update.ts';
 import { planRepin, stalePins } from './context.ts';
 import { applyConfig, busyWork } from './reconfigure.ts';
 import { loadConfig } from './config.ts';
 import { loadedDigest } from '../core/service.ts';
 import { git, isAncestor } from './process.ts';
-import { heldBaseOf, queueStopView } from '../core/work-status.ts';
+import { settleStaleBaseStop } from './stale-base.ts';
 import {
   registeredContractLifts,
   siblingContractLifts,
   siblingLiftHolds,
   type SiblingContractLift,
 } from './sensitive-paths.ts';
+
+export { clipAtBoundary };
 
 /**
  * Изменение контракта как сохраняемая операция.
@@ -185,26 +188,6 @@ export type ContractChange = {
   }[];
 };
 
-/**
- * Сократить текст до `n` знаков по границе фразы или слова, с «…».
- *
- * История операции хранится в записи и ограничена по размеру, но обрыв
- * посреди слова делал причину отказа нечитаемой. Граница предложения берётся,
- * если она не дальше трети предела от конца, иначе — последний пробел.
- * Полный текст ревью доступен по ссылке `review` записи истории.
- */
-export function clipAtBoundary(text: string, n: number) {
-  if (text.length <= n) return text;
-  // Не разрезать суррогатную пару: половина символа в JSON — мусор.
-  let end = n - 1;
-  const code = text.charCodeAt(end - 1);
-  if (code >= 0xd800 && code <= 0xdbff) end--;
-  const head = text.slice(0, end);
-  const sentence = Math.max(...['. ', '; ', '! ', '? ', '.\n'].map((m) => head.lastIndexOf(m)));
-  const space = head.search(/\s\S*$/);
-  const cut = sentence >= (n * 2) / 3 ? sentence + 1 : space > n / 3 ? space : head.length;
-  return head.slice(0, cut).trimEnd() + '…';
-}
 /** Предел подробности записи истории и текста ошибки операции. */
 const DETAIL = 500;
 const ERROR = 1000;
@@ -216,6 +199,16 @@ const active = (op: ContractChange) =>
 /** Представление операции наружу; `continued` — соседи, продолженные вслед за ней. */
 export type ContractChangeView = Omit<ContractChange, 'token' | 'leaseUntil'> & {
   next: Step | null;
+  /**
+   * Консолидация: ID, которые ревью этой операции отобразило слиянием
+   * (`merged into`) или ссылкой (`→ reference`), — их держит только суждение
+   * ревьюера, и ведущий видит их здесь.
+   */
+  mapping?: {
+    review: string;
+    merged?: { id: string; into: string }[];
+    demoted?: string[];
+  }[];
   continued?: ContractChangeView[];
 };
 
@@ -269,7 +262,18 @@ export class ContractChanges {
     const { token, leaseUntil, ...rest } = op;
     void token;
     void leaseUntil;
-    return { ...rest, next: stepsOf(op)[op.step] ?? null };
+    const mapping = this.reviewsOf(op)
+      .filter((a) => a.merged?.length || a.demoted?.length)
+      .map((a) => ({
+        review: a.id,
+        ...(a.merged?.length ? { merged: a.merged } : {}),
+        ...(a.demoted?.length ? { demoted: a.demoted } : {}),
+      }));
+    return {
+      ...rest,
+      next: stepsOf(op)[op.step] ?? null,
+      ...(mapping.length ? { mapping } : {}),
+    };
   }
 
   /** Начать операцию или вернуть уже идущую по тому же предложению. */
@@ -783,38 +787,35 @@ export class ContractChanges {
   }
 
   /**
-   * Снять паузу сбоя такта «база прогонов отстала от рабочей ветки» (F40),
-   * если ни одна база больше не отстаёт. Только паузу этой причины: без
-   * назначенной причины (`runtime`) и с последней ошибкой такта о базе;
-   * паузы оператора, ведущего, штатной остановки, проверки базы и
-   * применения конфигурации не трогает. Проверка и снятие — одной записью.
+   * Остановка такта «база прогонов отстала от рабочей ветки» (F40) после шага
+   * `base`: то же правило, что у такта (`settleStaleBaseStop`). Базы на
+   * вершинах, записанных при остановке, или сдвинуты ровно этой операцией
+   * (`performed`) — пауза снимается, событие `contract-change.queue-resumed`
+   * пишется той же записью. База сдвинута иначе (git напрямую, слияние в
+   * ветку интеграции) или вершины не записаны — ожидание `base-check` с
+   * удержанием чувствительных путей: непроверенная база не выдаётся. Паузы
+   * оператора, ведущего, остановки, проверки базы и применения конфигурации
+   * не трогаются. `true` — пауза снята.
    */
-  private async liftStaleBasePause(op: Pick<ContractChange, 'id'>) {
-    for (const r of repositories(this.h.config)) {
-      const behind = Number(
-        await git(r.path, 'rev-list', '--count', `refs/heads/${r.targetBranch}..HEAD`),
-      );
-      if (behind) return false;
-    }
+  private async liftStaleBasePause(
+    op: Pick<ContractChange, 'id'>,
+    performed: { repositoryId: string; from: string; to: string }[] = [],
+  ) {
     try {
-      return this.h.store.atomic(() => {
-        const state = this.h.store.read();
-        // Удержанный перенос базы снимает только человек (D42).
-        if (!state.paused || state.pauseReason || heldBaseOf(state)) return false;
-        const stop = queueStopView(state, this.h.store.latestEvents(['scheduler.error'], 50));
-        if (stop.reason !== 'runtime' || !stop.stopReason?.startsWith(STALE_BASE)) return false;
-        this.h.pause(false);
-        // Запуск записан как снятие паузы операцией, а не решение человека:
-        // событие называет операцию и причину снятой паузы.
-        this.h.store.appendEvent('contract-change.queue-resumed', {
-          operation: op.id,
-          reason: 'stale-base',
-        });
-        return true;
+      const outcome = await settleStaleBaseStop(this.h, this.root, {
+        by: 'contract-change',
+        performed,
+        released: () =>
+          // Снятие записано как действие операции, а не решение человека:
+          // событие называет операцию и причину снятой паузы.
+          this.h.store.appendEvent('contract-change.queue-resumed', {
+            operation: op.id,
+            reason: 'stale-base',
+          }),
       });
+      return outcome === 'released';
     } catch {
-      // Очередь сейчас не запустить (сервер останавливается, нет готовой
-      // разработки): пауза остаётся, перенос базы от этого не зависит.
+      // Сверку сейчас не выполнить (git): пауза остаётся, её снимет такт.
       return false;
     }
   }
@@ -1139,8 +1140,12 @@ export class ContractChanges {
         }
         const tip = await git(repo.path, 'rev-parse', target);
         // База догнала рабочую ветку: пауза сбоя такта «база отстала»
-        // (коммит контракта на рабочую ветку до переноса) больше не нужна (F40).
-        await this.liftStaleBasePause(op);
+        // (коммит контракта на рабочую ветку до переноса) больше не нужна (F40)
+        // — если базу сдвинула только эта операция.
+        await this.liftStaleBasePause(
+          op,
+          updated.map((u) => ({ repositoryId: u.repositoryId, from: u.from, to: u.to })),
+        );
         this.advanceStep(op, (current) => {
           if (lifted.size)
             this.log(

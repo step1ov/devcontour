@@ -31,7 +31,10 @@ test('Баннер виден на каждом экране, пока очер�
       'Проверка базы не пройдена: test, lint. Исправьте базу и выполните base-update; ' +
       'длинная причина без пробелов '.repeat(4) +
       'x'.repeat(200),
-    action: 'Проверьте базу gates и выполните devcontour queue --start',
+    // Действие режима агента без задания доски (`queueStopView`): базу снова
+    // проверит workflow доски, а не queue --start ведущего.
+    action:
+      'Исправьте базу и выполните devcontour base-update (ведущий агент — с --by host) — workflow доски (workflow_start) проверит её снова',
     since: new Date().toISOString(),
   };
   let queue: object = stopped;

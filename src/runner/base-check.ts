@@ -327,6 +327,12 @@ export async function baseMoveReview(
   // независимым ревью: их снимает цикл, с доказательством в `base.checked`.
   const reviewed: ReviewedContractDocument[] = [];
   for (const m of baseMovesOf(state) ?? []) {
+    // Диапазон неизвестен: пустой diff не доказывает, что приёмка и
+    // настройка не тронуты, — перенос подтверждает оператор.
+    if (m.unknown) {
+      held.push(`${m.repositoryId}:(диапазон переноса неизвестен)`);
+      continue;
+    }
     const to = bases.find((b) => b.repositoryId === m.repositoryId)?.sha;
     if (!to) continue;
     const entries = await sensitiveBaseEntries(h, dataRoot, state, m.repositoryId, m.from, to);
@@ -664,7 +670,7 @@ export async function checkBase(
   if (decision === 'failed')
     return hold(
       'base.check.waiting',
-      `Проверка базы не пройдена: ${failed.join(', ')}. Исправьте базу и выполните base-update (ведущий агент — с --by host); если провал вызван средой — проверьте и выполните queue --start`,
+      `Проверка базы не пройдена: ${failed.join(', ')}. Исправьте базу и выполните base-update (ведущий агент — с --by host); если провал вызван средой — устраните её: цикл ведущего повторит проверку один раз; если и повтор не прошёл, а переносить нечего, попросите пользователя запустить очередь в панели («Подтвердить и запустить»)`,
       { failures: failed },
     );
   return decision === 'cleared';

@@ -665,7 +665,14 @@ export interface Run {
   phase: TaskStatus;
   startedAt: string;
   finishedAt?: string;
+  /**
+   * Срок владения. У активной попытки этой версии в документе — метка
+   * `ROW_LEASE` (-1), срок держит строка `leases` (D53); чтение через `Store`
+   * накладывает срок строки.
+   */
   leaseUntil: number;
+  /** Версия движка, выдавшего попытку (поле harness). */
+  engineVersion?: string;
   worktree?: string;
   baseSha?: string;
   candidateSha?: string;
@@ -790,6 +797,20 @@ export interface ContractAttempt {
   summary: string;
   /** rule — класс находки; `feasibility` — обязательство невыполнимо или неизмеримо. */
   findings: { severity: string; message: string; rule?: string }[];
+  /**
+   * Исход, отличный от вердикта ревьюера: `incomplete-mapping` — ревью
+   * консолидации одобрило смысл, но итог не отобразил всё;
+   * `gaps` — полный список пропусков. Редакция не зарегистрирована.
+   */
+  outcome?: 'incomplete-mapping';
+  gaps?: string[];
+  /**
+   * Сверка отображения консолидации: правила, слитые в другие
+   * (`merged into`), и помеченные ID, отображённые ссылкой (`→ reference`).
+   * Их держит только суждение ревьюера.
+   */
+  merged?: { id: string; into: string }[];
+  demoted?: string[];
   artifact: string;
   authorRuntime: string;
   reviewerRuntime: string;
@@ -799,6 +820,13 @@ export interface BaseMove {
   repositoryId: string;
   from: string;
   to: string;
+  /**
+   * Начало диапазона неизвестно (остановка «база отстала» без записанной
+   * вершины, компонент добавлен после неё): `from` равен `to`, и разбор
+   * переноса удерживает его до подтверждения оператора (D42) — пустой
+   * диапазон не доказывает, что чувствительные пути не тронуты.
+   */
+  unknown?: true;
 }
 export interface DevContourState {
   preparation?: PreparationState;
