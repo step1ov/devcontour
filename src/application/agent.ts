@@ -1,4 +1,4 @@
-import { heldBaseOf } from '../core/work-status.ts';
+import { PAUSE_REASON_CHARS, heldBaseOf } from '../core/work-status.ts';
 import { Preparation } from '../core/preparation.ts';
 import { preparationInputs, type PreparationOperation } from '../core/preparation-model.ts';
 import {
@@ -126,7 +126,17 @@ export const agentInputs = {
     })
     .strict(),
   changeset_create: z.object({ changeSet: changeSetInput }).strict(),
-  queue_set: z.object({ paused: z.boolean() }).strict(),
+  queue_set: z
+    .object({
+      paused: z.boolean(),
+      /** Короткая причина паузы ведущего: её видят вид очереди, центр внимания и пакет. */
+      reason: z.string().trim().min(1).max(PAUSE_REASON_CHARS).optional(),
+    })
+    .strict()
+    .refine((v) => v.paused || v.reason === undefined, {
+      message: 'reason names why the lead pauses: only with paused true',
+      path: ['reason'],
+    }),
   preview_status: z.strictObject({}),
   feasibility_spike: spikeInput,
   feasibility_spikes: z.strictObject({ repositoryId: id.optional() }),
@@ -307,8 +317,7 @@ export const descriptions: Record<AgentOperation, string> = {
     'Create a correction after board acceptance, preserving history and recalculating transitive impact.',
   changeset_create:
     'Declare a shared change across boards. Set releaseId to bind product release acceptance to the workspace INTENT map and mandatory joint tests. Verification and acceptance remain separate operations.',
-  queue_set:
-    'Pause or resume issuance of tasks. Resuming may invoke configured models in a running server; this does not launch a server or cancel active runs.',
+  queue_set: `Pause or resume issuance of tasks. The pause is recorded as the lead's; reason (with paused true, up to ${PAUSE_REASON_CHARS} chars) says why, and the queue view, the attention center and session_handoff show it. Resuming may invoke configured models in a running server; this does not launch a server or cancel active runs.`,
   feasibility_spike:
     'Run a bounded feasibility experiment before implementation: the given argv of an oracle or prototype at a pinned commit, per input size (DEVCONTOUR_SPIKE_SIZE) and seed, under a time limit. Stores commands, versions, times, outcome and limits of inference. A timeout is inconclusive for that method and budget; it never proves hardness or permits weakening a requirement.',
   feasibility_spikes:
@@ -893,7 +902,7 @@ export class AgentService {
         const value = agentInputs.queue_set.parse(input);
         if (!value.paused && this.options.stopping?.()) throw new DomainError(SERVER_STOPPING, 409);
         // Паузу записывает актёр вызова — ведущий агент, а не человек.
-        h.pause(value.paused, 'operator', 'lead');
+        h.pause(value.paused, 'operator', 'lead', value.reason);
         return { ...value, queue: queueStopOf(h), serverRequiredForExecution: true };
       }
       default:

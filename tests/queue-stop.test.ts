@@ -490,6 +490,80 @@ test('Пауза ведущего агента через queue_set записа
   }
 });
 
+test('Пауза ведущего агента через queue_set хранит короткую причину; вид остановки её называет (F64)', async () => {
+  const f = fixture();
+  try {
+    f.h.pause(false);
+    const agent = new AgentService(f.h, f.root);
+    const set = (await agent.run({
+      operation: 'queue_set',
+      input: { paused: true, reason: '  Жду ревью контракта оплаты  ' },
+    })) as { queue: QueueStopView };
+    assert.equal(set.queue.by, 'lead');
+    assert.equal(
+      set.queue.stopReason,
+      'Выдача остановлена ведущим агентом (queue_set): Жду ревью контракта оплаты',
+    );
+    assert.equal(f.h.store.read().pauseActor?.reason, 'Жду ревью контракта оплаты');
+    const journal = f.h.store
+      .events()
+      .filter((e) => e.type === 'scheduler.paused')
+      .at(-1);
+    assert.equal((journal?.data as { note?: string }).note, 'Жду ревью контракта оплаты');
+    // Предел длины и причина только у паузы.
+    await assert.rejects(
+      agent.run({ operation: 'queue_set', input: { paused: true, reason: 'x'.repeat(301) } }),
+    );
+    await assert.rejects(
+      agent.run({ operation: 'queue_set', input: { paused: false, reason: 'Причина' } }),
+    );
+    // Новая пауза ведущего без причины прежнюю причину не наследует.
+    f.h.pause(false);
+    await agent.run({ operation: 'queue_set', input: { paused: true } });
+    assert.equal(f.h.store.read().pauseActor?.reason, undefined);
+    // Снятие паузы убирает отметку вместе с причиной.
+    f.h.pause(false);
+    assert.equal(f.h.store.read().pauseActor, undefined);
+  } finally {
+    f.cleanup();
+  }
+});
+
+test('CLI queue --pause --by host --reason записывает причину паузы ведущего (F64)', async () => {
+  const root = await realpath(await mkdtemp(join(tmpdir(), 'devcontour-queue-reason-')));
+  const repo = join(root, 'repo'),
+    data = join(root, 'data');
+  try {
+    await mkdir(repo);
+    await mkdir(data);
+    await git(repo, 'init', '-b', 'main');
+    await writeFile(join(repo, 'README.md'), 'Queue fixture');
+    await git(repo, 'add', '.');
+    await git(repo, 'commit', '-m', 'fixture');
+    const c = config({ repository: repo });
+    await writeFile(join(data, 'config.json'), JSON.stringify(c));
+    const h = new DevContour(new Store(join(data, 'state.sqlite')), c);
+    h.pause(false);
+    h.store.close();
+    const cli = [...cliCommand(), 'queue', '--data', data];
+    const paused = await command(
+      [...cli, '--pause', '--by', 'host', '--reason', 'Жду решения по схеме'],
+      process.cwd(),
+    );
+    assert.equal(paused.code, 0, paused.stderr);
+    const out = JSON.parse(paused.stdout) as QueueStopView;
+    assert.equal(out.by, 'lead');
+    assert.match(out.stopReason ?? '', /Жду решения по схеме/);
+    // Причину записывает только пауза ведущего.
+    const human = await command([...cli, '--pause', '--reason', 'Пауза человека'], process.cwd());
+    assert.notEqual(human.code, 0);
+    assert.match(human.stderr, /--reason/);
+  } finally {
+    if (root.startsWith(await realpath(tmpdir())) && root.includes('devcontour-queue-reason-'))
+      await rm(root, { recursive: true, force: true });
+  }
+});
+
 test('Пауза ведущего поверх паузы человека не переписывает решение человека', async () => {
   const f = fixture();
   try {

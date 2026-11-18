@@ -75,7 +75,7 @@ export interface HintParamMap {
   /** Пауза выдачи, её снимет действующее задание; `pause` — причина паузы. */
   'pause-lift': { pause: string; stage: number };
   /** Пауза человека (`by: lead` — её поставил ведущий через queue_set), её не снимает ни одно задание. */
-  'pause-operator': { by?: 'lead' };
+  'pause-operator': { by?: 'lead'; reason?: string };
   /**
    * Перенос базы удержан до подтверждения человека (`base.check.held`):
    * `paths` — чувствительные пути (`компонент:путь`), которые цикл задания
@@ -336,7 +336,7 @@ const en: Catalog = {
     `Dispatch is paused (${p.pause}); the lead workflow job of board ${s.boardId!} lifts the pause at stage ${p.stage}${s.loop!.step === 'lift-pause' ? '' : ' after it ' + loopEn(s.loop!)}. ${SERVER_EN}`,
   'pause-operator': (p, s) =>
     (p.by === 'lead'
-      ? 'Dispatch is paused by the lead (queue_set) and no job loop lifts it: resume with queue_set {"paused": false} (devcontour queue --start --by host) once the reason for the pause is resolved.'
+      ? `Dispatch is paused by the lead (queue_set${p.reason ? `: ${p.reason}` : ''}) and no job loop lifts it: resume with queue_set {"paused": false} (devcontour queue --start --by host) once the reason for the pause is resolved.`
       : 'Dispatch is paused by the operator and no job loop lifts it: resume only on the user\'s decision with queue_set {"paused": false} (devcontour queue --start --by host).') +
     ' Over a base-check wait this lifts only the pause: the board workflow checks the base.' +
     (s.loop && s.boardId ? ` Meanwhile the job loop of board ${s.boardId} ${loopEn(s.loop)}.` : ''),
@@ -588,7 +588,7 @@ const ru: Catalog = {
     `Выдача на паузе (${p.pause}); задание ведущего доски ${s.boardId!} снимет паузу на стадии ${p.stage}${s.loop!.step === 'lift-pause' ? '' : '; до этого цикл задания ' + loopRu(s.loop!)}. ${SERVER_RU}`,
   'pause-operator': (p, s) =>
     (p.by === 'lead'
-      ? 'Выдачу приостановил ведущий агент (queue_set), и ни один цикл задания её не снимет: возобновите queue_set {"paused": false} (devcontour queue --start --by host), когда причина паузы устранена.'
+      ? `Выдачу приостановил ведущий агент (queue_set${p.reason ? `: ${p.reason}` : ''}), и ни один цикл задания её не снимет: возобновите queue_set {"paused": false} (devcontour queue --start --by host), когда причина паузы устранена.`
       : 'Выдачу приостановил оператор, и ни один цикл задания её не снимет: возобновляйте только по решению пользователя — queue_set {"paused": false} (devcontour queue --start --by host).') +
     ' Над ожиданием проверки базы это снимает только паузу: базу проверит workflow доски.' +
     (s.loop && s.boardId ? ` Тем временем цикл задания доски ${s.boardId} ${loopRu(s.loop)}.` : ''),

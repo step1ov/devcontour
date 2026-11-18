@@ -44,10 +44,13 @@ import { repositories } from '../core/repositories.ts';
 import {
   heldBaseOf,
   leadLiftsPause,
+  leadPauseNote,
   pausedByLead,
   shutdownInterrupted,
   staleBaseStop,
+  type QueueStopView,
 } from '../core/work-status.ts';
+import { queueStopOf } from './queue-stop.ts';
 import { executionOf, toDomain } from '../harness/execution.ts';
 import { resolveIdPrefix } from '../core/id-prefix.ts';
 import type { DevContourExecutionStore } from '../harness/store.ts';
@@ -548,6 +551,81 @@ export function withStaleBaseStop(
     works,
     next,
   };
+}
+
+/** Команда harness, которой пакет называет снятие паузы выдачи. */
+const HARNESS_RESUME = 'harness resume';
+
+/**
+ * Пауза выдачи в пакете harness. Движок называет любую паузу `operator`
+ * паузой человека (`actor: user`), а её снятие — командой harness
+ * (`harness resume`), которой в DevContour нет. Тексты пакета с этой командой
+ * (очередь, остановка выдачи, `next` пакета и поручений) получают вид
+ * остановки очереди DevContour (`queueStopView`: причина и кто снимает) —
+ * тот же, что у `queue`, панели и центра внимания. Паузу ведущего агента
+ * (`queue_set`) без удержанного переноса базы снимает сам ведущий: эти
+ * записи называют его (`actor: lead`), его причину (`queue_set {"reason"}`)
+ * и команду DevContour; `next.command` не называется. Пауза человека
+ * остаётся за пользователем, `next.command` — как прежде (`commands`
+ * пакета поясняет его). Текст — под маской и в пределе строки пакета:
+ * причина идёт последней, команду предел не режет.
+ */
+export function withQueuePauseText(
+  pack: HandoffPack,
+  view: QueueStopView | undefined,
+  lead: { note?: string } | undefined,
+  redact: (text: string) => string = (text) => text,
+): HandoffPack {
+  if (!view?.paused || !view.action) return pack;
+  const action = view.action.charAt(0).toLowerCase() + view.action.slice(1);
+  const head = lead ? 'Выдача остановлена ведущим агентом (queue_set)' : view.stopReason;
+  const chars = [
+    ...redact(
+      `${head}. Продолжение — ${action}.` + (lead?.note ? ` Причина паузы: ${lead.note}` : ''),
+    ),
+  ];
+  const text =
+    chars.length > PACK_TEXT_CHARS
+      ? chars.slice(0, PACK_TEXT_CHARS - 1).join('') + '…'
+      : chars.join('');
+  const harness = (t: string | undefined) => !!t && t.includes(HARNESS_RESUME);
+  const resumes = (x: { actor?: string | null; action?: string }) =>
+    x.actor === 'user' && x.action === 'resume-queue';
+  const toLead = <T extends { actor?: string | null; command?: unknown }>(
+    x: T,
+    field: 'detail' | 'message',
+  ): T => {
+    const out = { ...x, actor: 'lead', [field]: text } as T;
+    delete out.command;
+    return out;
+  };
+  const queue =
+    lead && resumes(pack.queue)
+      ? toLead({ ...pack.queue }, 'detail')
+      : harness(pack.queue.detail)
+        ? { ...pack.queue, detail: text }
+        : pack.queue;
+  const stops = pack.stops.map((x) =>
+    lead && x.queue && resumes(x)
+      ? toLead(x, 'message')
+      : harness(x.message)
+        ? { ...x, message: text }
+        : x,
+  );
+  const works = pack.works.map((w) =>
+    lead && resumes(w.next)
+      ? { ...w, next: toLead(w.next, 'detail') }
+      : harness(w.next.detail)
+        ? { ...w, next: { ...w.next, detail: text } }
+        : w,
+  );
+  const next =
+    lead && resumes(pack.next)
+      ? toLead(pack.next, 'detail')
+      : harness(pack.next.detail)
+        ? { ...pack.next, detail: text }
+        : pack.next;
+  return { ...pack, queue, stops, works, next };
 }
 
 /** Наследуемое значение короче — обычное слово или число, а не учётные данные. */
@@ -1366,7 +1444,12 @@ function hostStep(ctx: HostContext): HandoffHostNext | undefined {
         action: 'queue_set',
         ...(first ? { boardId: first.id, job: jobRef(first), loop: ahead!.outlook } : {}),
         code: 'pause-operator',
-        params: leadLiftsPause(state) ? { by: 'lead' } : {},
+        params: leadLiftsPause(state)
+          ? {
+              by: 'lead',
+              ...(leadPauseNote(state) ? { reason: leadPauseNote(state)! } : {}),
+            }
+          : {},
       });
     }
   }
@@ -1446,22 +1529,43 @@ export function devcontourHandoffWithin(
       // Остановка очереди пакета без предела: пакет в пределе её возвращает,
       // если предел её отбросил (`withHeldBaseStop`).
       const full: { queueStop?: HandoffPack['stops'][number] } = {};
-      const stale = staleBaseStop(state, h.store.latestEvents(['scheduler.error'], 50));
-      const packOf = (options: Parameters<typeof handoffPack>[1]) =>
-        withStaleBaseStop(
-          withHeldBaseStop(
-            withoutShutdownFailures(
-              withoutIdleControllerStop(handoffPack(packSource, options)),
-              scopedRuns(state, options?.graphId),
+      const errors = h.store.latestEvents(['scheduler.error'], 50);
+      const stale = staleBaseStop(state, errors);
+      // Вид остановки очереди того же снимка: им пакет называет паузу вместо
+      // команды harness (`withQueuePauseText`).
+      const queueView = state.paused ? queueStopOf(h, state, errors) : undefined;
+      const leadPause =
+        pausedByLead(state) && !heldBaseOf(state)
+          ? { ...(leadPauseNote(state) ? { note: leadPauseNote(state) } : {}) }
+          : undefined;
+      // На сколько байт тексты DevContour (`with…`) удлинили пакет последней
+      // сборки: предел пакета harness меряет пакет до них, поэтому подбор
+      // предела ответа вычитает и этот прирост.
+      let growth = 0;
+      const packOf = (options: Parameters<typeof handoffPack>[1]) => {
+        const raw = handoffPack(packSource, options);
+        const out = withQueuePauseText(
+          withStaleBaseStop(
+            withHeldBaseStop(
+              withoutShutdownFailures(
+                withoutIdleControllerStop(raw),
+                scopedRuns(state, options?.graphId),
+              ),
+              state,
+              options?.redact,
+              full.queueStop,
             ),
-            state,
+            stale,
             options?.redact,
-            full.queueStop,
+            h.config.approvalMode ?? 'agent',
           ),
-          stale,
+          queueView,
+          leadPause,
           options?.redact,
-          h.config.approvalMode ?? 'agent',
         );
+        growth = out === raw ? 0 : Math.max(0, bytes(out) - bytes(raw));
+        return out;
+      };
       // Короткая форма из журнала и панели (`B-xxxxxxxx`) — однозначный
       // префикс полного id; неоднозначный называет кандидатов.
       const boardId =
@@ -1564,7 +1668,7 @@ export function devcontourHandoffWithin(
           maxBytes,
           measure: limit.format === 'md' ? 'markdown' : 'json',
         });
-      let maxBytes = clamp(limit.bytes - (size(pack) - own));
+      let maxBytes = clamp(limit.bytes - (size(pack) - own) - growth);
       let best: { pack: HandoffPack; size: number } | undefined;
       let last = pack;
       /** Наименьший предел пакета, ответ которого превысил предел ответа. */

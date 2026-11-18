@@ -48,6 +48,7 @@ import {
   heldBaseOf,
   heldBaseWait,
   pausedByLead,
+  PAUSE_REASON_CHARS,
 } from './work-status.ts';
 import { assertDag, descendants, latestTaskId, impactGraph } from './graph.ts';
 import {
@@ -2055,8 +2056,23 @@ export class DevContour {
     value: boolean,
     reason: 'operator' | 'shutdown' = 'operator',
     by: 'operator' | 'lead' = 'operator',
+    /** Короткая причина паузы ведущего (`queue_set {"reason"}`); пустая — без причины. */
+    note?: string,
   ) {
     const { store, engine } = executionOf(this);
+    const why = note?.trim() || undefined;
+    if (why !== undefined) {
+      if (!value || reason !== 'operator' || by !== 'lead')
+        throw new DomainError(
+          'Причину паузы записывает только пауза ведущего агента (queue_set {"paused": true, "reason": …}, CLI queue --pause --by host --reason …)',
+          400,
+        );
+      if ([...why].length > PAUSE_REASON_CHARS)
+        throw new DomainError(
+          `Причина паузы длиннее ${PAUSE_REASON_CHARS} знаков: опишите её короче`,
+          400,
+        );
+    }
     return domain(() =>
       store.host(value ? 'scheduler.paused' : 'scheduler.started', (ht) => {
         // Запуск очереди из любого процесса (CLI, отдельный MCP, панель) не
@@ -2141,12 +2157,18 @@ export class DevContour {
         // Кто поставил паузу `operator`: ведущий агент — отметкой со временем
         // паузы; решение человека и снятие паузы отметку убирают.
         const lead = value && reason === 'operator' && by === 'lead' && control.pausedAt;
-        if (lead) ht.state.pauseActor = { by: 'lead', at: control.pausedAt! };
+        if (lead)
+          ht.state.pauseActor = {
+            by: 'lead',
+            at: control.pausedAt!,
+            ...(why ? { reason: why } : {}),
+          };
         else if (!value || reason === 'operator') delete ht.state.pauseActor;
         const result = {
           paused: control.paused,
           reason: control.pauseReason,
           ...(lead ? { by: 'lead' as const } : {}),
+          ...(lead && why ? { note: why } : {}),
         };
         ht.journal(result);
         return result;

@@ -1922,6 +1922,53 @@ test('withoutIdleControllerStop: остановка, отброшенная пр
   }
 });
 
+test('session_handoff: пауза ведущего называет ведущего, его причину и команду DevContour, а не harness resume (F64)', async () => {
+  const f = fixture();
+  try {
+    const { at } = oneBoard(f.h);
+    f.h.pause(false);
+    tick();
+    await new AgentService(f.h, f.root).run({
+      operation: 'queue_set',
+      input: { paused: true, reason: 'Жду ревью контракта оплаты' },
+    });
+    const { pack, host } = at();
+    const texts = (p: HandoffPack) =>
+      JSON.stringify({ queue: p.queue, stops: p.stops, works: p.works, next: p.next });
+    assert.doesNotMatch(texts(pack), /harness resume/);
+    assert.equal(pack.queue.actor, 'lead');
+    assert.match(pack.queue.detail ?? '', /Жду ревью контракта оплаты/);
+    const stop = pack.stops.find((x) => x.queue)!;
+    assert.ok(stop, JSON.stringify(pack.stops));
+    assert.equal(stop.actor, 'lead');
+    assert.match(stop.message, /ведущим агентом/);
+    assert.match(stop.message, /Жду ревью контракта оплаты/);
+    assert.match(stop.message, /queue_set \{"paused": false\}/);
+    assert.equal(pack.next.actor, 'lead');
+    assert.equal(pack.next.command, undefined);
+    assert.ok(
+      pack.works.every((w) => w.next.actor !== 'user'),
+      JSON.stringify(pack.works),
+    );
+    assert.equal(host.next?.action, 'queue_set');
+    assert.deepEqual(host.next?.params, { by: 'lead', reason: 'Жду ревью контракта оплаты' });
+    assert.match(host.next?.detail ?? '', /Жду ревью контракта оплаты/);
+    // Пауза человека: остаётся за пользователем, но тексты называют команды
+    // DevContour, а не harness resume.
+    f.h.pause(true);
+    const human = at().pack;
+    assert.doesNotMatch(
+      texts({ ...human, next: { ...human.next, command: undefined } }),
+      /harness resume/,
+    );
+    assert.equal(human.queue.actor, 'user');
+    assert.equal(human.stops.find((x) => x.queue)?.actor, 'user');
+    assert.match(human.stops.find((x) => x.queue)?.message ?? '', /Запустить очередь/);
+  } finally {
+    f.cleanup();
+  }
+});
+
 test('session_handoff: остановка «база прогонов отстала» называет перенос базы, а не ожидание следующего run (F51)', () => {
   const f = fixture();
   try {

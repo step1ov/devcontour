@@ -4312,7 +4312,7 @@
     },
     {
       "name": "queue_set",
-      "description": "Pause or resume issuance of tasks. Resuming may invoke configured models in a running server; this does not launch a server or cancel active runs.",
+      "description": "Pause or resume issuance of tasks. The pause is recorded as the lead's; reason (with paused true, up to 300 chars) says why, and the queue view, the attention center and session_handoff show it. Resuming may invoke configured models in a running server; this does not launch a server or cancel active runs.",
       "readOnly": false,
       "inputSchema": {
         "$schema": "https://json-schema.org/draft/2020-12/schema",
@@ -4320,6 +4320,11 @@
         "properties": {
           "paused": {
             "type": "boolean"
+          },
+          "reason": {
+            "type": "string",
+            "minLength": 1,
+            "maxLength": 300
           }
         },
         "required": [

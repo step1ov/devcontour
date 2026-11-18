@@ -1329,10 +1329,17 @@ async function main() {
         // `--start` во время остановки serve отклоняется (SERVER_STOPPING):
         // сервер отмечает остановку в базе, и отметка действует, пока он
         // держит живую роль controller (`DevContour.pause`).
+        // Короткая причина — только у паузы ведущего (`--pause --by host`),
+        // как `queue_set {"reason"}`.
+        const note = args.includes('--reason') ? (option('--reason', '') ?? '') : undefined;
+        if (note !== undefined && !(args.includes('--pause') && actorOf() === 'host'))
+          throw new Error(
+            '--reason записывает причину паузы ведущего агента: queue --pause --by host --reason …',
+          );
         if (!args.includes('--start') && !args.includes('--pause')) result = queueStopOf(h);
         else if (args.includes('--pause'))
           result = {
-            ...h.pause(true, 'operator', actorOf() === 'host' ? 'lead' : 'operator'),
+            ...h.pause(true, 'operator', actorOf() === 'host' ? 'lead' : 'operator', note),
             ...queueStopOf(h),
           };
         else {
