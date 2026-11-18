@@ -8,6 +8,7 @@ import {
   assertTaskPreparation,
 } from './preparation.ts';
 import {
+  findingRole,
   outsideRoleScope,
   roleScopeAdvice,
   validateTaskContext,
@@ -1576,6 +1577,69 @@ export class DevContour {
     });
   }
   /**
+   * Перенести черновик на другую доску (F73): разобранная находка уходит с
+   * доски находок на доску своей работы той же задачей — с её
+   * происхождением (`finding`) и без отмены оригинала. Переносится только
+   * черновик, который ни разу не выдавался: у выданной задачи есть попытки,
+   * и по D46 она остаётся в работе задания своей доски. Обе ревизии — не
+   * принятые; от задачи не зависит неотменённая задача исходной ревизии
+   * (её план остался бы без зависимости). Утверждения у черновика нет:
+   * на новой доске его утверждает ревью плана, как любой черновик.
+   */
+  moveTask(id: string, boardId: string, reason: string) {
+    if (reason.trim().length < 10 || reason.length > 2000)
+      throw new DomainError('Опишите причину переноса: от 10 до 2000 символов', 400);
+    return this.store.change('task.moved', (s) => {
+      const t = task(s, id);
+      if (t.status !== 'draft')
+        throw new DomainError(
+          `Переносится только черновик; задача ${id} — ${t.status}. Для выданной работы создайте задачу на нужной доске`,
+          409,
+        );
+      if (t.attempt > 0 || t.failure || t.neutralFailures || s.runs.some((r) => r.taskId === id))
+        throw new DomainError(
+          `Задачу ${id} уже выдавали: её попытки остаются в работе задания своей доски (D46). Создайте задачу на нужной доске`,
+          409,
+        );
+      const from = s.boards.find((b) => b.revisions.at(-1)!.taskIds.includes(id));
+      if (!from) throw new DomainError(`Задача ${id} не в текущей ревизии доски`, 409);
+      if (from.id === boardId) throw new DomainError(`Задача ${id} уже на доске ${boardId}`, 409);
+      const source = from.revisions.at(-1)!;
+      if (
+        source.status !== 'active' ||
+        from.revisions.some((r) => r.status === 'accepted' && r.taskIds.includes(id))
+      )
+        throw new DomainError(`Ревизия доски ${from.id} с задачей ${id} принята`, 409);
+      const target = board(s, boardId);
+      const r = activeRevision(s, boardId);
+      if (
+        target.repositoryId &&
+        (t.repositoryId !== target.repositoryId || t.scope === 'workspace')
+      )
+        throw new DomainError('Локальная доска принимает только задачи своего компонента');
+      const dependents = s.tasks.filter(
+        (x) =>
+          source.taskIds.includes(x.id) && x.status !== 'cancelled' && x.dependsOn.includes(id),
+      );
+      if (dependents.length)
+        throw new DomainError(
+          `От задачи ${id} зависят задачи доски ${from.id}: ${dependents.map((x) => x.id).join(', ')}. Перенесите их или уберите зависимость правкой`,
+          409,
+        );
+      // Доска ведёт одно изменение продукта: привязка черновика сверяется с ней.
+      requestedChange(s, t.preparation && { changeId: t.preparation.changeId }, target, id);
+      if (!t.preparation && s.preparation)
+        try {
+          t.preparation = bindingFor(s, boardChangeId(s, target));
+        } catch {
+          /* Привязку даст правка черновика ведущим. */
+        }
+      source.taskIds = source.taskIds.filter((x) => x !== id);
+      r.taskIds.push(id);
+      return { taskId: id, from: from.id, to: boardId, reason: reason.trim() };
+    });
+  }
+  /**
    * Добавленные пути области записи задачи должны лежать в области её роли
    * (F15): путь вне неё исполнитель не вправе изменить, и задача тратила бы
    * попытки на отказ по области. Отказ называет роль, которой путь
@@ -2600,12 +2664,15 @@ export class DevContour {
           };
           s.boards.push(inbox);
         }
+        // Роль — владелец пути находки (F73), а не роль задачи-источника:
+        // её исполнитель часто не вправе изменить файл находки.
+        const owner = findingRole(this.config, source.repositoryId, finding.path, source.role);
         const t: Task = {
           ...taskInput.parse({
             repositoryId: source.repositoryId,
-            role: source.role,
+            role: owner.role,
             title: finding.title,
-            description: `${finding.observation}\nПоследствие: ${finding.consequence}\nВоспроизведение: ${finding.reproduction}\nИсточник: ${finding.path}:${finding.line} @ ${sha}. Находка не подтверждена.`,
+            description: `${finding.observation}\nПоследствие: ${finding.consequence}\nВоспроизведение: ${finding.reproduction}\nИсточник: ${finding.path}:${finding.line} @ ${sha}. Находка не подтверждена.${owner.note ? '\n' + owner.note : ''}`,
             acceptance: [...FINDING_ACCEPTANCE],
             finding: {
               ...finding,

@@ -32,7 +32,13 @@ import {
   type Records,
   type SyncIdentity,
 } from '../core/sync-model.ts';
-import { completion, recordsFromState, stateFromRecords, taskOwner } from '../core/sync-state.ts';
+import {
+  assertMergedMoves,
+  completion,
+  recordsFromState,
+  stateFromRecords,
+  taskOwner,
+} from '../core/sync-state.ts';
 import { verifyArtifacts } from './contract-artifacts.ts';
 import {
   CheckCorpus,
@@ -425,6 +431,14 @@ export function syncGit(h: DevContour, options: SyncOptions = {}) {
       if (options.dryRun) return output;
       throw new Error('Git sync conflicts:\n' + JSON.stringify(conflicts, null, 2));
     }
+    // Перенос задачи одной стороной и её движение другой (F73): записи
+    // доски и задачи сливаются по отдельности — проверка по всем трём видам.
+    assertMergedMoves(
+      locations.map((l) => l.baseline?.records ?? {}),
+      locations.map((l) => local.get(l.owner) ?? {}),
+      locations.map((l) => l.remote),
+      merged.values(),
+    );
     const next = stateFromRecords(
       h,
       state,

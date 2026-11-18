@@ -33,12 +33,18 @@ import { dirname, resolve } from 'node:path';
 import { heldByServer } from '../runner/server-record.ts';
 import { DomainError, type Config, type DevContourState } from '../core/model.ts';
 import type { DevContour } from '../core/service.ts';
-import { LeadWorkflow, jointWaiting, type WorkflowJob } from '../core/lead-workflow.ts';
+import {
+  LeadWorkflow,
+  jointWaiting,
+  type BoardBlocker,
+  type WorkflowJob,
+} from '../core/lead-workflow.ts';
 import {
   boardTasks,
   liftsPause,
   loopAhead,
   planApproved,
+  revisionStopper,
   unapprovedTasks,
   type LoopOutlook,
 } from '../runner/lead-outlook.ts';
@@ -171,6 +177,13 @@ interface HandoffHostNextFields {
     /** Черновики, которые утверждение отвергнет, и причина (до 20): их правят до ревью. */
     blocked: { id: string; reason: string }[];
     blockedCount: number;
+    /**
+     * Черновики находок, чья роль не может изменить файл находки (до 20, F73):
+     * путь вне области записи роли задачи; `owners` — роли, чья область его
+     * покрывает. Роль меняют правкой черновика при разборе.
+     */
+    misrouted?: { id: string; role: string; path: string; owners: string[] }[];
+    misroutedCount?: number;
   };
   /**
    * Вопрос исполнителя, к которому относится шаг (`answer-input`, `apply-input`,
@@ -225,6 +238,17 @@ export interface DevContourHandoff {
       verificationId: string;
       startedAt: string;
       elapsedMs: number;
+    }[];
+    /**
+     * Действующие задания ChangeSet, которые на стадии 0 ждут приёмки своих
+     * досок (до пяти; с `boardId` — только наборы с этой доской, F78):
+     * непринятые доски и причина каждой (`blocker`). Без этой записи
+     * преемник по пакету не знал, что приёмка релиза ещё впереди.
+     */
+    changesets?: {
+      changeSetId: string;
+      job: { key: string; status: string; stage: number; attempts: number };
+      waiting: NonNullable<ReturnType<LeadWorkflow['boardsWaitingOf']>>;
     }[];
     /**
      * Открытые корректировки принятых задач завершённых операций изменения
@@ -303,6 +327,38 @@ function verificationsOf(
               verificationId: w.verificationId,
               startedAt: w.startedAt,
               elapsedMs: w.elapsedMs,
+            },
+          ]
+        : [];
+    })
+    .slice(0, HANDOFF_VERIFICATIONS);
+  return found.length ? found : undefined;
+}
+
+/** Задания ChangeSet, ждущие приёмки досок (`host.changesets`, F78). */
+function changesetsOf(
+  h: DevContour,
+  state: State,
+  boardId?: string,
+  redact?: (text: string) => string,
+): DevContourHandoff['host']['changesets'] {
+  const workflow = new LeadWorkflow(h);
+  const found = workflow
+    .list()
+    .filter((j) => j.kind === 'changeset' && ['queued', 'running'].includes(j.status))
+    .filter(
+      (j) =>
+        boardId === undefined ||
+        state.changeSets.some((c) => c.id === j.id && c.boardIds.includes(boardId)),
+    )
+    .flatMap((j) => {
+      const waiting = workflow.boardsWaitingOf(j, state, redact);
+      return waiting
+        ? [
+            {
+              changeSetId: j.id,
+              job: { key: j.key, status: j.status, stage: j.stage, attempts: j.attempts },
+              waiting,
             },
           ]
         : [];
@@ -848,6 +904,7 @@ export function planStep(boardId: string, ctx: HostContext): HandoffHostNext | u
   const found = boardTasks(ctx.state, boardId);
   if (!found || planApproved(ctx.h, found.revision, found.tasks)) return undefined;
   const why = unapprovedTasks(ctx.h, ctx.state, found.tasks);
+  const stopper = revisionStopper(ctx.state, boardId);
   // Утверждение (и ревью плана до модели) отвергнет черновик без предусловий,
   // ревью отвергнет неразобранную находку: подсказка называет такие задачи и
   // не включает их в область ревью, а без других задач ревью не предлагает
@@ -868,6 +925,15 @@ export function planStep(boardId: string, ctx: HostContext): HandoffHostNext | u
       reason: b.reason.length > REASON_CHARS ? b.reason.slice(0, REASON_CHARS - 1) + '…' : b.reason,
     })),
     blockedCount: why.blocked.length,
+    ...(why.misrouted.length
+      ? {
+          misrouted: why.misrouted.slice(0, PLAN_HINT_IDS).map((m) => ({
+            ...m,
+            owners: m.owners.slice(0, 5),
+          })),
+          misroutedCount: why.misrouted.length,
+        }
+      : {}),
   };
   // Текст подсказки (`plan-unapproved` каталога) называет задачи `plan`:
   // неразобранные находки, черновики, которые утверждение отвергнет, и
@@ -878,7 +944,11 @@ export function planStep(boardId: string, ctx: HostContext): HandoffHostNext | u
     boardId,
     plan,
     code: 'plan-unapproved',
-    params: { scope: scope.length },
+    params: {
+      scope: scope.length,
+      // Отменённая выданная задача ревизии (D46): задание её не доведёт (F75).
+      ...(stopper ? { stopper: stopper.id } : {}),
+    },
   });
 }
 
@@ -1845,11 +1915,15 @@ export function devcontourHandoffWithin(
         }
       };
       const verifications = verificationsOf(h, state, boardId);
+      // Ошибка задания доски может нести значения секретов: маска — до
+      // усечения текста (`boardsWaitingOf`), иначе усечённый секрет ей не узнать.
+      let changesets = changesetsOf(h, state, boardId, options.redact);
       const corrections = correctionsOfHandoff(h, state, boardId);
       const withDiscussion = (discussion: DevContourHandoff['host']['discussion']) => ({
         ...(next ? { next } : {}),
         liveBoards,
         ...(verifications ? { verifications } : {}),
+        ...(changesets ? { changesets } : {}),
         ...(corrections ? { corrections } : {}),
         ...(discussion ? { discussion } : {}),
       });
@@ -1920,6 +1994,27 @@ export function devcontourHandoffWithin(
           budget > 0 && i < 3 ? discussionOf(budget) : { requests: [], omitted: true },
         );
       }
+      // Последним уступает место ожидание ChangeSet: без текстов ошибок
+      // заданий (подробности — workflow_status). Id вопросов короткие и
+      // остаются: причина `input` без них не соответствовала бы своему виду,
+      // а Markdown пакета их перечисляет.
+      if (
+        changesets &&
+        bytes(handoffResponse({ pack: fitted, host, locale }, limit.format)) > limit.bytes
+      ) {
+        changesets = changesets.map((c) => ({
+          ...c,
+          waiting: {
+            ...c.waiting,
+            boards: c.waiting.boards.map((b) => ({
+              boardId: b.boardId,
+              ...(b.job ? { job: b.job } : {}),
+              blocker: errorless(b.blocker),
+            })),
+          },
+        }));
+        host = { ...host, changesets };
+      }
       return {
         value: { pack: fitted, host, locale },
         trimmed: droppedOf(fitted.truncated) > droppedOf(pack.truncated),
@@ -1948,6 +2043,26 @@ export function handoffResponse(value: DevContourHandoff, format: HandoffFormat)
     : { format, pack, host, commands };
 }
 
+/** Причина ожидания доски без текста ошибки задания (пакет в пределе ответа). */
+const errorless = (b: BoardBlocker): BoardBlocker =>
+  b.kind === 'job-failed' ? { kind: 'job-failed' } : b;
+
+/** Причина ожидания доски ChangeSet в Markdown пакета. */
+function blockerText(b: BoardBlocker) {
+  switch (b.kind) {
+    case 'input':
+      return `ждёт ответа на вопрос исполнителя ${b.requestIds.join(', ')}`;
+    case 'job':
+      return 'идёт её задание';
+    case 'job-failed':
+      return `её задание упало${b.error ? ': ' + b.error : ''}`;
+    case 'job-ended':
+      return 'её задание закончилось без приёмки';
+    case 'no-job':
+      return 'у неё нет задания';
+  }
+}
+
 function hostMarkdown(host: DevContourHandoff['host'], commands: Record<string, string>) {
   return [
     '',
@@ -1958,6 +2073,12 @@ function hostMarkdown(host: DevContourHandoff['host'], commands: Record<string, 
     ...(host.verifications ?? []).map(
       (v) =>
         `- Идёт совместная проверка ChangeSet ${v.changeSetId}: ${v.verificationId}, ${v.elapsedMs < 60_000 ? '<1' : Math.floor(v.elapsedMs / 60_000)} мин (задание ${v.job.key} — ${v.job.status}, стадия ${v.job.stage})`,
+    ),
+    ...(host.changesets ?? []).map(
+      (c) =>
+        `- ChangeSet ${c.changeSetId} ждёт приёмки досок (задание ${c.job.key} — ${c.job.status}, стадия ${c.job.stage}): ${c.waiting.boards
+          .map((b) => `${b.boardId} — ${blockerText(b.blocker)}`)
+          .join('; ')}${c.waiting.more ? ` и ещё ${c.waiting.more}` : ''}`,
     ),
     ...(host.corrections
       ? [

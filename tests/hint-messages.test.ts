@@ -118,6 +118,28 @@ const samples: { [C in HintCode]: (HintSubject & Extract<HintOf, { code: C }>)[]
         blockedCount: 0,
       },
     },
+    {
+      // F73/F75: черновик находки с ролью не той области и отменённая
+      // выданная задача ревизии, на которой остановится любое задание.
+      code: 'plan-unapproved',
+      params: { scope: 2, stopper: 't-9' },
+      boardId: 'board-1',
+      plan: {
+        drafts: ['t-1', 't-2'],
+        stale: [],
+        review: ['t-1', 't-2'],
+        reviewCount: 2,
+        unverified: [],
+        unverifiedCount: 0,
+        blocked: [],
+        blockedCount: 0,
+        misrouted: [
+          { id: 't-2', role: 'frontend', path: 'apps/mobile/a.ts', owners: ['mobile'] },
+          { id: 't-1', role: 'frontend', path: 'tools/x.ts', owners: [] },
+        ],
+        misroutedCount: 2,
+      },
+    },
   ],
   'job-stops': [
     {
@@ -578,8 +600,17 @@ test('Подсказки шага: новая конфигурация setup п�
  * Текст `board-restart` под своей паузой ведущего называет, что цикл нового
  * задания её снимет, с её причиной (`params.leadPause`; F66, ревью 2);
  * прочие образцы байтово прежние.
+ * Намеренное изменение (F73, F75, F76): `plan-unapproved` называет агентскую
+ * операцию plan_review рядом с CLI review-plan (и без готовых к ревью задач —
+ * как выпустить только разобранные), черновики находок с ролью не той
+ * области (`plan.misrouted`) и отменённую выданную задачу ревизии
+ * (`params.stopper`), добавлен образец с ними; `job-cancelled-task` называет
+ * третий путь — замену на новой доске, а при всех отменённых задачах — новую
+ * доску вместо новой ревизии (plan_import с boardId ждёт принятой ревизии).
+ * Ревью 2: стоппер `plan-unapproved` — «отменена человеком или после
+ * выдачи»: черновик, отменённый человеком, тоже останавливает задание.
  */
-const ENGLISH_SAMPLES_SHA256 = 'd06e51d44c2529fd9c548d792f0c128b1f43731a623fc2815d5da3cc2eca2963';
+const ENGLISH_SAMPLES_SHA256 = '79948e7d315b0946d76e84093326a641e0c485c2819645f2532bcaf76c1b254b';
 
 test('Подсказки шага: английские тексты образцов закреплены', () => {
   assert.equal(
