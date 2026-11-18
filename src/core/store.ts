@@ -914,10 +914,15 @@ export class Store {
       const key = !outer && (this.written || carried) ? this.versionKey() : undefined;
       this.db.exec(outer ? `RELEASE ${point}` : 'COMMIT');
       if (key && this.written) this.committed = { key, ...this.written };
-      else if (key && carried) this.committed = { ...carried, key };
+      // На месте: замыкание `frozen()`, полученное в транзакции, заполняет тот же объект.
+      else if (key && carried) carried.key = key;
     } catch (error) {
       this.db.exec(outer ? `ROLLBACK TO ${point}; RELEASE ${point}` : 'ROLLBACK');
       this.cached = undefined;
+      // Откат возвращает ключ к началу транзакции: документ, разобранный в ней
+      // после записи в обход `written` (`writeStored`), не должен остаться
+      // под этим ключом.
+      this.committed = undefined;
       this.projectionPending = pending;
       this.written = written;
       this.transaction = outer;
