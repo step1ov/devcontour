@@ -452,6 +452,315 @@ test('S13 упавшая операция изменения контракта 
   }
 });
 
+test('S13 устаревшая операция: карточка называет отказ, заменённая позднее зарегистрированной редакцией — снята', async () => {
+  const f = fixture();
+  try {
+    const op = 'CC-' + randomUUID();
+    const later = 'CC-' + randomUUID();
+    const stale = (id: string, file: string) => ({
+      id,
+      key: digest({ owner: 'main', source: file }),
+      owner: 'main',
+      status: 'stale',
+      version: 3,
+      step: 2,
+      order: 3,
+      proposal: { title: 'API', file },
+      error: 'Рабочая ветка сдвинулась (aaaa → bbbb): начните операцию заново по текущей редакции',
+      held: [],
+      startedAt: '2026-01-01T00:00:00.000Z',
+      history: [{ at: '2026-01-01T00:01:00.000Z', step: 'review', event: 'stale' }],
+    });
+    f.store.atomic(() => {
+      f.store.saveLocal('contract-change', 'main', op, stale(op, 'docs/api.md'));
+      f.store.saveLocal('contract-change', 'main', later, stale(later, 'docs/other.md'));
+    });
+    const card = byKey(await engineItems(f), `contract-change:${op}`)!;
+    assert.ok(card, 'не заменённая устаревшая операция видна ведущему');
+    assert.match(card.title, /устарело/);
+    assert.match(card.reason, new RegExp(`contract-change --id ${op} --abandon`));
+    // Тот же документ зарегистрирован позднее: другой операцией или без неё.
+    f.store.change('fixture.registered', (s) => {
+      s.contracts.push({
+        id: 'C-api-later',
+        repositoryId: 'main',
+        title: 'API',
+        content: 'api',
+        digest: 'd'.repeat(64),
+        source: 'docs/api.md',
+        approvedAt: '2026-01-02T00:00:00.000Z',
+      });
+      // Регистрация того же пути до начала операции её не заменяет.
+      s.contracts.push({
+        id: 'C-other-earlier',
+        repositoryId: 'main',
+        title: 'Other',
+        content: 'other',
+        digest: 'e'.repeat(64),
+        source: 'docs/other.md',
+        approvedAt: '2025-12-31T00:00:00.000Z',
+      });
+      return {};
+    });
+    const items = await engineItems(f);
+    assert.equal(byKey(items, `contract-change:${op}`), undefined, 'заменённая — не внимание');
+    assert.ok(byKey(items, `contract-change:${later}`), 'более ранняя регистрация не заменяет');
+    // По ключу: завершённая позднее начатая операция того же документа.
+    const done = 'CC-' + randomUUID();
+    f.store.atomic(() =>
+      f.store.saveLocal('contract-change', 'main', done, {
+        ...stale(done, 'docs/other.md'),
+        status: 'completed',
+        startedAt: '2026-01-03T00:00:00.000Z',
+        finishedAt: '2026-01-03T00:05:00.000Z',
+      }),
+    );
+    assert.equal(byKey(await engineItems(f), `contract-change:${later}`), undefined);
+  } finally {
+    f.cleanup();
+  }
+});
+
+test('S13 заменённая устаревшая операция, всё ещё удерживающая задачу, остаётся с отказом', async () => {
+  const f = fixture();
+  try {
+    const b = f.h.createBoard('Board');
+    const held = f.h.addTask(b.id, input('Held'));
+    f.h.approve(b.id);
+    const op = 'CC-' + randomUUID();
+    f.h.hold([held.id], op, 'contract change');
+    f.store.atomic(() =>
+      f.store.saveLocal('contract-change', 'main', op, {
+        id: op,
+        key: digest({ owner: 'main', source: 'docs/api.md' }),
+        owner: 'main',
+        status: 'stale',
+        version: 3,
+        proposal: { title: 'API', file: 'docs/api.md' },
+        error: 'начните операцию заново по текущей редакции',
+        held: [held.id],
+        startedAt: '2026-01-01T00:00:00.000Z',
+        history: [{ at: '2026-01-01T00:01:00.000Z', step: 'review', event: 'stale' }],
+      }),
+    );
+    const before = byKey(await engineItems(f), `contract-change:${op}`)!;
+    assert.match(before.reason, /^Продолжить устаревшую операцию нельзя/);
+    f.store.change('fixture.registered', (s) => {
+      s.contracts.push({
+        id: 'C-api-later',
+        repositoryId: 'main',
+        title: 'API',
+        content: 'api',
+        digest: 'd'.repeat(64),
+        source: 'docs/api.md',
+        approvedAt: '2026-01-02T00:00:00.000Z',
+      });
+      return {};
+    });
+    const card = byKey(await engineItems(f), `contract-change:${op}`)!;
+    assert.ok(card, 'удержание задачи не скрывается');
+    // Тот же факт с другим текстом: версия меняется, появление — нет.
+    assert.equal(card.occurrenceId, before.occurrenceId);
+    assert.notEqual(card.sourceVersion, before.sourceVersion);
+    assert.match(card.reason, /^Документ уже зарегистрирован позднее \(C-api-later\)/);
+    assert.match(card.reason, new RegExp(`contract-change --id ${op} --abandon`));
+    assert.deepEqual(card.impact.taskIds, [held.id]);
+  } finally {
+    f.cleanup();
+  }
+});
+
+test('S13 замена устаревшей операции: что не заменяет и что держит карточку', async () => {
+  const FILE = 'docs/api.md';
+  const START = '2026-01-01T00:00:00.000Z';
+  const LATER = '2026-01-02T00:00:00.000Z';
+  const EARLIER = '2025-12-31T00:00:00.000Z';
+  const record = (id: string, extra: Record<string, unknown> = {}) => ({
+    id,
+    key: digest({ owner: 'main', source: FILE }),
+    owner: 'main',
+    status: 'stale',
+    version: 3,
+    proposal: { title: 'API', file: FILE },
+    error: 'начните операцию заново по текущей редакции',
+    held: [],
+    startedAt: START,
+    history: [{ at: '2026-01-01T00:01:00.000Z', step: 'review', event: 'stale' }],
+    ...extra,
+  });
+  const contract = (id: string, extra: Record<string, unknown> = {}) => ({
+    id,
+    repositoryId: 'main',
+    title: 'API',
+    content: 'api',
+    digest: 'd'.repeat(64),
+    source: FILE,
+    approvedAt: LATER,
+    ...extra,
+  });
+  type F = ReturnType<typeof fixture>;
+  /** Сценарий: подготовка рядом с устаревшей операцией `op`; ждём, видна ли карточка. */
+  const cases: [string, boolean, (f: F, op: string) => void | Promise<void>][] = [
+    [
+      'тот же путь в другом репозитории не заменяет',
+      true,
+      (f) =>
+        f.store.change('fixture', (s) => {
+          s.contracts.push(contract('C-x', { repositoryId: 'other' }));
+        }),
+    ],
+    [
+      'собственная регистрация операции не заменяет',
+      true,
+      (f, op) => {
+        f.store.atomic(() =>
+          f.store.saveLocal('contract-change', 'main', op, record(op, { contractId: 'C-own' })),
+        );
+        f.store.change('fixture', (s) => {
+          s.contracts.push(contract('C-own'));
+        });
+      },
+    ],
+    [
+      'регистрация незавершённой (отменённой) операции не заменяет',
+      true,
+      (f) => {
+        const other = 'CC-' + randomUUID();
+        f.store.atomic(() =>
+          f.store.saveLocal(
+            'contract-change',
+            'main',
+            other,
+            record(other, { status: 'abandoned', contractId: 'C-abandoned', startedAt: LATER }),
+          ),
+        );
+        f.store.change('fixture', (s) => {
+          s.contracts.push(contract('C-abandoned'));
+        });
+      },
+    ],
+    [
+      'завершённая операция того же ключа, начатая раньше, не заменяет',
+      true,
+      (f) => {
+        const other = 'CC-' + randomUUID();
+        f.store.atomic(() =>
+          f.store.saveLocal(
+            'contract-change',
+            'main',
+            other,
+            record(other, { status: 'completed', startedAt: EARLIER }),
+          ),
+        );
+      },
+    ],
+    [
+      'позднее начатая, но не завершённая операция того же ключа не заменяет',
+      true,
+      (f) => {
+        f.store.atomic(() => {
+          for (const status of ['stale', 'abandoned']) {
+            const other = 'CC-' + randomUUID();
+            f.store.saveLocal(
+              'contract-change',
+              'main',
+              other,
+              record(other, { status, startedAt: LATER }),
+            );
+          }
+        });
+      },
+    ],
+    [
+      'заменена; удержанная задача уже отменена — карточки нет',
+      false,
+      (f, op) => {
+        const b = f.h.createBoard('Board');
+        const t = f.h.addTask(b.id, input('Held'));
+        f.h.approve(b.id);
+        f.h.hold([t.id], op, 'contract change');
+        f.store.change('fixture', (s) => {
+          s.contracts.push(contract('C-later'));
+          s.tasks.find((x) => x.id === t.id)!.status = 'cancelled';
+        });
+      },
+    ],
+    [
+      'заменена, но держит паузу выдачи — карточка остаётся',
+      true,
+      (f, op) =>
+        f.store.change('fixture', (s) => {
+          s.contracts.push(contract('C-later'));
+          s.paused = true;
+          s.pauseReason = 'reconfigure';
+          s.pauseOperation = op;
+        }),
+    ],
+    [
+      'заменена, но держит неприменённый запрос конфигурации — карточка остаётся',
+      true,
+      (f, op) =>
+        f.store.change('fixture', (s) => {
+          s.contracts.push(contract('C-later'));
+          s.reconfigure = { operation: op, digest: 'c'.repeat(64), requestedAt: LATER };
+        }),
+    ],
+    [
+      'заменена, но держит ожидание блокировки контекста — карточка остаётся',
+      true,
+      (f, op) =>
+        f.store.change('fixture', (s) => {
+          s.contracts.push(contract('C-later'));
+          s.waits = [{ kind: 'context-lock', detail: 'pack', at: LATER, operation: op }];
+        }),
+    ],
+    [
+      'заменена; запрос конфигурации уже применён — карточки нет',
+      false,
+      (f, op) =>
+        f.store.change('fixture', (s) => {
+          s.contracts.push(contract('C-later'));
+          s.reconfigure = {
+            operation: op,
+            digest: 'c'.repeat(64),
+            requestedAt: LATER,
+            appliedAt: LATER,
+          };
+        }),
+    ],
+    [
+      'заменена; оставшаяся отметка паузы операции без паузы — карточки нет',
+      false,
+      (f, op) =>
+        f.store.change('fixture', (s) => {
+          s.contracts.push(contract('C-later'));
+          s.paused = false;
+          s.pauseOperation = op;
+        }),
+    ],
+  ];
+  for (const [name, visible, arrange] of cases) {
+    const f = fixture();
+    try {
+      const op = 'CC-' + randomUUID();
+      f.store.atomic(() => f.store.saveLocal('contract-change', 'main', op, record(op)));
+      await arrange(f, op);
+      const items = await engineItems(f);
+      const card = byKey(items, `contract-change:${op}`);
+      assert.equal(Boolean(card), visible, name);
+      if (card) assert.match(card.reason, new RegExp(`contract-change --id ${op} --abandon`), name);
+      if (name.includes('блокировки контекста'))
+        assert.match(
+          byKey(items, 'wait:context-lock')!.reason,
+          new RegExp(`contract-change --id ${op} --abandon`),
+          'карточка ожидания называет отмену устаревшей операции',
+        );
+    } finally {
+      f.cleanup();
+    }
+  }
+});
+
 test('S14 ожидание блокировки контекста и подтверждения переноса базы', async () => {
   const f = fixture();
   try {

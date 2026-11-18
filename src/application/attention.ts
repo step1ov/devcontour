@@ -722,12 +722,32 @@ const contractChangeSource: AttentionSourceRule = {
   collect: (ctx) => {
     const { h } = engineOf(ctx);
     const changes = new ContractChanges(h, ctx.root ?? '');
-    return changes
-      .list()
+    // Что операция действительно держит и что снимает только её отмена
+    // (`abandon`): удержание открытых задач (а не перечисленных когда-то),
+    // пауза выдачи операции, неприменённый запрос конфигурации и ожидание
+    // блокировки контекста.
+    const s = ctx.state;
+    const holding = (op: { id: string }) =>
+      s.tasks.some((t) => t.hold?.operation === op.id && open(t)) ||
+      (s.paused && s.pauseOperation === op.id) ||
+      (s.reconfigure?.operation === op.id && !s.reconfigure.appliedAt) ||
+      (s.waits ?? []).some((w) => w.operation === op.id);
+    // Операции и их незавершённые регистрации читаются один раз на сбор.
+    const all = changes.list();
+    const unfinished = changes.unfinishedRegistrations(all);
+    const replaced = new Map(
+      all
+        .filter((op) => op.status === 'stale')
+        .map((op) => [op.id, changes.supersededBy(op, s.contracts, all, unfinished)]),
+    );
+    return all
       .filter(
         (op) =>
           op.status === 'failed' ||
-          op.status === 'stale' ||
+          // Устаревшая операция, чей документ позднее зарегистрирован, не
+          // требует действия и уходит из внимания (история её хранит), пока
+          // не удерживает задачи или выдачу.
+          (op.status === 'stale' && (holding(op) || !replaced.get(op.id))) ||
           changes.stalledWait(op) ||
           changes.interrupted(op, ctx.now),
       )
@@ -741,6 +761,9 @@ const contractChangeSource: AttentionSourceRule = {
         // (например, по таймауту оболочки во время продолжения соседом):
         // lease истёк, шаг не закончен.
         const stalled = op.status === 'waiting';
+        // Заменённая устаревшая операция видна, только пока что-то держит:
+        // другой текст карточки — другая версия.
+        const superseded = replaced.get(op.id);
         const held = [
           ...new Set([
             ...op.held,
@@ -750,7 +773,9 @@ const contractChangeSource: AttentionSourceRule = {
         return {
           sourceKey: `contract-change:${op.id}`,
           occurrenceId: `${op.id}@${entered}`,
-          sourceVersion: String(op.version ?? 0),
+          sourceVersion: superseded
+            ? `${op.version ?? 0}:superseded:${superseded}`
+            : String(op.version ?? 0),
           source: 'contract-change',
           category: 'technical',
           actor: 'lead',
@@ -766,7 +791,15 @@ const contractChangeSource: AttentionSourceRule = {
               ? `Процесс, ведший операцию, прервался на шаге ${changes.view(op).next ?? '—'}; продолжите: contract-change --id ${op.id}`
               : stalled
                 ? `Операции ${(op.waitingFor ?? []).join(', ')}, которых ждёт перенос базы, больше не идут к базе. Продолжите: contract-change --id ${op.id} — перенос, отказ с выходом или новое ожидание`
-                : (op.error ?? 'Причина не записана'),
+                : op.status === 'stale'
+                  ? // Команда — впереди: длинная причина обрезается по пределу
+                    // карточки, а продолжить устаревшую операцию нельзя.
+                    `${
+                      superseded
+                        ? `Документ уже зарегистрирован позднее (${superseded}), но операция удерживает задачи или выдачу`
+                        : 'Продолжить устаревшую операцию нельзя'
+                    }: отмените её — contract-change --id ${op.id} --abandon — и при необходимости начните новую по текущей редакции. ${op.error ?? 'Причина не записана'}`
+                  : (op.error ?? 'Причина не записана'),
           ),
           since: entered,
           subject: { kind: 'operation', id: op.id, href: hrefs.contracts() },
@@ -945,6 +978,16 @@ const waitSource: AttentionSourceRule = {
   collect: (ctx) => {
     const { h } = engineOf(ctx);
     const s = ctx.state;
+    // Устаревшие операции читаются один раз на сбор и только при ожидании
+    // блокировки контекста с названной операцией.
+    let staleOps: Set<string> | undefined;
+    const isStale = (id: string) =>
+      (staleOps ??= new Set(
+        new ContractChanges(h, ctx.root ?? '')
+          .list()
+          .filter((op) => op.status === 'stale')
+          .map((op) => op.id),
+      )).has(id);
     return (s.waits ?? []).flatMap((w): Candidate[] => {
       const base = {
         sourceKey: `wait:${w.kind}`,
@@ -953,18 +996,24 @@ const waitSource: AttentionSourceRule = {
         since: w.at,
         subject: { kind: 'queue' as const, id: w.kind, href: hrefs.overview() },
       };
-      if (w.kind === 'context-lock')
+      if (w.kind === 'context-lock') {
+        // Ожидание устаревшей операции не снимет её продолжение, которое
+        // советует текст ожидания: только отмена.
+        const stale = w.operation !== undefined && isStale(w.operation);
         return [
           {
             ...base,
-            sourceVersion: d({ detail: w.detail }),
+            sourceVersion: d({ detail: w.detail, ...(stale ? { stale: true } : {}) }),
             category: 'technical',
             actor: 'lead',
             title: 'Выдача ждёт блокировки контекста',
-            reason: w.detail,
+            reason: stale
+              ? `Операция ${w.operation} устарела и не продолжится: отмените её — contract-change --id ${w.operation} --abandon. ${w.detail}`
+              : w.detail,
             actions: [handoffOf(ctx)],
           },
         ];
+      }
       const wait = baseWaitOf(h, s);
       if (!wait?.needsOperator) return [];
       // Удержанный перенос подтверждает только человек; ведущий видит это
