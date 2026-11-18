@@ -546,8 +546,10 @@ test('Подсказки шага: новая конфигурация setup п�
  * (`--by host`), а не человека; над ожиданием проверки базы снимается только
  * пауза (F47, ревью 3). Остановка прежней версии в `stale-base`: перенос с
  * неизвестным диапазоном подтверждает оператор (ревью 3).
+ * Текст `stale-base` называет, как готовить следующий этап при идущей доске
+ * (черновики вне рабочей ветки, F52); прочие образцы байтово прежние.
  */
-const ENGLISH_SAMPLES_SHA256 = 'e71dae70cd548630d886c78b89f1cbfbc0289a548c86067e408f1a990c516364';
+const ENGLISH_SAMPLES_SHA256 = 'd605a46d83e5d9b1101881b19832b9ad0ea72f14cb89383c337ec3caa91730da';
 
 test('Подсказки шага: английские тексты образцов закреплены', () => {
   assert.equal(
@@ -814,4 +816,14 @@ test('Тексты для ведущего агента не называют к
             offending.push(`${file}:${i + 1}: ${sentence.trim().slice(0, 160)}`);
       });
   assert.deepEqual(offending, []);
+});
+
+test('F52: stale-base names how to draft the next stage without stopping a running board', () => {
+  for (const step of samples['stale-base'])
+    for (const locale of hintLocales) {
+      const text = hintDetail(step, locale);
+      assert.match(text, /review-contract/, locale);
+      assert.match(text, /worktree/, locale);
+      assert.match(text, /docs\/operations\.md/, locale);
+    }
 });
