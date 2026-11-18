@@ -66,14 +66,14 @@ function scoped() {
 function reviewer(proposals: Record<string, unknown>[]) {
   const make = (name: 'codex' | 'claude'): AgentAdapter => ({
     name,
-    async execute(r: AgentRequest) {
+    execute(r: AgentRequest) {
       proposals.push(
         JSON.parse(readFileSync(join(r.artifactDir, 'proposal.json'), 'utf8')) as Record<
           string,
           unknown
         >,
       );
-      return {
+      return Promise.resolve({
         data: {
           approved: true,
           summary: 'Explicit test fixture',
@@ -82,7 +82,7 @@ function reviewer(proposals: Record<string, unknown>[]) {
         },
         log: 'Fixture only; no provider called',
         command: ['fixture'],
-      };
+      });
     },
   });
   return { codex: make('codex'), claude: make('claude') };

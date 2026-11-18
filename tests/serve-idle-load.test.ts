@@ -495,10 +495,7 @@ test('F74: долгая синхронная работа из коротких 
       c.wall += step;
       f.store.leaseWatch!();
     }
-    assert.ok(
-      f.store.latestEvents(['server.loop-stalled'], 5).length >= 1,
-      'задержка замечена',
-    );
+    assert.ok(f.store.latestEvents(['server.loop-stalled'], 5).length >= 1, 'задержка замечена');
     assert.deepEqual(scheduler.extendedAfterStall.slice(0, 1), [run.id], 'срок продлён');
     // Контроль: шаги, между которыми цикл событий отпускался (интервал
     // монитора — `check`), задержкой не считаются.
@@ -594,34 +591,36 @@ test('F77: шлюз запоминает отпечаток, который ви
   // Выдача ничего не нашла на p1; до конца такта другой процесс записал p2.
   await gate.around(
     () => 0,
-    async () => {
+    () => {
       assert.equal(gate.holds(), false);
       print = 'p2';
+      return Promise.resolve();
     },
   );
   await gate.around(
     () => 0,
-    async () => assert.equal(gate.holds(), false, 'p2 выдача ещё не видела'),
+    () => Promise.resolve(assert.equal(gate.holds(), false, 'p2 выдача ещё не видела')),
   );
   // Теперь p2 видела — повтор держится, вне такта шлюз не действует.
   await gate.around(
     () => 0,
-    async () => assert.equal(gate.holds(), true),
+    () => Promise.resolve(assert.equal(gate.holds(), true)),
   );
   assert.equal(gate.holds(), false, 'вне такта интервала шлюз не взведён');
   // Выдача выдала попытку — следующий такт выдаёт снова.
   let active = 0;
   await gate.around(
     () => active,
-    async () => {
+    () => {
       now += gate.maxMs;
       assert.equal(gate.holds(), false, 'после предела');
       active = 1;
+      return Promise.resolve();
     },
   );
   await gate.around(
     () => active,
-    async () => assert.equal(gate.holds(), false, 'после выдачи'),
+    () => Promise.resolve(assert.equal(gate.holds(), false, 'после выдачи')),
   );
 });
 
