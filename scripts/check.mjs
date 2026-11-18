@@ -196,8 +196,9 @@ function step(name, rest, mode) {
     child.once('exit', (code, signal) => {
       if (settled) return;
       settled = true;
-      // A step stopped for a cause of the check's own (a failed process
-      // snapshot) did not fail by itself; the final line names the cause.
+      // A step stopped for a cause of the check's own (a failed spawn or
+      // cleanup) did not fail by itself; the final line names the cause. An
+      // unavailable process snapshot is only a warning and stops nothing.
       if (code !== 0 && !processes.cause) failed ??= name;
       void finish(code, signal);
     });
@@ -241,8 +242,8 @@ await measuring;
 const total = ((Date.now() - started) / 1000).toFixed(1);
 // The only authoritative result besides the exit code: summary lines of a
 // suite stopped part-way (`ℹ fail 0`, `N passed`) say nothing about the check.
-// A stop no step's own exit caused (a process snapshot or spawn failure, or a
-// failed cleanup) is named, not left to the first step it happened to stop.
+// A stop no step's own exit caused (a spawn failure or a failed cleanup) is
+// named, not left to the first step it happened to stop.
 const cause = processes.cause;
 const outcome = !process.exitCode
   ? `passed in ${total}s`
