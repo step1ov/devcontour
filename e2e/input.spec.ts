@@ -294,10 +294,23 @@ test('A cancelled question leaves a retryable task: the retry button returns aft
   await expect(retry).toBeVisible();
   await retry.click();
   // Повтор — настоящая новая попытка: тот же demo-исполнитель снова
-  // спрашивает, и это новый вопрос, а не прежний снятый.
+  // спрашивает, и это новый вопрос, а не прежний снятый. Остановка вопросом
+  // возвращает попытку, поэтому счётчик `attempt` виден поднятым лишь пока
+  // попытка идёт (под нагрузкой — доли секунды): ждём новый вопрос, а
+  // попытку сверяем после.
   await expect
-    .poll(async () => (await taskState(request, task))?.attempt, { timeout: 120000 })
-    .toBeGreaterThan(attempt);
+    .poll(
+      async () => {
+        const now = (await agent(request, 'input_list', { taskId: task })) as {
+          requests: { requestId: string; state: string }[];
+        };
+        return now.requests.some(
+          (r) => r.requestId !== before.requests[0].requestId && r.state === 'awaiting-answer',
+        );
+      },
+      { timeout: 120000 },
+    )
+    .toBe(true);
   await expect
     .poll(async () => (await taskState(request, task))?.failureKind, { timeout: 120000 })
     .toBe('needs-input');
@@ -307,6 +320,8 @@ test('A cancelled question leaves a retryable task: the retry button returns aft
   const fresh = after.requests.filter((r) => r.requestId !== before.requests[0].requestId);
   expect(fresh).toHaveLength(1);
   expect(fresh[0].state).toBe('awaiting-answer');
+  // Вторая остановка вопросом тоже вернула попытку.
+  expect((await taskState(request, task))!.attempt).toBe(attempt);
   await expect(card).toContainText('Нужен ответ');
   await expect(retry).toHaveCount(0);
 });
