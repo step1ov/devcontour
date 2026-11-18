@@ -27,6 +27,26 @@ export const WAITING_INPUT = 'waiting:input';
  * переноса базы (`base.check.held`) — цикл его не снимет.
  */
 export const WAITING_BASE_HELD = 'waiting:base-held';
+/**
+ * Событие истории задания ChangeSet: стадия 0 ждёт приёмки его досок
+ * (F78) — без отметки история оставалась пустой часами.
+ */
+export const WAITING_BOARDS = 'waiting:boards';
+/** Сколько досок называет ожидание ChangeSet (`waiting.boards`). */
+export const WAITING_BOARDS_SHOWN = 10;
+
+/** Чего ждёт непринятая доска ChangeSet: её собственная причина (F78). */
+export type BoardBlocker =
+  /** Действующее задание доски ждёт ответов на вопросы исполнителя. */
+  | { kind: 'input'; requestIds: string[] }
+  /** Действующее задание доски идёт (стадия и статус — в `job`). */
+  | { kind: 'job' }
+  /** Последнее задание доски упало: его причина. */
+  | { kind: 'job-failed'; error?: string }
+  /** Последнее задание доски закончилось без приёмки (stale, completed). */
+  | { kind: 'job-ended' }
+  /** Задания у доски нет: workflow_start для неё или ручная приёмка. */
+  | { kind: 'no-job' };
 
 /**
  * Стадия доски ждёт только ответов: попыток задач нет, а каждая
@@ -272,7 +292,59 @@ export class LeadWorkflow {
     s = this.h.store.read(),
     now = Date.now(),
   ) {
-    return job.kind === 'changeset' ? jointWaiting(s, job, now) : this.inputWaitingOf(job, s);
+    return job.kind === 'changeset'
+      ? (jointWaiting(s, job, now) ?? this.boardsWaitingOf(job, s))
+      : this.inputWaitingOf(job, s);
+  }
+  /**
+   * Ожидание стадии 0 задания ChangeSet (F78): непринятые доски набора и
+   * причина каждой — задание доски, его вопросы исполнителя или его
+   * отсутствие. Без этого задание стояло `queued`, стадия 0, история пуста,
+   * и ведущий не отличал «ждёт досок» от «не берётся». Чтение, без записи.
+   */
+  boardsWaitingOf(job: Pick<WorkflowJob, 'kind' | 'id' | 'stage'>, s = this.h.store.read()) {
+    if (job.kind !== 'changeset' || job.stage !== 0) return undefined;
+    const c = s.changeSets.find((x) => x.id === job.id);
+    if (!c || c.acceptance) return undefined;
+    const lists = new Map<string | undefined, WorkflowJob[]>();
+    const jobsOf = (owner: string | undefined) => {
+      if (!lists.has(owner)) lists.set(owner, this.list(owner));
+      return lists.get(owner)!;
+    };
+    const pending = c.boardIds.filter(
+      (id) => s.boards.find((b) => b.id === id)?.revisions.at(-1)?.status !== 'accepted',
+    );
+    if (!pending.length) return undefined;
+    const boards = pending.slice(0, WAITING_BOARDS_SHOWN).map((boardId) => {
+      const b = s.boards.find((x) => x.id === boardId);
+      const jobs = b
+        ? jobsOf(boardOwner(b, s))
+            .filter((j) => j.kind === 'board' && j.id === boardId)
+            .sort((x, y) => x.startedAt.localeCompare(y.startedAt))
+        : [];
+      const live = jobs.findLast((j) => j.status === 'queued' || j.status === 'running');
+      const last = live ?? jobs.at(-1);
+      const input = live && this.inputWaitingOf(live, s);
+      const blocker: BoardBlocker = live
+        ? input
+          ? { kind: 'input', requestIds: input.requestIds.slice(0, 5) }
+          : { kind: 'job' }
+        : last?.status === 'failed'
+          ? { kind: 'job-failed', ...(last.error ? { error: last.error.slice(0, 300) } : {}) }
+          : last
+            ? { kind: 'job-ended' }
+            : { kind: 'no-job' };
+      return {
+        boardId,
+        ...(last ? { job: { key: last.key, status: last.status, stage: last.stage } } : {}),
+        blocker,
+      };
+    });
+    return {
+      kind: 'boards' as const,
+      boards,
+      ...(pending.length > boards.length ? { more: pending.length - boards.length } : {}),
+    };
   }
   /** Ожидание ответов на вопросы исполнителя стадией доски (чтение, без записи). */
   inputWaitingOf(job: Pick<WorkflowJob, 'kind' | 'id' | 'stage'>, s = this.h.store.read()) {

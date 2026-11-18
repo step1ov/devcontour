@@ -1242,7 +1242,10 @@ test('session_handoff: решение о плане называет черно�
     assert.equal(next?.plan?.blocked.length, 0);
     assert.match(next.detail, /unverified agent findings/);
     assert.match(next.detail, /cancel --task ID .*--by host/);
-    assert.doesNotMatch(next.detail, /review-plan --board/, 'ревью сырых находок не предлагается');
+    // Ревью сырых находок не предлагается: подсказка называет только, как
+    // выпустить разобранные (F76), без id этой находки.
+    assert.doesNotMatch(next.detail, new RegExp(`--tasks ${found}|"tasks": \\["${found}`));
+    assert.match(next.detail, /once triaged, release just those drafts .*plan_review/);
     assert.match(
       next.detail,
       /fields absent from the file keep their current values, including repositoryId, scope, dependsOn and contracts/,
@@ -1668,7 +1671,7 @@ test('session_handoff: отмена ведущим выданной задачи
   }
 });
 
-test('session_handoff: все задачи ревизии отменены — второй путь новая ревизия доски, а не приёмка', async () => {
+test('session_handoff: все задачи ревизии отменены — второй путь новая доска (plan_import с boardId ждёт приёмки), а не приёмка', async () => {
   const f = fixture();
   try {
     const b = f.h.createBoard('Everything cut', '', 'main');
@@ -1693,7 +1696,10 @@ test('session_handoff: все задачи ревизии отменены — �
       next.detail,
       /every task of the revision is cancelled, so the board cannot be accepted/,
     );
-    assert.match(next.detail, /the lead plans a new revision of board/);
+    assert.match(
+      next.detail,
+      /the lead plans the work on a new board \(plan_import without boardId/,
+    );
     assert.doesNotMatch(
       next.detail,
       /accepts the revision without task|Accepting without the task/,

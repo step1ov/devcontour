@@ -1,6 +1,11 @@
 import { join } from 'node:path';
 import { blocksWork } from 'devcontour-harness';
-import { LeadWorkflow, WAITING_BASE_HELD, type WorkflowJob } from '../core/lead-workflow.ts';
+import {
+  LeadWorkflow,
+  WAITING_BASE_HELD,
+  WAITING_BOARDS,
+  type WorkflowJob,
+} from '../core/lead-workflow.ts';
 import { heldBaseOf, staleBaseStop } from '../core/work-status.ts';
 import { BASE_HELD_REFUSAL, SERVER_STOPPING, type DevContour } from '../core/service.ts';
 import { DomainError, type ChangeSet, type DevContourState } from '../core/model.ts';
@@ -20,6 +25,7 @@ import {
   tickErrors,
   recoveryStep,
   repairStep,
+  stageZeroStop,
 } from './lead-outlook.ts';
 import { executionOf } from '../harness/execution.ts';
 import type { AgentAdapter } from './adapters.ts';
@@ -573,6 +579,11 @@ export class LeadRunner {
         // Согласование нужно черновикам и задачам, утверждённым при другой
         // политике исполнения: их движок не выдаёт до повторного утверждения
         // (правило `loopOutlook`).
+        // Отменённая выданная задача остановила бы стадию задач (D46):
+        // задание останавливается до ревью плана, а не выпускает задачи,
+        // которых не доведёт (F75).
+        const stop = stageZeroStop(this.h, s, job, tasks);
+        if (stop) throw new Error(stop.reason);
         if (loopOutlook(this.h, s, job).step !== 'review-plan') return false;
         await assertTasksRequirements(this.h, tasks);
         if (this.h.config.mode === 'demo')
@@ -682,10 +693,15 @@ export class LeadRunner {
       this.startWaits.delete(c.id);
       return false;
     }
-    if (job.stage === 0)
-      return c.boardIds.some(
+    if (job.stage === 0) {
+      const waiting = c.boardIds.some(
         (id) => s.boards.find((b) => b.id === id)?.revisions.at(-1)?.status !== 'accepted',
       );
+      // Ожидание досок видно в истории задания (F78): одна отметка на
+      // отрезок ожидания, причины досок — в `waiting` workflow_status.
+      if (waiting) this.workflow.noteWaiting(job, WAITING_BOARDS);
+      return waiting;
+    }
     // Пауза после отказа начала: стадия только ждёт — без чтения
     // требований (Git), новой проверки и снимка релиза.
     if (job.stage === 1 && !flight && (this.startWaits.get(c.id)?.notBefore ?? 0) > Date.now())

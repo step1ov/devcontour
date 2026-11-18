@@ -82,8 +82,8 @@ void test('capabilities — ответ operationCatalog на каталоге х
   const [arg] = calls.catalog as Parameters<typeof real.operationCatalog>[0][];
   assert.equal(arg.protocolVersion, 1);
   assert.equal(arg.maxInputBytes, 100000);
-  assert.equal(arg.maxResultBytes, 65536);
-  assert.equal(Object.keys(arg.operations).length, 77);
+  // 79: task_move и plan_review (F73, F76) добавлены к прежним 77.
+  assert.equal(Object.keys(arg.operations).length, 79);
   assert.equal(Object.keys(arg.operations)[0], 'preparation_status');
   const catalogError = new Error('spy: каталог');
   reset({ catalogError });

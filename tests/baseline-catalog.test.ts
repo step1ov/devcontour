@@ -64,6 +64,8 @@ const operations = [
   'board_create',
   'task_create',
   'task_edit',
+  'task_move',
+  'plan_review',
   'task_retry',
   'task_assign',
   'task_story',

@@ -35,7 +35,8 @@ import {
   type Run,
   type Task,
 } from '../core/model.ts';
-import { derivedWrites } from '../core/workflow.ts';
+import { derivedWrites, findingOutsideScope } from '../core/workflow.ts';
+import { stopperWarning } from './lead-outlook.ts';
 import { adapters, type AgentAdapter } from './adapters.ts';
 import { declaredRoles, repositories, repository, requiresContract } from '../core/repositories.ts';
 import { git } from './process.ts';
@@ -290,7 +291,7 @@ export function checksWarnings(
   ];
 }
 type Author = 'codex' | 'claude';
-type Runtimes = Record<Author, AgentAdapter>;
+export type Runtimes = Record<Author, AgentAdapter>;
 
 /** Предел текста отказа ревью: столько хранит ошибка задания очереди. */
 const REJECTION_LIMIT = 1000;
@@ -1038,6 +1039,24 @@ function derivedWritesOf(config: Config, tasks: Task[]) {
   });
   return entries.length ? { derivedWrites: Object.fromEntries(entries) } : {};
 }
+/**
+ * Черновики находок, чья роль не может изменить файл находки (F73): путь
+ * находки вне области записи задачи. Ревьюер плана видит это и роли-владельцы.
+ */
+function findingOwnershipOf(config: Config, drafts: Task[]) {
+  const items = drafts.flatMap((t) => {
+    const out = findingOutsideScope(config, t);
+    return out ? [{ taskId: t.id, role: t.role, path: out.path, owners: out.owners }] : [];
+  });
+  return items.length
+    ? {
+        findingOwnership: {
+          note: 'These finding drafts name a role whose write scope does not cover the finding path: its writer may not edit that file and the attempt would be refused by the write scope. owners are the roles whose write scope covers it. Approve only if the spec makes clear the fix belongs elsewhere within the role scope; otherwise the role must be changed first.',
+          tasks: items,
+        },
+      }
+    : {};
+}
 export async function reviewPlan(
   h: DevContour,
   root: string,
@@ -1091,7 +1110,11 @@ export async function reviewPlan(
   // Пробел областей — прогноз по постановкам до исполнения: gates, которых нет
   // в области ни одной задачи, приёмка доски выполнит на её итоговом SHA.
   const gaps = scopeGaps(h, all);
-  const coverage = gaps.length ? { coverageGaps: gaps, warning: scopeGapWarning(gaps) } : {};
+  const coverage = {
+    ...(gaps.length ? { coverageGaps: gaps, warning: scopeGapWarning(gaps) } : {}),
+    // Задание этой ревизии остановится на отменённой выданной задаче (F75).
+    ...stopperWarning(state, boardId),
+  };
   if (!drafts.length) return { status: 'already-approved', boardId, ...coverage };
   // Предусловия утверждения — до ревью: отказ после одобрения тратил вызов
   // модели впустую. Повторное утверждение по политике постановку не меняет.
@@ -1200,6 +1223,7 @@ export async function reviewPlan(
     // инструмент генератора, и controller перестроит его выходы в её коммите —
     // в том числе в области записи другой роли. Ревьюер видит эту запись.
     ...derivedWritesOf(h.config, tasks),
+    ...findingOwnershipOf(h.config, drafts),
   };
   // Утверждается только то, что ревьюер прочёл целиком: черновик, ушедший
   // в краткую сводку принятого, означал бы утверждение без ревью.
