@@ -128,6 +128,35 @@ test('Real MCP clients negotiate tools, keep independent workspaces and enforce 
   }
 });
 
+test('F72: MCP input_cancel accepts version as the alias of expectedVersion; the tool schema names both', async () => {
+  const f = fixture();
+  let client: Client | undefined;
+  try {
+    client = await connect(f);
+    const tool = (await client.listTools()).tools.find((t) => t.name === 'input_cancel')!;
+    const properties = (tool.inputSchema as { properties: Record<string, unknown> }).properties;
+    assert.ok('version' in properties && 'expectedVersion' in properties);
+    const requestId = 'IR-' + 'a'.repeat(24);
+    const call = (args: Record<string, unknown>) =>
+      client!.callTool({
+        name: 'input_cancel',
+        arguments: { requestId, reason: 'not needed', ...args },
+      });
+    const text = (r: Awaited<ReturnType<typeof call>>) => (r.content as { text: string }[])[0].text;
+    // Схема пропускает синоним: отказ — уже по запросу, а не по полю.
+    const alias = await call({ version: 1 });
+    assert.equal(alias.isError, true);
+    assert.doesNotMatch(text(alias), /version/i, text(alias));
+    assert.match(text(alias), /404/, text(alias));
+    const both = await call({ version: 1, expectedVersion: 2 });
+    assert.equal(both.isError, true);
+    assert.match(text(both), /синоним expectedVersion/, text(both));
+  } finally {
+    await client?.close();
+    f.cleanup();
+  }
+});
+
 test('Agent surface cannot provide evidence/approval; cyclic plans fail atomically and inputs are bounded', () => {
   const f = fixture();
   try {

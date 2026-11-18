@@ -190,6 +190,38 @@ export const inputStates = [
 ] as const;
 export type InputState = (typeof inputStates)[number];
 
+/**
+ * Вход с версией запроса: `expectedVersion` — версия, которую видел
+ * действующий (поле `version` у `input_show` и `input_list`, флаг `--version`
+ * у CLI). `version` — синоним (F72): ведущий передаёт поле под тем именем,
+ * под которым его прочитал. Нужно одно из полей; оба с разными значениями —
+ * отказ. После разбора остаётся только `expectedVersion`.
+ */
+const versionFields = { expectedVersion: version.optional(), version: version.optional() };
+type Versioned = { expectedVersion?: number; version?: number };
+const versionCheck = (v: Versioned, ctx: z.RefinementCtx) => {
+  if (v.expectedVersion === undefined && v.version === undefined)
+    ctx.addIssue({
+      code: 'custom',
+      path: ['expectedVersion'],
+      message: 'нужна версия запроса — поле version из input_show или input_list',
+    });
+  else if (
+    v.expectedVersion !== undefined &&
+    v.version !== undefined &&
+    v.expectedVersion !== v.version
+  )
+    ctx.addIssue({
+      code: 'custom',
+      path: ['version'],
+      message: 'version — синоним expectedVersion; передайте одно поле',
+    });
+};
+const versionMerge = <T extends Versioned>({ version: alias, expectedVersion, ...rest }: T) => ({
+  ...rest,
+  expectedVersion: (expectedVersion ?? alias)!,
+});
+
 /** Предел обоснования предложения ведущего (знаков). */
 const PROPOSAL_REASONING = 2000;
 
@@ -200,22 +232,28 @@ export const inputOperationInputs = {
     state: z.enum(inputStates).optional(),
   }),
   input_show: z.strictObject({ requestId }),
-  input_answer: z.strictObject({
-    requestId,
-    text: z.string().trim().min(1).max(INPUT_LIMITS.answer),
-    optionId: z.string().max(40).optional(),
-    kind: z.enum(['clarification', 'requirement-change']).default('clarification'),
-    expectedVersion: version,
-  }),
-  input_propose: z.strictObject({
-    requestId,
-    text: z.string().trim().min(1).max(INPUT_LIMITS.answer),
-    optionId: z.string().min(1).max(40).optional(),
-    kind: z.enum(['clarification', 'requirement-change']).default('clarification'),
-    /** Почему ответ следует из контрактов и принятых файлов: читает оператор. */
-    reasoning: z.string().trim().min(10).max(PROPOSAL_REASONING),
-    expectedVersion: version,
-  }),
+  input_answer: z
+    .strictObject({
+      requestId,
+      text: z.string().trim().min(1).max(INPUT_LIMITS.answer),
+      optionId: z.string().max(40).optional(),
+      kind: z.enum(['clarification', 'requirement-change']).default('clarification'),
+      ...versionFields,
+    })
+    .superRefine(versionCheck)
+    .transform(versionMerge),
+  input_propose: z
+    .strictObject({
+      requestId,
+      text: z.string().trim().min(1).max(INPUT_LIMITS.answer),
+      optionId: z.string().min(1).max(40).optional(),
+      kind: z.enum(['clarification', 'requirement-change']).default('clarification'),
+      /** Почему ответ следует из контрактов и принятых файлов: читает оператор. */
+      reasoning: z.string().trim().min(10).max(PROPOSAL_REASONING),
+      ...versionFields,
+    })
+    .superRefine(versionCheck)
+    .transform(versionMerge),
   input_context: z.strictObject({
     requestId,
     /** Сообщения обсуждения задачи, явно включённые в manifest снимка (кроме самих ответов). */
@@ -230,25 +268,34 @@ export const inputOperationInputs = {
     authorRuntime: z.enum(['codex', 'claude']),
   }),
   input_target: z.strictObject({ requestId, contextDigest: digest }),
-  input_apply: z.strictObject({
-    requestId,
-    answerDigest: digest,
-    expectedVersion: version,
-    contextDigest: digest,
-    targetDigest: digest,
-    reset: z.strictObject({ reason: z.string().trim().min(10).max(2000) }).optional(),
-  }),
-  input_cancel: z.strictObject({
-    requestId,
-    expectedVersion: version,
-    reason: z.string().trim().min(3).max(1000),
-  }),
-  input_supersede: z.strictObject({
-    requestId,
-    expectedVersion: version,
-    reason: z.string().trim().min(3).max(1000),
-    successorTaskId: id,
-  }),
+  input_apply: z
+    .strictObject({
+      requestId,
+      answerDigest: digest,
+      contextDigest: digest,
+      targetDigest: digest,
+      reset: z.strictObject({ reason: z.string().trim().min(10).max(2000) }).optional(),
+      ...versionFields,
+    })
+    .superRefine(versionCheck)
+    .transform(versionMerge),
+  input_cancel: z
+    .strictObject({
+      requestId,
+      reason: z.string().trim().min(3).max(1000),
+      ...versionFields,
+    })
+    .superRefine(versionCheck)
+    .transform(versionMerge),
+  input_supersede: z
+    .strictObject({
+      requestId,
+      reason: z.string().trim().min(3).max(1000),
+      successorTaskId: id,
+      ...versionFields,
+    })
+    .superRefine(versionCheck)
+    .transform(versionMerge),
 };
 
 /** Ответ оператора из панели (сообщение обсуждения с ключом идемпотентности). */

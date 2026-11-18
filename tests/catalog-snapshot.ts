@@ -209,5 +209,11 @@
 // correctionDetails (чем изменение касается каждой принятой задачи) и
 // закрытие корректировки CLI contract-change --ack-correction; прочие
 // операции байтово прежние.
-export const CATALOG_DIGEST = '5ca5ddc7ea95b3887543b36ea3d08e200107f37be6d913358b14a445ddb955eb';
+// Намеренное изменение (F72): input_answer, input_propose, input_apply,
+// input_cancel и input_supersede принимают version как синоним
+// expectedVersion (оба поля необязательны в схеме, нужно одно, разные
+// значения — отказ); их описания называют поле expectedVersion и где
+// прочитать версию (поле version у input_show и input_list); прочие
+// операции байтово прежние.
+export const CATALOG_DIGEST = 'c299eb9d1aa6216ec37e5158a7dc8e73027bdc5a4da1678deac06d4a54023ec6';
 export const SNAPSHOT_VERSION = '0.4.0-alpha.7';
