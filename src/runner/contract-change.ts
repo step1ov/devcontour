@@ -1568,15 +1568,20 @@ export class ContractChanges {
    * после начала операции (другой операцией или без неё), или завершённая
    * позднее начатая операция с тем же ключом. Продолжать её нечего:
    * повтор нашёл бы документ уже зарегистрированным. Возвращает id
-   * заменившей записи.
+   * заменившей записи. `all` и `unfinished` — уже прочитанные операции и
+   * их незавершённые регистрации, если вызывающий проверяет много операций.
    */
-  supersededBy(op: ContractChange, contracts = this.h.store.read().contracts) {
+  supersededBy(
+    op: ContractChange,
+    contracts = this.h.store.read().contracts,
+    all = this.list(),
+    unfinished = this.unfinishedRegistrations(all),
+  ) {
     if (op.status !== 'stale') return undefined;
     const file = op.proposal?.file;
     // Редакцию, которую зарегистрировала незавершённая операция (живая,
     // отменённая, устаревшая — в том числе эта), закрепит или отвергнет она
     // сама: заменой она не считается.
-    const unfinished = file ? this.unfinishedRegistrations() : new Set<string>();
     const registered = file
       ? contracts.find(
           (c) =>
@@ -1587,7 +1592,7 @@ export class ContractChanges {
         )
       : undefined;
     if (registered) return registered.id;
-    return this.list().find(
+    return all.find(
       (o) =>
         o.id !== op.id &&
         o.key === op.key &&
@@ -1601,11 +1606,9 @@ export class ContractChanges {
    * (живая, отменённая, заменённая, устаревшая): их переносит сама операция
    * или не переносит никто, но не снятие как контракта без операции.
    */
-  private unfinishedRegistrations() {
+  unfinishedRegistrations(all = this.list()) {
     return new Set(
-      this.list()
-        .filter((o) => o.contractId && o.status !== 'completed')
-        .map((o) => o.contractId!),
+      all.filter((o) => o.contractId && o.status !== 'completed').map((o) => o.contractId!),
     );
   }
 

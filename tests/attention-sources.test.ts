@@ -543,6 +543,8 @@ test('S13 заменённая устаревшая операция, всё е�
         history: [{ at: '2026-01-01T00:01:00.000Z', step: 'review', event: 'stale' }],
       }),
     );
+    const before = byKey(await engineItems(f), `contract-change:${op}`)!;
+    assert.match(before.reason, /^Продолжить устаревшую операцию нельзя/);
     f.store.change('fixture.registered', (s) => {
       s.contracts.push({
         id: 'C-api-later',
@@ -557,6 +559,10 @@ test('S13 заменённая устаревшая операция, всё е�
     });
     const card = byKey(await engineItems(f), `contract-change:${op}`)!;
     assert.ok(card, 'удержание задачи не скрывается');
+    // Тот же факт с другим текстом: версия меняется, появление — нет.
+    assert.equal(card.occurrenceId, before.occurrenceId);
+    assert.notEqual(card.sourceVersion, before.sourceVersion);
+    assert.match(card.reason, /^Документ уже зарегистрирован позднее \(C-api-later\)/);
     assert.match(card.reason, new RegExp(`contract-change --id ${op} --abandon`));
     assert.deepEqual(card.impact.taskIds, [held.id]);
   } finally {
@@ -706,6 +712,30 @@ test('S13 замена устаревшей операции: что не зам
         f.store.change('fixture', (s) => {
           s.contracts.push(contract('C-later'));
           s.waits = [{ kind: 'context-lock', detail: 'pack', at: LATER, operation: op }];
+        }),
+    ],
+    [
+      'заменена; запрос конфигурации уже применён — карточки нет',
+      false,
+      (f, op) =>
+        f.store.change('fixture', (s) => {
+          s.contracts.push(contract('C-later'));
+          s.reconfigure = {
+            operation: op,
+            digest: 'c'.repeat(64),
+            requestedAt: LATER,
+            appliedAt: LATER,
+          };
+        }),
+    ],
+    [
+      'заменена; оставшаяся отметка паузы операции без паузы — карточки нет',
+      false,
+      (f, op) =>
+        f.store.change('fixture', (s) => {
+          s.contracts.push(contract('C-later'));
+          s.paused = false;
+          s.pauseOperation = op;
         }),
     ],
   ];
