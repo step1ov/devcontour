@@ -140,6 +140,12 @@ test('F77: явный такт планировщика (запуск очере
       assert.equal(budget.count, start + 3, 'явный такт выдаёт и при запущенном сервере');
       await f.scheduler.drain();
       assert.equal(budget.count, start + 4, 'drain выдаёт');
+      // Поломка: явный такт, пришедший, пока идёт такт интервала под шлюзом,
+      // присоединялся к нему и выдачи не было.
+      const gated = (f.scheduler as unknown as { intervalTick(): Promise<void> }).intervalTick();
+      const explicit = f.scheduler.tick();
+      await Promise.all([gated, explicit]);
+      assert.equal(budget.count, start + 5, 'явный такт во время такта интервала выдаёт сам');
     } finally {
       budget.restore();
     }
@@ -335,6 +341,175 @@ test('F74: если за задержку в базу писал другой п
     assert.equal(scheduler.foreignDuringStall, 1);
     // Задержка всё равно записана: восстановление назовёт её причиной.
     assert.equal(f.store.latestEvents(['server.loop-stalled'], 5).length, 1);
+  } finally {
+    await scheduler.stop();
+    f.cleanup();
+  }
+});
+
+test('F74: чужая запись за задержку видна и тогда, когда задержку первым заметил интервал монитора или такт', async () => {
+  // Поломка: транзакция продления сама проходит проверку задержки перед
+  // BEGIN — та задержки уже не видит и отмечает текущие счётчики (вместе с
+  // чужой записью) как виденные, и сверка внутри продления её пропускает.
+  const f = fixture();
+  const { from, stall, scheduler } = stalledScheduler(f);
+  try {
+    const run = claimed(f, scheduler.owner);
+    const monitor = scheduler.watchLeases();
+    stall();
+    setRowUntil(f, run.id, from + 20_000);
+    const other = new Store(f.store.file);
+    try {
+      other.change('fixture.foreign-write', (s) => {
+        s.boards[0].title += ' (другой процесс)';
+      });
+    } finally {
+      other.close();
+    }
+    // Первым проснулся интервал монитора (или такт очереди) — не транзакция.
+    assert.ok(monitor.check(), 'задержка замечена');
+    assert.deepEqual(scheduler.extendedAfterStall, [], 'чужая запись — без продления');
+    assert.equal(scheduler.foreignDuringStall, 1);
+    assert.equal(rowUntil(f, run.id), from + 20_000);
+  } finally {
+    await scheduler.stop();
+    f.cleanup();
+  }
+  // Контроль: та же задержка без чужой записи продлевается и этим путём.
+  const g = fixture();
+  const time = stalledScheduler(g);
+  try {
+    const run = claimed(g, time.scheduler.owner);
+    const monitor = time.scheduler.watchLeases();
+    time.stall();
+    setRowUntil(g, run.id, time.from + 20_000);
+    assert.ok(monitor.check(), 'задержка замечена');
+    assert.deepEqual(time.scheduler.extendedAfterStall, [run.id]);
+    assert.equal(time.scheduler.foreignDuringStall, 0);
+  } finally {
+    await time.scheduler.stop();
+    g.cleanup();
+  }
+});
+
+test('F74: чужая запись между своей фиксацией (или проверкой задержки) и отметкой счётчиков не принимается за виденную', async () => {
+  // Поломка: счётчики отмечались после COMMIT и после проверки задержки —
+  // процесс, вставший между ними, отмечал чужую запись этого времени как
+  // свою, и следующая задержка продлевала срок вопреки ей.
+  const foreignWrite = (f: ReturnType<typeof fixture>) => {
+    const other = new Store(f.store.file);
+    try {
+      other.change('fixture.foreign-write', (s) => {
+        s.boards[0].title += ' (другой процесс)';
+      });
+    } finally {
+      other.close();
+    }
+  };
+  // 1. Чужая запись сразу после COMMIT своей транзакции.
+  {
+    const f = fixture();
+    const { from, stall, scheduler } = stalledScheduler(f);
+    const db = (f.store as unknown as { db: DatabaseSync }).db;
+    const exec = db.exec.bind(db);
+    try {
+      const run = claimed(f, scheduler.owner);
+      scheduler.watchLeases();
+      let armed = true;
+      db.exec = (sql: string) => {
+        exec(sql);
+        if (armed && sql === 'COMMIT') {
+          armed = false;
+          foreignWrite(f);
+        }
+      };
+      f.store.change('fixture.own-write', (s) => {
+        s.boards[0].title += ' (своя запись)';
+      });
+      assert.equal(armed, false, 'чужая запись — сразу после своей фиксации');
+      db.exec = exec;
+      stall();
+      setRowUntil(f, run.id, from + 20_000);
+      f.store.leaseWatch!();
+      assert.deepEqual(scheduler.extendedAfterStall, []);
+      assert.equal(scheduler.foreignDuringStall, 1);
+    } finally {
+      db.exec = exec;
+      await scheduler.stop();
+      f.cleanup();
+    }
+  }
+  // 2. Чужая запись во время проверки задержки, которая задержки не нашла.
+  {
+    const f = fixture();
+    const { c, from, stall, scheduler } = stalledScheduler(f);
+    try {
+      const run = claimed(f, scheduler.owner);
+      scheduler.watchLeases();
+      let armed = false;
+      const mono = Object.getOwnPropertyDescriptor(c, 'mono')!;
+      let value = c.mono;
+      Object.defineProperty(c, 'mono', {
+        configurable: true,
+        get: () => {
+          if (armed) {
+            armed = false;
+            foreignWrite(f);
+          }
+          return value;
+        },
+        set: (v: number) => (value = v),
+      });
+      armed = true;
+      f.store.leaseWatch!();
+      assert.equal(armed, false, 'чужая запись — внутри проверки');
+      assert.deepEqual(scheduler.extendedAfterStall, [], 'задержки ещё не было');
+      stall();
+      setRowUntil(f, run.id, from + 20_000);
+      f.store.leaseWatch!();
+      assert.deepEqual(scheduler.extendedAfterStall, []);
+      assert.equal(scheduler.foreignDuringStall, 1);
+      Object.defineProperty(c, 'mono', mono);
+    } finally {
+      await scheduler.stop();
+      f.cleanup();
+    }
+  }
+});
+
+test('F74: долгая синхронная работа из коротких шагов с операциями хранилища между ними — тоже задержка', async () => {
+  // Поломка: проверка перед каждой операцией хранилища сдвигала отметку
+  // монитора, хотя цикл событий не отпускался: шаги короче порога, разрыв не
+  // набирался, интервалы продления стояли — и срок попытки истекал.
+  const f = fixture();
+  const { c, scheduler } = stalledScheduler(f);
+  try {
+    const run = claimed(f, scheduler.owner);
+    const monitor = scheduler.watchLeases();
+    const start = c.wall;
+    // Срок кончается посреди работы.
+    setRowUntil(f, run.id, start + monitor.stallMs);
+    const step = Math.floor(monitor.stallMs * 0.6);
+    for (let i = 0; i < 4; i++) {
+      c.mono += step;
+      c.wall += step;
+      f.store.leaseWatch!();
+    }
+    assert.ok(
+      f.store.latestEvents(['server.loop-stalled'], 5).length >= 1,
+      'задержка замечена',
+    );
+    assert.deepEqual(scheduler.extendedAfterStall.slice(0, 1), [run.id], 'срок продлён');
+    // Контроль: шаги, между которыми цикл событий отпускался (интервал
+    // монитора — `check`), задержкой не считаются.
+    const events = f.store.latestEvents(['server.loop-stalled'], 50).length;
+    for (let i = 0; i < 4; i++) {
+      c.mono += step;
+      c.wall += step;
+      monitor.check();
+      f.store.leaseWatch!();
+    }
+    assert.equal(f.store.latestEvents(['server.loop-stalled'], 50).length, events);
   } finally {
     await scheduler.stop();
     f.cleanup();

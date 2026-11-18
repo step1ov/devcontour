@@ -457,7 +457,10 @@ export class Scheduler {
       if (this.stopped) return;
       // Без задержки — отметка счётчиков базы: по ней продление после
       // следующей задержки узнаёт, писал ли за неё другой процесс.
-      if (!monitor.check()) store.noteSeen();
+      // Счётчики — до проверки: стоявший между проверкой и отметкой процесс
+      // иначе принял бы чужую запись за это время за виденную.
+      const seen = store.seenNow();
+      if (!monitor.probe()) store.noteSeen(seen);
     };
     store.noteSeen();
     return monitor;
@@ -559,16 +562,24 @@ export class Scheduler {
   private intervalTick(): Promise<void> {
     return this.tickWith(true);
   }
+  /** Идущий такт — такт интервала под шлюзом выдачи (F77). */
+  private currentGated = false;
   private tickWith(gated: boolean): Promise<void> {
     if (this.stopped) return Promise.resolve();
     // Задержка, после которой такт истечёт попытку, записывается до recovery
     // и истечения: восстановление видит её причину.
     this.monitor?.check();
-    if (this.current) return this.current.catch(() => {});
+    if (this.current) {
+      const current = this.current.catch(() => {});
+      // Явный такт, совпавший с тактом интервала под шлюзом, не довольствуется
+      // им: тот мог выдачу пропустить. После него — свой, без шлюза.
+      return gated || !this.currentGated ? current : current.then(() => this.tickWith(false));
+    }
     const run = this.tickOnce(gated).finally(() => {
       if (this.current === run) this.current = undefined;
     });
     this.current = run;
+    this.currentGated = gated;
     return run;
   }
   private async tickOnce(gated = false) {

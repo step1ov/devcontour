@@ -715,9 +715,17 @@ export class Store {
     const v = this.version();
     return `${v.revision}:${v.lease}`;
   }
-  /** Отметить счётчики базы как виденные этим процессом (вне транзакции). */
-  noteSeen() {
-    if (!this.transaction && !this.reading && this.hasRevision) this.seen = this.counters();
+  /**
+   * Счётчики базы сейчас (вне транзакции) — для отметки `noteSeen` после
+   * проверки задержки: прочитанные до проверки, они не захватят чужую
+   * запись, сделанную, пока процесс стоял между проверкой и отметкой.
+   */
+  seenNow(): string | undefined {
+    return !this.transaction && !this.reading && this.hasRevision ? this.counters() : undefined;
+  }
+  /** Отметить счётчики базы (`seenNow`) как виденные этим процессом. */
+  noteSeen(seen = this.seenNow()) {
+    if (seen !== undefined) this.seen = seen;
   }
   /**
    * Сроки аренды попыток владельца `owner`, ещё действовавших в начале
@@ -742,6 +750,12 @@ export class Store {
     // Своя транзакция ждёт занятую базу недолго: вызывающий — основной поток
     // сервера, только что простоявший.
     this.db.exec(`PRAGMA busy_timeout=${Math.max(0, Math.floor(busyMs))};`);
+    // Своя транзакция не проходит проверку задержки (`watch`): когда задержку
+    // заметил интервал монитора или такт, а не транзакция, проверка перед
+    // BEGIN задержки уже не видит и отметила бы текущие счётчики — с чужой
+    // записью за задержку — как виденные, и сверка ниже её бы пропустила.
+    const watching = this.watching;
+    this.watching = true;
     try {
       return this.atomic(() => {
         // Под локом записи: между сверкой и продлением чужой записи нет.
@@ -769,6 +783,7 @@ export class Store {
         return { ids, foreign: false };
       });
     } finally {
+      this.watching = watching;
       this.db.exec(`PRAGMA busy_timeout=${BUSY_TIMEOUT_MS};`);
     }
   }
@@ -1042,6 +1057,7 @@ export class Store {
       this.startKey = this.components ? undefined : this.versionKey();
     }
     let value: T;
+    let seenAtCommit: string | undefined;
     try {
       value = action();
       if (value && typeof (value as any).then === 'function')
@@ -1056,6 +1072,11 @@ export class Store {
           ? this.committed
           : undefined;
       const key = !outer && (this.written || carried) ? this.versionKey() : undefined;
+      // Счётчики для проверки задержки (F74) — до COMMIT, под локом записи:
+      // прочитанные после него захватили бы чужую запись, сделанную, пока
+      // этот процесс стоял между COMMIT и отметкой.
+      seenAtCommit =
+        !outer && this.leaseWatch && this.hasRevision ? this.counters() : undefined;
       this.db.exec(outer ? `RELEASE ${point}` : 'COMMIT');
       if (key && this.written) this.committed = { key, ...this.written };
       // На месте: замыкание `frozen()`, полученное в транзакции, заполняет тот же объект.
@@ -1078,7 +1099,7 @@ export class Store {
       this.written = undefined;
       this.startKey = undefined;
       // Своя запись — не чужая для проверки задержки (`extendStalledLeases`).
-      if (this.leaseWatch) this.noteSeen();
+      if (seenAtCommit !== undefined) this.seen = seenAtCommit;
     }
     if (!outer && this.projectionPending) {
       this.projectionPending = false;
