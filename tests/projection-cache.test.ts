@@ -148,11 +148,11 @@ test('F60: опрос обзора, центра внимания, сводки 
     assert.equal((lead.lead as { present: boolean }).present, true);
 
     // Присутствие кончается без записи: срок ответа — конец присутствия.
-    markLeadActivity(f.store, 'agent', 'test', new Date(Date.now() - LEAD_QUIET_MS + 400));
+    markLeadActivity(f.store, 'agent', 'test', new Date(Date.now() - LEAD_QUIET_MS + 2_000));
     const fading = await get('/api/attention');
     assert.equal((fading.lead as { present: boolean }).present, true);
     const computed = attentions.computations;
-    await sleep(600);
+    await sleep(2_500);
     const gone = await get('/api/attention?etag=' + fading.etag);
     assert.equal(attentions.computations, computed + 1, 'срок присутствия истёк — пересчёт');
     assert.equal((gone.lead as { present: boolean }).present, false);
