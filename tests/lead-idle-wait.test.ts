@@ -135,6 +135,93 @@ test('F61: на паузе очереди ожидающая стадия дос
   }
 });
 
+test('F61: бессрочная пауза — только для доски под паузой человека, ведущего или отказа runtime', async () => {
+  const f = fixture();
+  try {
+    const { job, runner } = await waitingBoard(f);
+    const hold = (j: WorkflowJob) =>
+      (runner as unknown as { pausedHold(j: WorkflowJob): boolean }).pausedHold(j);
+    const view = f.store.view.bind(f.store);
+    const pausedAs = (pauseReason: DevContourState['pauseReason'] | undefined, paused = true) => {
+      f.store.view = () => ({ ...view(), paused, pauseReason });
+    };
+    const board = job;
+    const changeSet = { ...job, kind: 'changeset' } as WorkflowJob;
+    try {
+      for (const reason of ['operator', 'runtime'] as const) {
+        pausedAs(reason);
+        assert.equal(hold(board), true, reason);
+        assert.equal(hold(changeSet), false, 'ChangeSet читает Git и требования: ' + reason);
+      }
+      // Проверка базы (Git), остановка сервера (стадия снимает сама),
+      // операция применения, пауза без причины («база отстала»), без паузы.
+      for (const reason of ['base-check', 'shutdown', 'reconfigure', undefined] as const) {
+        pausedAs(reason);
+        assert.equal(hold(board), false, String(reason));
+      }
+      pausedAs(undefined, false);
+      assert.equal(hold(board), false, 'очередь идёт');
+    } finally {
+      f.store.view = view;
+    }
+    await runner.stop();
+  } finally {
+    f.cleanup();
+  }
+});
+
+test('F61: под паузой проверки базы ожидающая стадия проверяется после предела', async () => {
+  const f = fixture();
+  try {
+    const { runner, claims } = await waitingBoard(f);
+    runner.idleWait = { initialMs: 100, maxMs: 200 };
+    f.h.pause(true, 'operator', 'lead');
+    // Пауза проверки базы — в отпечатке (причина); стадия под ней проверяет
+    // базу (Git), поэтому предел действует. Сама проверка здесь не нужна:
+    // правило паузы подменено на «ничего не делать».
+    const view = f.store.view.bind(f.store);
+    f.store.view = () => ({ ...view(), paused: true, pauseReason: 'base-check' });
+    const execute = runner.execute.bind(runner);
+    runner.execute = () => Promise.resolve(true);
+    try {
+      await runner.tick();
+      const start = claims();
+      await sleep(250);
+      await runner.tick();
+      assert.equal(claims(), start + 1, 'base-check: захват после предела');
+    } finally {
+      f.store.view = view;
+      runner.execute = execute;
+    }
+    await runner.stop();
+  } finally {
+    f.cleanup();
+  }
+});
+
+test('F61: смена пределов восстановления в конфигурации снова захватывает удержанную стадию', async () => {
+  const f = fixture();
+  try {
+    const { runner, claims } = await waitingBoard(f);
+    runner.idleWait = { initialMs: 100, maxMs: 200 };
+    f.h.pause(true, 'operator', 'lead');
+    await runner.tick();
+    const start = claims();
+    await sleep(250);
+    await runner.tick();
+    assert.equal(claims(), start, 'удержание под паузой');
+    f.h.config = { ...f.h.config, maxAttempts: f.h.config.maxAttempts + 1 };
+    await runner.tick();
+    assert.equal(claims(), start + 1, 'maxAttempts');
+    f.h.config = { ...f.h.config, repairBudget: f.h.config.repairBudget + 1 };
+    await runner.tick();
+    assert.equal(claims(), start + 2, 'repairBudget');
+    await runner.stop();
+  } finally {
+    f.cleanup();
+  }
+});
+
 test('F60: отпечаток ожидания ChangeSet видит живую проверку другого ChangeSet — её конец снова захватывает стадию', () => {
   // Начало совместной проверки ждёт, пока идёт любая проверка с живым lease
   // (`jointStage`): её окончание — перемена для ожидающей стадии.

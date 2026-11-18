@@ -1,4 +1,5 @@
 import { join } from 'node:path';
+import { blocksWork } from 'devcontour-harness';
 import { LeadWorkflow, WAITING_BASE_HELD, type WorkflowJob } from '../core/lead-workflow.ts';
 import { heldBaseOf, staleBaseStop } from '../core/work-status.ts';
 import { BASE_HELD_REFUSAL, SERVER_STOPPING, type DevContour } from '../core/service.ts';
@@ -153,18 +154,6 @@ export class LeadRunner {
     if (!live) this.startWaits.delete(changeSetId);
   }
   /**
-   * Отпечаток того, чего может ждать стадия задания: само задание (вход,
-   * попытки, восстановления), задачи его досок (статус, попытка,
-   * восстановление, класс отказа), ревизии досок, пауза очереди с её
-   * причинами и ожиданиями (проверка и удержание базы), остановка «база
-   * отстала» по сбоям такта; у ChangeSet — проверки с живостью их lease,
-   * доставки, приёмка, идущие попытки, совместная проверка цикла и пауза
-   * после отказа её начала (истечение паузы — тоже смена отпечатка). Без
-   * смены отпечатка повторный захват ожидающей стадии ничего не меняет
-   * (`idleWait`); то, чего отпечаток не видит (Git, время), стадия
-   * проверит не позже предела паузы.
-   */
-  /**
    * Ожидание стадии доски при паузе очереди человеком или ведущим
    * (`operator`) либо по отказу runtime: стадия 2 такую паузу не снимает,
    * Git и время не читает, а восстановление и повтор решаются по задачам
@@ -179,6 +168,19 @@ export class LeadRunner {
     const s = this.h.store.view();
     return s.paused && (s.pauseReason === 'operator' || s.pauseReason === 'runtime');
   }
+  /**
+   * Отпечаток того, чего может ждать стадия задания: само задание (вход,
+   * попытки, восстановления), задачи его досок (статус, попытка,
+   * восстановление, класс отказа) и их блокирующие вопросы исполнителя,
+   * пределы восстановления конфигурации, ревизии досок, пауза очереди с её
+   * причинами и ожиданиями (проверка и удержание базы), остановка «база
+   * отстала» по сбоям такта; у ChangeSet — проверки с живостью их lease,
+   * доставки, приёмка, идущие попытки, совместная проверка цикла и пауза
+   * после отказа её начала (истечение паузы — тоже смена отпечатка). Без
+   * смены отпечатка повторный захват ожидающей стадии ничего не меняет
+   * (`idleWait`); то, чего отпечаток не видит (Git, время), стадия
+   * проверит не позже предела паузы.
+   */
   private waitPrint(job: WorkflowJob, errors: () => ReturnType<typeof tickErrors>) {
     const s = this.h.store.view();
     const now = Date.now();
@@ -197,6 +199,13 @@ export class LeadRunner {
       job.attempts,
       job.repairs,
       job.startedAt,
+      // Блокирующие вопросы исполнителя по задачам: снятие или замена
+      // вопроса (input_cancel, input_supersede) полей задачи не меняет, а
+      // повтор и остановку задания решает (F61).
+      executionOf(this.h)
+        .engine.inputRequests()
+        .filter((r) => ids.has(r.workId) && blocksWork(r))
+        .map((r) => [r.workId, r.id]),
       s.paused,
       s.pauseReason,
       s.pausedAt,
