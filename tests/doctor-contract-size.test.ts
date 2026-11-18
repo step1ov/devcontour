@@ -316,3 +316,44 @@ test('F50 r1: malformed task records do not break doctor; a bound task without s
   assert.deepEqual(ids([done, { id: 'T-4', contracts: ['C-near'] }]), ['contract-size:C-near']);
   assert.deepEqual(ids([null, done]), []);
 });
+
+test('F50 r2: only a direct consolidation keeps the binding; a reference cycle terminates', () => {
+  const source = 'docs/contracts/journal.md';
+  const chain = Array.from({ length: 7 }, (_, i) =>
+    contract(`J-${i + 1}`, CONTRACT_CONTENT_WARN, { source }),
+  );
+  const done = [{ id: 'T-1', status: 'done', contracts: ['J-7'] }];
+  const ids = (cs: Contract[], tasks: unknown[]) =>
+    contractSizeChecks(cs, tasks as never).map((c) => c.id);
+  // Консолидация J-7, зарегистрированная не сразу за ней (previous J-6) или
+  // без previous, — не звено цепочки: принятая задача на J-7 её не закрывает.
+  for (const previous of ['J-6', undefined]) {
+    const j8 = contract('J-8', CONTRACT_CONTENT_WARN, {
+      source,
+      ...(previous ? { previous } : {}),
+      consolidates: { from: 'J-7', review: 'R' },
+    });
+    assert.ok(ids([...chain, j8], done).includes('contract-size:J-8'), String(previous));
+  }
+  // Повреждённые ссылки по кругу: проверка завершается.
+  const a = contract('A', CONTRACT_CONTENT_WARN, {
+    source: 'docs/contracts/loop.md',
+    previous: 'B',
+    consolidates: { from: 'B', review: 'R' },
+  });
+  const b = contract('B', CONTRACT_CONTENT_WARN, {
+    source: 'docs/contracts/loop.md',
+    previous: 'A',
+    consolidates: { from: 'A', review: 'R' },
+  });
+  assert.ok(Array.isArray(ids([a, b], [{ id: 'T-1', status: 'done', contracts: ['A', 'B'] }])));
+});
+
+test('F50 r2: a non-string id in a task contracts list does not hide its real binding', () => {
+  const c = contract('C-near', CONTRACT_CONTENT_WARN);
+  const ids = (tasks: unknown[]) => contractSizeChecks([c], tasks as never).map((x) => x.id);
+  assert.deepEqual(ids([{ id: 'T-1', status: 'done', contracts: [42, 'C-near'] }]), []);
+  assert.deepEqual(ids([{ id: 'T-1', status: 'ready', contracts: [42, 'C-near'] }]), [
+    'contract-size:C-near',
+  ]);
+});

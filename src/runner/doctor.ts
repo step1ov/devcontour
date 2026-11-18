@@ -1248,11 +1248,14 @@ export function contractSizeChecks(
       : [];
   });
   const boundTo = (ids: Set<string>) =>
-    records.filter((t) => t.contracts.some((id) => typeof id === 'string' && ids.has(id)));
-  const byId = new Map(contracts.map((x) => [x.id, x]));
-  // Действующая редакция и те, что она консолидирует звено за звеном:
+    records.filter((t) => t.contracts.some((id) => ids.has(id as string)));
+  const redactions = (c: DevContourState['contracts'][number]) =>
+    c.source ? contractRedactionsOf(contracts, c.source, c.repositoryId) : [c];
+  // Действующая редакция и те, что она консолидирует звено за звеном
+  // (только редакции того же документа, как `equivalenceChain`):
   // консолидация сохраняет привязки прежней редакции.
   const equivalent = (c: DevContourState['contracts'][number]) => {
+    const byId = new Map(redactions(c).map((x) => [x.id, x]));
     const ids = new Set([c.id]);
     for (let x = c; x.consolidates && x.consolidates.from === x.previous;) {
       const before = x.previous ? byId.get(x.previous) : undefined;
@@ -1264,9 +1267,7 @@ export function contractSizeChecks(
   };
   const retired = (c: DevContourState['contracts'][number]) => {
     if (!boundTo(equivalent(c)).length) return false;
-    const all = new Set(
-      (c.source ? contractRedactionsOf(contracts, c.source, c.repositoryId) : [c]).map((x) => x.id),
-    );
+    const all = new Set(redactions(c).map((x) => x.id));
     return boundTo(all).every((t) => t.status === 'done' || t.status === 'cancelled');
   };
   return (
