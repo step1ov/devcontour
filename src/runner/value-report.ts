@@ -4,7 +4,7 @@ import { join } from 'node:path';
 import type { Config } from '../core/model.ts';
 import { repositories } from '../core/repositories.ts';
 import { DevContour } from '../core/service.ts';
-import { Store, journalFiles } from '../core/store.ts';
+import { Store, busyAsDomain, isDatabaseBusy, journalFiles } from '../core/store.ts';
 import {
   devcontourValueReport,
   type DevContourValueReport,
@@ -19,6 +19,11 @@ const fingerprint = (file: string) => {
     return 'missing';
   }
 };
+
+/** Попытки чтения занятой базы (каждая ждёт блокировку `BUSY_TIMEOUT_MS`). */
+export const READ_BUSY_ATTEMPTS = 3;
+const READ_BUSY_PAUSE_MS = 250;
+const pause = (ms: number) => Atomics.wait(new Int32Array(new SharedArrayBuffer(4)), 0, 0, ms);
 
 /**
  * Чтение без записи в базу: соединение только для чтения, как у `doctor` —
@@ -39,15 +44,26 @@ export function readOnlyRead<T>(
   if (!existsSync(file)) throw new Error('База состояния не найдена: ' + file);
   const components = config.storage === 'component' ? repositories(config) : undefined;
   const journal = journalFiles(file);
+  let busy = 0;
   for (let attempt = 1; ; attempt++) {
     const quiet = !journal.some((f) => existsSync(f));
     const before = fingerprint(file);
-    const store = new Store(file, components, false, undefined, true);
     let value: T;
     try {
-      value = read(new DevContour(store, config));
-    } finally {
-      store.close();
+      const store = new Store(file, components, false, undefined, true);
+      try {
+        value = read(new DevContour(store, config));
+      } finally {
+        store.close();
+      }
+    } catch (error) {
+      // Занятая база — временное состояние под нагрузкой writer, а не отказ
+      // чтения: чтение повторяется с паузой, затем — отказ «повторите».
+      if (!isDatabaseBusy(error)) throw error;
+      if (++busy >= READ_BUSY_ATTEMPTS) throw busyAsDomain(error);
+      pause(READ_BUSY_PAUSE_MS * busy);
+      attempt--;
+      continue;
     }
     afterRead?.(attempt);
     if (!quiet || (!journal.some((f) => existsSync(f)) && fingerprint(file) === before))

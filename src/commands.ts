@@ -47,7 +47,7 @@ import { lockContextFile, taskContext } from './runner/context.ts';
 import { ResourcePool, resourceDatabase, processAlive } from './runner/resources.ts';
 import { mkdir, writeFile, readFile, realpath, rename } from 'node:fs/promises';
 import { join, resolve, dirname, sep, basename, posix } from 'node:path';
-import { Store } from './core/store.ts';
+import { DATABASE_BUSY_ADVICE, Store, isDatabaseBusy } from './core/store.ts';
 import { DevContour } from './core/service.ts';
 import { configSchema } from './core/model.ts';
 import { loadConfig, scopedConfig } from './runner/config.ts';
@@ -929,6 +929,24 @@ async function main() {
     }
     return;
   }
+  // Операции агентского API, которые проверены на соединении только для
+  // чтения, не открывают базу writer: открытие writer ждёт блокировку записи,
+  // и под нагрузкой работающего serve пакет передачи контекста отказывал
+  // «database is locked», хотя ничего не пишет.
+  if (operation === 'agent' && args.includes('--file')) {
+    const request: unknown = await readAgentJson(resolve(option('--file', '')));
+    if (
+      request &&
+      typeof request === 'object' &&
+      'operation' in request &&
+      typeof request.operation === 'string' &&
+      READ_ONLY_CLI_AGENT_OPERATIONS.has(request.operation)
+    ) {
+      const result = readOnlyRead(config, root, (h) => new AgentService(h, root).execute(request));
+      console.log(JSON.stringify(result, null, 2));
+      return;
+    }
+  }
   const store = new Store(
     join(root, 'state.sqlite'),
     config.storage === 'component' ? repositories(config) : undefined,
@@ -1686,13 +1704,14 @@ main().catch((error) => {
   const message = error instanceof Error ? error.message : String(error);
   console.error(message);
   // Голое «database is locked» не говорит, что делать: базу держит другой
-  // процесс DevContour, обычно запущенный serve этого же workspace.
-  if (/database is locked/i.test(message))
-    console.error(
-      'Базу держит другой процесс DevContour — обычно запущенный serve этого workspace. Остановите его и повторите команду.',
-    );
+  // процесс DevContour, обычно работающий serve этого же workspace. Это
+  // временная занятость под нагрузкой: команду повторяют, serve не трогают.
+  if (isDatabaseBusy(message)) console.error(DATABASE_BUSY_ADVICE);
   process.exitCode = 1;
 });
+
+/** Операции `agent --file`, которые CLI выполняет на соединении только для чтения. */
+const READ_ONLY_CLI_AGENT_OPERATIONS = new Set(['session_handoff', 'value_report']);
 
 /** Ключи изменений подготовки: их проекция в docs/changes — запись DevContour. */
 async function changeKeysOf(root: string) {

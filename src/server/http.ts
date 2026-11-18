@@ -7,7 +7,7 @@ import { AttentionService } from '../application/attention.ts';
 import type { UsageRecord } from '../core/usage.ts';
 import { Preparation } from '../core/preparation.ts';
 import { PreparationAgent } from '../application/preparation-agent.ts';
-import type { Store } from '../core/store.ts';
+import { busyAsDomain, type Store } from '../core/store.ts';
 import { LeadRunner } from '../runner/lead-workflow.ts';
 import { PreviewRunner } from '../runner/preview.ts';
 import { authorOverview } from '../application/overview.ts';
@@ -1024,7 +1024,8 @@ export async function serve(
           "default-src 'self'; style-src 'self' 'unsafe-inline'; script-src 'self'; img-src 'self' data:; connect-src 'self'; frame-ancestors 'none'; base-uri 'none'",
       });
       res.end(content);
-    } catch (error) {
+    } catch (caught) {
+      const error = busyAsDomain(caught);
       const status =
         error instanceof DomainError
           ? error.status

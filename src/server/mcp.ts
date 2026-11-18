@@ -11,6 +11,7 @@ import {
   capabilities,
 } from '../application/agent.ts';
 import { DomainError } from '../core/model.ts';
+import { busyAsDomain } from '../core/store.ts';
 
 export function createMcpServer(service: Pick<AgentService, 'run'>) {
   const { version } = capabilities();
@@ -37,7 +38,8 @@ export function createMcpServer(service: Pick<AgentService, 'run'>) {
             content: [{ type: 'text', text: JSON.stringify(result) }],
             structuredContent: result,
           };
-        } catch (error) {
+        } catch (caught) {
+          const error = busyAsDomain(caught);
           const status =
             error instanceof DomainError ? error.status : error instanceof ZodError ? 400 : 500;
           return {
