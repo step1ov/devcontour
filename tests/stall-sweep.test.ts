@@ -38,14 +38,19 @@ import { testDemo } from './demo-pool.ts';
  * (`config-apply`) с `stop` controller останавливает попытку отказом
  * `stalled`.
  */
-const SWEEP = { intervalMs: 1000, quietMs: 1000, stalledMs: 3000 };
+const SWEEP_INTERVAL_MS = 1000;
+const SWEEP = { intervalMs: SWEEP_INTERVAL_MS, quietMs: 1000, stalledMs: 3000 };
 /**
  * Gate без вывода и без заметного расхода процессора: ждёт файла-барьера,
  * который тест создаёт, увидев зависание, и пишет отчёт. Без барьера —
  * сразу; не дождавшись за 25 с — отказ, чтобы прогон не висел.
  */
+// После барьера gate ещё 2 интервала обхода пишет вывод и только потом
+// завершается: движение после зависания обход видит, пока попытка идёт. Без
+// этого остаток попытки (около секунды) был равен интервалу обхода, и
+// переход в active зависел от того, кто успеет раньше на миллисекунды.
 const silent = (barrier: string | null, name: string) =>
-  `import{existsSync,writeFileSync}from'node:fs';const done=()=>{writeFileSync(process.env.DEVCONTOUR_REPORT_PATH,'<testsuite><testcase name="${name}"/></testsuite>');process.exit(0)};const barrier=${JSON.stringify(barrier)};if(!barrier)done();const end=Date.now()+25000;setInterval(()=>{if(existsSync(barrier))done();if(Date.now()>end)process.exit(1)},250);`;
+  `import{existsSync,writeFileSync}from'node:fs';const report=()=>{writeFileSync(process.env.DEVCONTOUR_REPORT_PATH,'<testsuite><testcase name="${name}"/></testsuite>');process.exit(0)};let moving=false;const done=()=>{if(moving)return;moving=true;const stop=Date.now()+${2 * SWEEP_INTERVAL_MS};setInterval(()=>{process.stdout.write('.');if(Date.now()>stop)report()},100)};const barrier=${JSON.stringify(barrier)};if(!barrier)report();const end=Date.now()+25000;setInterval(()=>{if(existsSync(barrier))done();if(Date.now()>end)process.exit(1)},250);`;
 
 async function fixture() {
   const root = await mkdtemp(join(tmpdir(), 'devcontour-stall-'));

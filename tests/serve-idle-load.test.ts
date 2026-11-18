@@ -18,6 +18,7 @@ import { Store, WAL_SIZE_LIMIT_BYTES } from '../src/core/store.ts';
 import { Scheduler } from '../src/runner/scheduler.ts';
 import { executionOf } from '../src/harness/execution.ts';
 import { HARNESS_EXPIRY_TAIL } from '../src/harness/projection.ts';
+import { IdleClaimGate } from '../src/harness/idle-claims.ts';
 
 /** Счётчик вызовов метода на прототипе на время теста. */
 function counting<T extends object>(proto: T, name: string) {
@@ -59,16 +60,19 @@ test('F77: такт сервера без перемен не повторяет
       (f.store as unknown as { db: DatabaseSync }).db
         .prepare('SELECT data FROM main.state WHERE id=1')
         .get() as { data: string };
+    // Такт интервала сервера (тот, что зовёт `setInterval` после `start`) —
+    // напрямую: без таймера тест не зависит от его расписания.
+    const interval = () =>
+      (f.scheduler as unknown as { intervalTick(): Promise<void> }).intervalTick();
     try {
       // Предел больше теста: здесь проверяется только реакция на перемены.
       f.scheduler.idleClaims.maxMs = 60_000;
-      f.scheduler.start();
-      await f.scheduler.tick();
+      await interval();
       assert.equal(budget.count, 1, 'первый такт выдаёт');
       const revision = f.store.version();
       const text = stateText().data;
       const before = { parses: parses.count, serialized: serialized.count };
-      for (let i = 0; i < 8; i++) await f.scheduler.tick();
+      for (let i = 0; i < 8; i++) await interval();
       assert.equal(budget.count, 1, 'такты без перемен не дошли до выдачи движка');
       assert.ok(f.scheduler.idleClaims.skipped >= 8, 'шлюз пропустил выдачу каждого такта');
       assert.deepEqual(f.store.version(), revision, 'ревизия и счётчик сроков стоят');
@@ -80,17 +84,34 @@ test('F77: такт сервера без перемен не повторяет
       // Перемена данных (здесь — заголовок доски) снова открывает выдачу.
       const board = f.store.view().boards[0];
       f.h.editBoard(board.id, { title: board.title + ' (правка)' });
-      await f.scheduler.tick();
+      await interval();
       assert.equal(budget.count, 2, 'после записи данных выдача снова дошла до движка');
-      await f.scheduler.tick();
+      await interval();
       assert.equal(budget.count, 2, 'и снова стоит без перемен');
+
+      // Явный такт (запуск очереди, drain) выдаёт и без перемен.
+      await f.scheduler.tick();
+      assert.equal(budget.count, 3, 'явный такт не под шлюзом');
 
       // Предел: то, что зависит только от времени, выдача видит не позже него.
       f.scheduler.idleClaims.maxMs = 200;
-      await f.scheduler.tick();
+      await interval();
+      const held: number = budget.count;
       await sleep(300);
-      await f.scheduler.tick();
-      assert.ok(budget.count >= 3, 'после предела выдача повторяется и без перемен');
+      await interval();
+      assert.equal(budget.count, held + 1, 'после предела выдача повторяется и без перемен');
+
+      // Новая готовая работа выдаётся первым же тактом интервала.
+      f.scheduler.idleClaims.maxMs = 60_000;
+      await interval();
+      const next = f.h.createBoard('Новая работа');
+      const task = f.h.addTask(next.id, input('Ready after idle'));
+      f.h.approve(next.id);
+      await interval();
+      assert.ok(
+        f.store.view().runs.some((r) => r.taskId === task.id),
+        'готовая задача выдана после простоя',
+      );
     } finally {
       budget.restore();
       parses.restore();
@@ -102,7 +123,7 @@ test('F77: такт сервера без перемен не повторяет
   }
 });
 
-test('F77: явный такт планировщика без интервала сервера (drain, запуск очереди) выдаёт всегда', async () => {
+test('F77: явный такт планировщика (запуск очереди, drain) выдаёт всегда, и при запущенном сервере', async () => {
   const f = await runtimeFixture();
   try {
     for (const t of f.store.view().tasks)
@@ -111,9 +132,14 @@ test('F77: явный такт планировщика без интервал�
     const engine = executionOf(f.h).engine as unknown as Record<string, unknown>;
     const budget = counting(engine, 'budgetBlocks');
     try {
+      // Простой уже запомнен шлюзом тактом интервала.
+      f.scheduler.idleClaims.maxMs = 60_000;
+      await (f.scheduler as unknown as { intervalTick(): Promise<void> }).intervalTick();
+      const start = budget.count;
       for (let i = 0; i < 3; i++) await f.scheduler.tick();
-      assert.equal(budget.count, 3, 'без интервала шлюз не действует');
-      assert.equal(f.scheduler.idleClaims.skipped, 0);
+      assert.equal(budget.count, start + 3, 'явный такт выдаёт и при запущенном сервере');
+      await f.scheduler.drain();
+      assert.equal(budget.count, start + 4, 'drain выдаёт');
     } finally {
       budget.restore();
     }
@@ -198,10 +224,16 @@ function clocks() {
   };
 }
 
+/** Планировщик с часами монитора теста и наблюдением за сроками. */
+function stalledScheduler(f: ReturnType<typeof fixture>) {
+  const time = clocks();
+  const scheduler = new Scheduler(f.h, f.root, undefined, { loopClock: time.clock });
+  return { ...time, scheduler };
+}
+
 test('F74: после задержки основного потока сервер продлевает свою живую попытку — продление движка проходит, истечение её не трогает', async () => {
   const f = fixture();
-  const { from, stall, clock } = clocks();
-  const scheduler = new Scheduler(f.h, f.root, undefined, { loopClock: clock });
+  const { from, stall, scheduler } = stalledScheduler(f);
   try {
     const run = claimed(f, scheduler.owner);
     scheduler.watchLeases();
@@ -209,8 +241,8 @@ test('F74: после задержки основного потока серв�
     // (30 с) истёк, хотя её исполнитель жив. Конец срока — внутри задержки.
     stall();
     setRowUntil(f, run.id, from + 20_000);
-    // Контроль: без проверки задержки перед чтением строки продление движка
-    // отказывает — прежнее поведение, которое и теряло живую попытку.
+    // Контроль: без проверки задержки продление движка отказывает — прежнее
+    // поведение, которое и теряло живую попытку.
     const watch = f.store.leaseWatch;
     f.store.leaseWatch = undefined;
     assert.throws(
@@ -219,15 +251,13 @@ test('F74: после задержки основного потока серв�
     );
     f.store.leaseWatch = watch;
     const { engine } = executionOf(f.h);
-    // Первым проснулось продление движка (интервал попытки): оно читает
-    // строку аренды, проверка задержки — раньше.
+    // Первым проснулось продление движка (интервал попытки): проверка
+    // задержки — перед его транзакцией.
     engine.heartbeat(run.id, run.token);
     assert.deepEqual(scheduler.extendedAfterStall, [run.id]);
     assert.ok(rowUntil(f, run.id)! > Date.now(), 'срок продлён');
     assert.deepEqual(engine.expire(), [], 'истечение такта не трогает продлённую попытку');
     assert.equal(f.store.view().runs.find((r) => r.id === run.id)?.status, 'active');
-    // Задержка записана событием своей транзакцией сразу после продления.
-    await new Promise((r) => setImmediate(r));
     const stalls = f.store.latestEvents(['server.loop-stalled'], 5);
     assert.equal(stalls.length, 1);
     assert.equal((stalls[0].data as { owner: string }).owner, scheduler.owner);
@@ -237,14 +267,87 @@ test('F74: после задержки основного потока серв�
   }
 });
 
+test('F74: первой после задержки может проснуться запись фазы попытки — она тоже видит продлённый срок', async () => {
+  const f = fixture();
+  const { from, stall, scheduler } = stalledScheduler(f);
+  try {
+    const run = claimed(f, scheduler.owner);
+    scheduler.watchLeases();
+    stall();
+    setRowUntil(f, run.id, from + 20_000);
+    // Запись фазы — `withAttempt` движка, без чтения строки аренды продлением.
+    executionOf(f.h).engine.phase(run.id, run.token, 'verifying');
+    assert.deepEqual(scheduler.extendedAfterStall, [run.id]);
+    assert.equal(f.store.view().runs.find((r) => r.id === run.id)?.status, 'active');
+  } finally {
+    await scheduler.stop();
+    f.cleanup();
+  }
+});
+
+test('F74: продление после задержки фиксируется само — отказ первой проснувшейся операции его не откатывает', async () => {
+  const f = fixture();
+  const { from, stall, scheduler } = stalledScheduler(f);
+  try {
+    const a = claimed(f, scheduler.owner);
+    const b = claimed(f, scheduler.owner);
+    scheduler.watchLeases();
+    stall();
+    setRowUntil(f, a.id, from + 20_000);
+    setRowUntil(f, b.id, from + 25_000);
+    const { engine } = executionOf(f.h);
+    // Первой проснулась операция, которая сама отказывает (чужой token).
+    assert.throws(() => engine.heartbeat(a.id, 'not-the-token'));
+    assert.deepEqual(scheduler.extendedAfterStall.sort(), [a.id, b.id].sort());
+    // Продление обеих осталось: монитор задержку уже учёл, повторного нет.
+    engine.heartbeat(b.id, b.token);
+    engine.heartbeat(a.id, a.token);
+    assert.ok(rowUntil(f, a.id)! > Date.now() && rowUntil(f, b.id)! > Date.now());
+  } finally {
+    await scheduler.stop();
+    f.cleanup();
+  }
+});
+
+test('F74: если за задержку в базу писал другой процесс, срок не продлевается — его решение могло опереться на истечение', async () => {
+  const f = fixture();
+  const { from, stall, scheduler } = stalledScheduler(f);
+  try {
+    const run = claimed(f, scheduler.owner);
+    scheduler.watchLeases();
+    stall();
+    setRowUntil(f, run.id, from + 20_000);
+    // Другой процесс (здесь — второе соединение) записал за время задержки:
+    // например, начал совместную проверку, дождавшись истечения аренды.
+    const other = new Store(f.store.file);
+    try {
+      other.change('fixture.foreign-write', (s) => {
+        s.boards[0].title += ' (другой процесс)';
+      });
+    } finally {
+      other.close();
+    }
+    assert.throws(
+      () => executionOf(f.h).engine.heartbeat(run.id, run.token),
+      (e: unknown) => e instanceof HarnessError && e.code === 'LEASE_STALE',
+    );
+    assert.deepEqual(scheduler.extendedAfterStall, []);
+    assert.equal(scheduler.foreignDuringStall, 1);
+    // Задержка всё равно записана: восстановление назовёт её причиной.
+    assert.equal(f.store.latestEvents(['server.loop-stalled'], 5).length, 1);
+  } finally {
+    await scheduler.stop();
+    f.cleanup();
+  }
+});
+
 test('F74: продлеваются только свои попытки, действовавшие в начале задержки; сон машины не продлевает', async () => {
   const f = fixture();
-  const first = clocks();
-  const scheduler = new Scheduler(f.h, f.root, undefined, { loopClock: first.clock });
+  const first = stalledScheduler(f);
   try {
     // Чужая попытка: её владелец — другой процесс, его задержки этот не видел.
     const foreign = claimed(f, 'other-controller');
-    scheduler.watchLeases();
+    first.scheduler.watchLeases();
     first.stall();
     // Срок истёк внутри задержки — но попытку ведёт другой процесс.
     setRowUntil(f, foreign.id, first.from + 20_000);
@@ -254,42 +357,48 @@ test('F74: продлеваются только свои попытки, дей
       1,
       'задержка замечена — отказ продления не из-за её пропуска',
     );
-    assert.deepEqual(scheduler.extendedAfterStall, [], 'чужая попытка не продлена');
+    assert.equal(first.scheduler.foreignDuringStall, 0);
+    assert.deepEqual(first.scheduler.extendedAfterStall, [], 'чужая попытка не продлена');
     assert.equal(rowUntil(f, foreign.id), first.from + 20_000);
     assert.throws(
       () => executionOf(f.h).engine.heartbeat(foreign.id, foreign.token),
       (e: unknown) => e instanceof HarnessError && e.code === 'LEASE_STALE',
     );
   } finally {
-    await scheduler.stop();
+    await first.scheduler.stop();
     f.cleanup();
   }
 
   const g = fixture();
-  const second = clocks();
-  const own = new Scheduler(g.h, g.root, undefined, { loopClock: second.clock });
+  const second = stalledScheduler(g);
+  const own = second.scheduler;
   try {
     const run = claimed(g, own.owner);
     own.watchLeases();
+    // Сон машины: стенные часы ушли на задержку, монотонные стояли — не
+    // задержка потока. Срок кончился внутри окна сна: продления нет.
+    second.c.wall += STALL_MS;
+    setRowUntil(g, run.id, second.from + 20_000);
+    g.store.leaseWatch!();
+    assert.deepEqual(own.extendedAfterStall, [], 'сон машины не продлевает');
+    assert.equal(g.store.latestEvents(['server.clock-jump'], 5).length, 1);
+
     // Срок истёк до начала задержки: процесс тогда исполнялся и не продлил —
-    // это не задержка сервера, продления нет.
-    second.stall();
-    setRowUntil(g, run.id, second.from - 5_000);
+    // это не задержка сервера, продления нет. База проверки теперь — «сейчас».
+    const base = second.c.wall;
+    setRowUntil(g, run.id, base - 5_000);
+    second.c.mono += STALL_MS;
+    second.c.wall += STALL_MS;
     g.store.leaseWatch!();
     assert.deepEqual(own.extendedAfterStall, [], 'истёкшая до задержки не продлена');
 
-    // Сон машины: стенные часы ушли, монотонные стояли — не задержка потока.
-    setRowUntil(g, run.id, Date.now() - 1_000);
-    second.c.wall += 600_000;
-    g.store.leaseWatch!();
-    assert.deepEqual(own.extendedAfterStall, [], 'сон машины не продлевает');
-    // Та же попытка после настоящей задержки продлевается: отказы выше — из-за
-    // условий, а не из-за неработающего продления.
-    // Стенные часы монитора — снова к настоящим (это тоже скачок: базу
-    // проверки он переставляет), затем задержка.
+    // Та же попытка, действовавшая в начале задержки, продлевается: отказы
+    // выше — из-за условий, а не из-за неработающего продления.
+    // Часы монитора — снова к настоящим (тоже скачок: он лишь переставляет
+    // базу проверки), затем задержка, внутри которой кончился срок.
     second.c.wall = Date.now() - STALL_MS;
     g.store.leaseWatch!();
-    setRowUntil(g, run.id, Date.now() - 60_000);
+    setRowUntil(g, run.id, second.c.wall + 20_000);
     second.c.mono += STALL_MS;
     second.c.wall += STALL_MS;
     g.store.leaseWatch!();
@@ -298,6 +407,47 @@ test('F74: продлеваются только свои попытки, дей
     await own.stop();
     g.cleanup();
   }
+});
+
+test('F77: шлюз запоминает отпечаток, который видела сама выдача, — запись после неё не считается «пустой»', async () => {
+  let print = 'p1';
+  let now = 0;
+  const gate = new IdleClaimGate(
+    () => print,
+    () => now,
+  );
+  // Выдача ничего не нашла на p1; до конца такта другой процесс записал p2.
+  await gate.around(
+    () => 0,
+    async () => {
+      assert.equal(gate.holds(), false);
+      print = 'p2';
+    },
+  );
+  await gate.around(
+    () => 0,
+    async () => assert.equal(gate.holds(), false, 'p2 выдача ещё не видела'),
+  );
+  // Теперь p2 видела — повтор держится, вне такта шлюз не действует.
+  await gate.around(
+    () => 0,
+    async () => assert.equal(gate.holds(), true),
+  );
+  assert.equal(gate.holds(), false, 'вне такта интервала шлюз не взведён');
+  // Выдача выдала попытку — следующий такт выдаёт снова.
+  let active = 0;
+  await gate.around(
+    () => active,
+    async () => {
+      now += gate.maxMs;
+      assert.equal(gate.holds(), false, 'после предела');
+      active = 1;
+    },
+  );
+  await gate.around(
+    () => active,
+    async () => assert.equal(gate.holds(), false, 'после выдачи'),
+  );
 });
 
 test('F74: текст истечения говорит, повторит ли попытку задание ведущего цикла', () => {

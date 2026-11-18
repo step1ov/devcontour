@@ -610,6 +610,7 @@ export class Store {
   private readStartedAt = 0;
   private atomicRead<T>(read: () => T): T {
     if (this.transaction || this.reading) return read();
+    this.watch();
     this.readStartedAt = Date.now();
     this.db.exec('BEGIN');
     this.reading = true;
@@ -684,64 +685,95 @@ export class Store {
     return rows;
   }
   /**
-   * Проверка задержки основного потока этого процесса перед решением о сроке
-   * его аренды (F74): её ставит планировщик сервера (`Scheduler.start`). Её
-   * вызывает чтение строки аренды попытки — продление движка читает строку до
-   * условного продления, — поэтому задержка, после которой первым проснулось
-   * продление, замечена раньше, чем оно сочтёт срок истёкшим.
+   * Проверка задержки основного потока этого процесса (F74): её ставит
+   * планировщик сервера (`Scheduler.watchLeases`). Она идёт перед каждой
+   * внешней транзакцией и каждым согласованным чтением этого соединения —
+   * до того, как продление, запись фазы или evidence попытки либо истечение
+   * такта решат по сроку аренды, — и вне их: продление после задержки
+   * фиксируется своей транзакцией и не откатывается вместе с вызвавшей.
    */
   leaseWatch?: () => void;
-  /** Открыта транзакция записи этого соединения. */
-  get inTransaction() {
-    return this.transaction;
+  private watching = false;
+  private watch() {
+    if (!this.leaseWatch || this.watching || this.transaction || this.reading) return;
+    this.watching = true;
+    try {
+      this.leaseWatch();
+    } catch {
+      /* Проверка задержки — защита сроков; её сбой не отменяет операцию. */
+    } finally {
+      this.watching = false;
+    }
+  }
+  /**
+   * Счётчики базы, последний раз виденные этим процессом (после его записи
+   * или при проверке задержки). Совпадение с текущими после задержки — ни
+   * один другой процесс за это время в базу не писал.
+   */
+  private seen?: string;
+  private counters() {
+    const v = this.version();
+    return `${v.revision}:${v.lease}`;
+  }
+  /** Отметить счётчики базы как виденные этим процессом (вне транзакции). */
+  noteSeen() {
+    if (!this.transaction && !this.reading && this.hasRevision) this.seen = this.counters();
   }
   /**
    * Сроки аренды попыток владельца `owner`, ещё действовавших в начале
    * задержки его основного потока (`until > aliveAt`), продлеваются до
    * `until` (F74). Владелец — живой процесс, который сам стоял: его попытки
    * (их исполнители — отдельные процессы) не продлены только потому, что не
-   * исполнялся интервал продления. Строки чужого владельца, истёкшие до
-   * задержки, и снятые (попытка не активна — строки нет) не меняются.
-   * Возвращает ID продлённых попыток.
+   * исполнялся интервал продления. Продления нет, если за задержку в базу
+   * писал другой процесс (`foreign`): его решение могло опереться на
+   * истёкший срок (например, начало совместной проверки ждёт истечения
+   * аренды всех попыток), и ожившая попытка его бы обошла. Строки чужого
+   * владельца, истёкшие до задержки, и снятые (попытка не активна — строки
+   * нет) не меняются. Только вне транзакции: продление фиксируется само.
    */
-  extendStalledLeases(owner: string, aliveAt: number, until: number, busyMs = 2000): string[] {
+  extendStalledLeases(
+    owner: string,
+    aliveAt: number,
+    until: number,
+    busyMs = 2000,
+  ): { ids: string[]; foreign: boolean } {
+    if (this.transaction || this.reading)
+      throw new Error('Продление после задержки — своей транзакцией');
     // Своя транзакция ждёт занятую базу недолго: вызывающий — основной поток
     // сервера, только что простоявший.
-    const own = !this.transaction;
-    if (own) this.db.exec(`PRAGMA busy_timeout=${Math.max(0, Math.floor(busyMs))};`);
+    this.db.exec(`PRAGMA busy_timeout=${Math.max(0, Math.floor(busyMs))};`);
     try {
-      return this.extendStalledUnlocked(owner, aliveAt, until);
-    } finally {
-      if (own) this.db.exec(`PRAGMA busy_timeout=${BUSY_TIMEOUT_MS};`);
-    }
-  }
-  private extendStalledUnlocked(owner: string, aliveAt: number, until: number): string[] {
-    return this.atomic(() => {
-      const ids: string[] = [];
-      for (const schema of this.schemas()) {
-        if (!this.hasLeaseTable(schema)) continue;
-        const rows = this.db
-          .prepare(
-            `SELECT id FROM ${schema}.leases WHERE kind='attempt' AND owner=? AND until>? AND until<?`,
-          )
-          .all(owner, aliveAt, until) as { id: string }[];
-        for (const { id } of rows) {
-          this.db
+      return this.atomic(() => {
+        // Под локом записи: между сверкой и продлением чужой записи нет.
+        if (this.seen === undefined || this.seen !== this.counters())
+          return { ids: [], foreign: true };
+        const ids: string[] = [];
+        for (const schema of this.schemas()) {
+          if (!this.hasLeaseTable(schema)) continue;
+          const rows = this.db
             .prepare(
-              `UPDATE ${schema}.leases SET until=? WHERE kind='attempt' AND id=? AND owner=?`,
+              `SELECT id FROM ${schema}.leases WHERE kind='attempt' AND owner=? AND until>? AND until<?`,
             )
-            .run(until, id, owner);
-          ids.push(id);
+            .all(owner, aliveAt, until) as { id: string }[];
+          for (const { id } of rows) {
+            this.db
+              .prepare(
+                `UPDATE ${schema}.leases SET until=? WHERE kind='attempt' AND id=? AND owner=?`,
+              )
+              .run(until, id, owner);
+            ids.push(id);
+          }
         }
-      }
-      // Как продление строкой: счётчик сроков не растёт, срок накладывается
-      // из строки при каждом чтении (`withLeases`).
-      return ids;
-    });
+        // Как продление строкой: счётчик сроков не растёт, срок накладывается
+        // из строки при каждом чтении (`withLeases`).
+        return { ids, foreign: false };
+      });
+    } finally {
+      this.db.exec(`PRAGMA busy_timeout=${BUSY_TIMEOUT_MS};`);
+    }
   }
   /** Строка аренды одной попытки — без чтения документа. */
   attemptLeaseRow(id: string): AttemptLeaseRow | undefined {
-    if (!this.reading) this.leaseWatch?.();
     for (const schema of this.schemas()) {
       if (!this.hasLeaseTable(schema)) continue;
       const row = this.db
@@ -1002,6 +1034,7 @@ export class Store {
     const point = 'nested_' + ++this.savepoint;
     const pending = this.projectionPending;
     const written = this.written;
+    if (!outer) this.watch();
     this.db.exec(outer ? `SAVEPOINT ${point}` : 'BEGIN IMMEDIATE');
     this.transaction = true;
     if (!outer) {
@@ -1044,6 +1077,8 @@ export class Store {
     if (!outer) {
       this.written = undefined;
       this.startKey = undefined;
+      // Своя запись — не чужая для проверки задержки (`extendStalledLeases`).
+      if (this.leaseWatch) this.noteSeen();
     }
     if (!outer && this.projectionPending) {
       this.projectionPending = false;

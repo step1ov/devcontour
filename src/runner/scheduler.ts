@@ -81,6 +81,9 @@ export class Scheduler {
   ) {
     this.owner = options.instance ? serveControllerOwner(options.instance) : randomUUID();
     this.loopClock = options.loopClock;
+    // Шлюз действует только на такт интервала (`intervalTick`): вне его он
+    // не взведён и выдачу не держит.
+    idleClaimGates.set(this.h, this.idleClaims);
   }
   private readonly loopClock?: { mono: () => number; wall: () => number };
 
@@ -416,10 +419,9 @@ export class Scheduler {
     if (this.timer) return;
     this.stopped = false;
     this.watchLeases().start();
-    idleClaimGates.set(this.h, this.idleClaims);
     this.timer = setInterval(() => {
       if (this.stopped || this.current) return;
-      void this.tick()
+      void this.intervalTick()
         .catch((e: unknown) => {
           if (this.stopped) return;
           this.noteTickFailure(e);
@@ -450,21 +452,29 @@ export class Scheduler {
       ...(this.loopClock ?? {}),
     });
     const monitor = this.monitor;
-    this.h.store.leaseWatch = () => {
-      if (!this.stopped) monitor.check();
+    const store = this.h.store;
+    store.leaseWatch = () => {
+      if (this.stopped) return;
+      // Без задержки — отметка счётчиков базы: по ней продление после
+      // следующей задержки узнаёт, писал ли за неё другой процесс.
+      if (!monitor.check()) store.noteSeen();
     };
+    store.noteSeen();
     return monitor;
   }
   /** Попытки, продлённые после задержки основного потока (тесты и диагностика). */
   extendedAfterStall: string[] = [];
+  /** Задержки, после которых продления не было: за них писал другой процесс. */
+  foreignDuringStall = 0;
   private extendStalled(gap: LoopGap) {
     if (this.stopped) return;
     try {
-      const ids = this.h.store.extendStalledLeases(
+      const { ids, foreign } = this.h.store.extendStalledLeases(
         this.owner,
         gap.from,
         Date.now() + this.h.config.leaseMs,
       );
+      if (foreign) this.foreignDuringStall++;
       this.extendedAfterStall.push(...ids);
     } catch {
       // Продление не удалось (база занята, закрыта): прежний путь — истечение
@@ -481,24 +491,17 @@ export class Scheduler {
     if (this.stopped) return;
     // Без проекций и без долгого ожидания занятой базы: незаписанный разрыв
     // оставляет сигнал опоздавшего продления.
-    const data = {
-      owner: this.owner,
-      from: new Date(gap.from).toISOString(),
-      to: new Date(gap.to).toISOString(),
-      monoMs: gap.monoMs,
-      wallMs: gap.wallMs,
-    };
-    const write = () => {
-      try {
-        this.h.store.tryLeaseEvent(type, data);
-      } catch {
-        /* Хранилище закрыто: разрыв останется незаписанным. */
-      }
-    };
-    // Задержку заметила проверка внутри транзакции (продление движка читает
-    // строку аренды, F74): событие — своей транзакцией сразу после неё.
-    if (this.h.store.inTransaction) setImmediate(write);
-    else write();
+    try {
+      this.h.store.tryLeaseEvent(type, {
+        owner: this.owner,
+        from: new Date(gap.from).toISOString(),
+        to: new Date(gap.to).toISOString(),
+        monoMs: gap.monoMs,
+        wallMs: gap.wallMs,
+      });
+    } catch {
+      /* Хранилище закрыто: разрыв останется незаписанным. */
+    }
   }
   /**
    * Начало штатной остановки: отметка в базе, по которой запуск очереди из
@@ -546,18 +549,29 @@ export class Scheduler {
    * и такта HTTP-запуска очереди.
    */
   tick(): Promise<void> {
+    return this.tickWith(false);
+  }
+  /**
+   * Такт интервала сервера: выдача — только после перемен с прошлой пустой
+   * (F77, `idleClaims`). Явный такт (`tick`: запуск очереди, drain) выдаёт
+   * всегда.
+   */
+  private intervalTick(): Promise<void> {
+    return this.tickWith(true);
+  }
+  private tickWith(gated: boolean): Promise<void> {
     if (this.stopped) return Promise.resolve();
     // Задержка, после которой такт истечёт попытку, записывается до recovery
     // и истечения: восстановление видит её причину.
     this.monitor?.check();
     if (this.current) return this.current.catch(() => {});
-    const run = this.tickOnce().finally(() => {
+    const run = this.tickOnce(gated).finally(() => {
       if (this.current === run) this.current = undefined;
     });
     this.current = run;
     return run;
   }
-  private async tickOnce() {
+  private async tickOnce(gated = false) {
     if (!this.h.leader(this.owner)) {
       // Роль у другого controller: свои попытки прерываются, новых нет.
       await this.runner.tick().catch((error: unknown) => {
@@ -593,7 +607,7 @@ export class Scheduler {
     }
     // Такт интервала сервера выдаёт только после перемен (F77); явный такт
     // (запуск очереди, drain) — всегда.
-    if (this.timer)
+    if (gated)
       await this.idleClaims.around(
         () => runner.active,
         () => runner.tick(),

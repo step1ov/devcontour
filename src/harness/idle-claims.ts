@@ -25,6 +25,8 @@ export class IdleClaimGate {
   passed = 0;
   private armed = false;
   private attempted = false;
+  /** Отпечаток, который видела последняя пропущенная к движку выдача (в её транзакции). */
+  private observed?: string;
   private idle?: { print: string; at: number };
   constructor(
     private readonly print: () => string,
@@ -34,12 +36,14 @@ export class IdleClaimGate {
   holds(): boolean {
     if (!this.armed) return false;
     const idle = this.idle;
-    if (idle && idle.print === this.print() && this.now() < idle.at + this.maxMs) {
+    const print = this.print();
+    if (idle && idle.print === print && this.now() < idle.at + this.maxMs) {
       this.skipped++;
       return true;
     }
     this.passed++;
     this.attempted = true;
+    this.observed = print;
     return false;
   }
   /**
@@ -51,12 +55,19 @@ export class IdleClaimGate {
     const before = issued();
     this.armed = true;
     this.attempted = false;
+    this.observed = undefined;
     try {
       return await tick();
     } finally {
       this.armed = false;
+      // Запоминается отпечаток, который видела сама выдача: запись другого
+      // процесса после неё (новая готовая работа) — уже другой отпечаток, и
+      // следующий такт выдаст.
       if (this.attempted)
-        this.idle = issued() > before ? undefined : { print: this.print(), at: this.now() };
+        this.idle =
+          issued() > before || this.observed === undefined
+            ? undefined
+            : { print: this.observed, at: this.now() };
     }
   }
 }
