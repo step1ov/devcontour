@@ -1258,6 +1258,27 @@ export class Store {
       }));
     });
   }
+  /**
+   * Есть ли у кого-либо из владельцев локальная запись пространства, поле
+   * JSON `path` которой равно `value`. Отбор — в SQL: записи не разбираются
+   * в JavaScript. Для дешёвой проверки «есть ли что вести» до полного чтения.
+   */
+  hasLocalWhere(namespace: string, path: string, value: string): boolean {
+    const schemas = ['main', ...(this.components?.locations.map((l) => l.schema) ?? [])];
+    return schemas.some(
+      (schema) =>
+        !!this.db
+          .prepare(
+            `SELECT name FROM ${schema}.sqlite_master WHERE type='table' AND name='local_workflow'`,
+          )
+          .get() &&
+        !!this.db
+          .prepare(
+            `SELECT 1 FROM ${schema}.local_workflow WHERE namespace=? AND json_extract(data, ?)=? LIMIT 1`,
+          )
+          .get(namespace, path, value),
+    );
+  }
   localRecords<T>(namespace: string, owner?: string): Record<string, T> {
     const schema = this.syncSchema(owner);
     if (
