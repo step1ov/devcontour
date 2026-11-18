@@ -51,7 +51,13 @@ import { inputReviewRounds } from '../harness/input-host.ts';
 import { DiscussionService } from './discussion.ts';
 import { taskOwner } from '../core/sync-state.ts';
 import { baseWaitOf, queueStopOf, quietAttempts, quietOperations } from './queue-stop.ts';
-import { heldBaseOf, pausedByLead, shutdownInterrupted } from '../core/work-status.ts';
+import {
+  heldBaseOf,
+  leadLiftsPause,
+  leadPauseNote,
+  pausedByLead,
+  shutdownInterrupted,
+} from '../core/work-status.ts';
 import type { DevContour } from '../core/service.ts';
 import type { Store } from '../core/store.ts';
 import type { DevContourState, Task } from '../core/model.ts';
@@ -914,7 +920,15 @@ const queueSource: AttentionSourceRule = {
     if (!pause) return [];
     const view = queueStopOf(h, s, h.store.latestEvents(['scheduler.error'], 50));
     const access = (s.pauseFailures ?? []).some((f) => accessFailures.has(f));
-    const operator = pause.actor === 'user';
+    // Свою паузу (без ожидания проверки базы под ней) ведущий в режиме
+    // агента снимает сам: карточка его, а не оператора (harness называет
+    // любую паузу `operator` паузой человека). В режиме оператора ведущий
+    // очередь не ведёт — карточка оператора с запуском очереди, иначе паузу
+    // не снял бы никто. Доменные действия — только у карточек оператора; в
+    // режиме агента человек запускает очередь общей кнопкой очереди панели («Запустить очередь»).
+    const operator =
+      pause.actor === 'user' &&
+      !((h.config.approvalMode ?? 'agent') === 'agent' && leadLiftsPause(s));
     const base = foldedBaseWait(h, s);
     return [
       {
@@ -926,6 +940,7 @@ const queueSource: AttentionSourceRule = {
           waits: (s.waits ?? []).map((w) => w.kind),
           ...(base ? { base: base.detail } : {}),
           ...(pausedByLead(s) ? { by: 'lead' } : {}),
+          ...(leadPauseNote(s) ? { note: leadPauseNote(s) } : {}),
         }),
         source: 'queue',
         category: access ? 'access' : operator ? 'decision' : 'technical',

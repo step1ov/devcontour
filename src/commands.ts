@@ -26,7 +26,7 @@ import {
 import { repository as selectedRepository, repository } from './core/repositories.ts';
 import { DatabaseSync } from 'node:sqlite';
 import { fileURLToPath } from 'node:url';
-import { AgentService, capabilities } from './application/agent.ts';
+import { AgentService, capabilities, leadReason } from './application/agent.ts';
 import { markLeadActivity } from './runner/lead-activity.ts';
 import { serveMcp } from './server/mcp.ts';
 import { readAgentJson } from './runner/json-file.ts';
@@ -49,6 +49,7 @@ import { mkdir, writeFile, readFile, realpath, rename } from 'node:fs/promises';
 import { join, resolve, dirname, sep, basename, posix } from 'node:path';
 import { DATABASE_BUSY_ADVICE, Store, isDatabaseBusy } from './core/store.ts';
 import { DevContour } from './core/service.ts';
+import { z } from 'zod';
 import { configSchema } from './core/model.ts';
 import { loadConfig, scopedConfig } from './runner/config.ts';
 import { Scheduler } from './runner/scheduler.ts';
@@ -98,6 +99,31 @@ import { brokerAddress, httpBroker } from './runner/visual-broker.ts';
 import { VISUAL_RUN_DEADLINE_MS, visualRun } from './runner/visual-run.ts';
 const args = process.argv.slice(2),
   operation = args[0] ?? 'serve';
+/** Причина отказа проверки файла по-русски: частые коды zod, иначе текст zod. */
+function issueRu(issue: z.core.$ZodIssue) {
+  const i = issue as z.core.$ZodIssue & {
+    expected?: string;
+    minimum?: number | bigint;
+    maximum?: number | bigint;
+    keys?: string[];
+    origin?: string;
+  };
+  const unit = i.origin === 'string' ? ' знаков' : i.origin === 'array' ? ' элементов' : '';
+  switch (i.code) {
+    case 'invalid_type':
+      return `ожидается ${i.expected ?? 'другой тип'}: поле не задано или другого типа`;
+    case 'too_small':
+      return `меньше допустимого (не меньше ${String(i.minimum)}${unit})`;
+    case 'too_big':
+      return `больше допустимого (не больше ${String(i.maximum)}${unit})`;
+    case 'unrecognized_keys':
+      return `неизвестные поля: ${(i.keys ?? []).join(', ')}`;
+    case 'invalid_value':
+      return 'недопустимое значение';
+    default:
+      return i.message;
+  }
+}
 const option = (name: string, fallback: string) =>
   args.includes(name) ? args[args.indexOf(name) + 1] : fallback;
 /**
@@ -1352,10 +1378,22 @@ async function main() {
         // `--start` во время остановки serve отклоняется (SERVER_STOPPING):
         // сервер отмечает остановку в базе, и отметка действует, пока он
         // держит живую роль controller (`DevContour.pause`).
+        // Короткая причина — только у паузы ведущего (`--pause --by host`),
+        // как `queue_set {"reason"}`.
+        const note = args.includes('--reason') ? (option('--reason', '') ?? '') : undefined;
+        if (note !== undefined && !(args.includes('--pause') && actorOf() === 'host'))
+          throw new Error(
+            '--reason записывает причину паузы ведущего агента: queue --pause --by host --reason …',
+          );
         if (!args.includes('--start') && !args.includes('--pause')) result = queueStopOf(h);
         else if (args.includes('--pause'))
           result = {
-            ...h.pause(true, 'operator', actorOf() === 'host' ? 'lead' : 'operator'),
+            ...h.pause(
+              true,
+              'operator',
+              actorOf() === 'host' ? 'lead' : 'operator',
+              note === undefined ? undefined : leadReason(h, note),
+            ),
             ...queueStopOf(h),
           };
         else {
@@ -1553,11 +1591,21 @@ async function main() {
       } else if (operation === 'edit-task') {
         const task = store.read().tasks.find((t) => t.id === option('--task', ''));
         if (!task) throw new Error('Задача не найдена');
-        result = h.editTask(
-          task.id,
-          await readAgentJson(resolve(option('--file', 'task.json'))),
-          specDigest(task),
-        );
+        const file = await readAgentJson(resolve(option('--file', 'task.json')));
+        try {
+          // Обязательные поля, которых нет в файле, — из текущей задачи (F65).
+          result = h.editTask(task.id, DevContour.keptTaskFields(task, file), specDigest(task));
+        } catch (error) {
+          if (!(error instanceof z.ZodError)) throw error;
+          throw new Error(
+            'Файл задачи не прошёл проверку: ' +
+              error.issues
+                .slice(0, 10)
+                .map((i) => `${i.path.join('.') || 'файл'}: ${issueRu(i)}`)
+                .join('; ') +
+              (error.issues.length > 10 ? `; и ещё ${error.issues.length - 10}` : ''),
+          );
+        }
       } else if (operation === 'correct') {
         const roots = option('--roots', '').split(',').filter(Boolean);
         if (!roots.length || !args.includes('--reason'))

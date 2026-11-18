@@ -499,6 +499,24 @@ test('Пауза ведущего через queue_set: карточка выд�
     const lead = byKey((await service.active()).items, 'queue')!;
     assert.equal(lead.title, 'Выдача задач остановлена ведущим агентом');
     assert.match(lead.reason, /Выдача остановлена ведущим агентом \(queue_set\)/);
+    // Свою паузу снимает сам ведущий (F64): карточка его, а не оператора, и
+    // без кнопки запуска очереди оператором.
+    assert.equal(lead.actor, 'lead');
+    assert.ok(!lead.actions.some((a) => a.id === 'resume'), JSON.stringify(lead.actions));
+    // Причина паузы ведущего видна в карточке.
+    f.h.pause(false);
+    f.h.pause(true, 'operator', 'lead', 'Жду ответа владельца по схеме платежей');
+    const why = byKey((await service.active()).items, 'queue')!;
+    assert.match(why.reason, /Жду ответа владельца по схеме платежей/);
+    // В режиме оператора ведущий паузу не снимает: карточка оператора с его
+    // запуском очереди, иначе паузу ведущего не снял бы никто.
+    f.h.config.approvalMode = 'operator';
+    const manual = byKey((await service.active()).items, 'queue')!;
+    assert.equal(manual.actor, 'operator');
+    assert.ok(
+      manual.actions.some((a) => a.id === 'resume'),
+      JSON.stringify(manual.actions),
+    );
   } finally {
     f.cleanup();
   }

@@ -44,11 +44,13 @@ import { repositories } from '../core/repositories.ts';
 import {
   heldBaseOf,
   leadLiftsPause,
+  leadPauseNote,
   pausedByLead,
   shutdownInterrupted,
   staleBaseStop,
 } from '../core/work-status.ts';
 import { executionOf, toDomain } from '../harness/execution.ts';
+import { ContractChanges } from '../runner/contract-change.ts';
 import { resolveIdPrefix } from '../core/id-prefix.ts';
 import type { DevContourExecutionStore } from '../harness/store.ts';
 
@@ -550,6 +552,127 @@ export function withStaleBaseStop(
   };
 }
 
+/** Команда harness, которой пакет называет снятие паузы выдачи. */
+const HARNESS_RESUME = 'harness resume';
+
+/** Команда ведущего, снимающая паузу выдачи (режим агента). */
+const LEAD_RESUME = 'queue_set {"paused": false} (devcontour queue --start --by host)';
+
+/**
+ * Чем в DevContour снимается пауза, которую пакет harness называет командой
+ * `harness resume`, — короткая фраза на месте команды. Удержанный перенос
+ * базы подтверждает оператор; в режиме оператора очередь запускает человек;
+ * паузу ведущего и паузу отказа runtime — команда ведущего; паузу человека —
+ * решение пользователя; прочие (остановка, начальная) — задание доски или
+ * команда ведущего.
+ */
+export function resumePhrase(
+  pause: {
+    lead: boolean;
+    held: boolean;
+    reason?: string;
+    approvalMode?: 'agent' | 'operator';
+  },
+  locale: HintLocale = 'en',
+) {
+  const ru = locale === 'ru';
+  if (pause.held)
+    return ru
+      ? 'подтверждение переноса базы оператором («Подтвердить и запустить» во «Внимании» панели)'
+      : "the operator's confirmation of the base move («Подтвердить и запустить» in the panel's attention center)";
+  if ((pause.approvalMode ?? 'agent') === 'operator')
+    // operator-only: в режиме оператора очередь запускает человек.
+    return ru
+      ? 'запуск очереди оператором (devcontour queue --start)'
+      : "the operator's queue start (devcontour queue --start)";
+  if (pause.lead || pause.reason === 'runtime') return LEAD_RESUME;
+  if (pause.reason === 'operator')
+    return ru
+      ? 'решение пользователя («Запустить очередь» в панели)'
+      : "the user's decision («Запустить очередь» in the panel)";
+  return ru
+    ? `задание доски (workflow_start) или ${LEAD_RESUME}`
+    : `the board job (workflow_start) or ${LEAD_RESUME}`;
+}
+
+/**
+ * Пауза выдачи в пакете harness. Движок называет снятие любой паузы
+ * командой harness (`harness resume`), которой в DevContour нет: в текстах
+ * пакета (очередь, остановка выдачи, `next` пакета и поручений) заменяется
+ * только эта команда — фразой `resumePhrase`; остальной текст движка
+ * (причина, класс отказа) остаётся. Паузу ведущего агента (`queue_set`) без
+ * удержанного переноса базы снимает сам ведущий, а движок называет любую
+ * паузу `operator` паузой человека (`actor: user`): эти записи называют
+ * ведущего (`actor: lead`) и его причину (`queue_set {"reason"}`, в конце —
+ * её режет предел строки, а не команду); `next.command` не называется.
+ * Пауза человека остаётся за пользователем, `next.command` — как прежде
+ * (`commands` пакета поясняет его). Текст — под маской и в пределе строки
+ * пакета.
+ */
+export function withQueuePauseText(
+  pack: HandoffPack,
+  phrase: string | undefined,
+  lead: { note?: string } | undefined,
+  redact: (text: string) => string = (text) => text,
+): HandoffPack {
+  if (!phrase) return pack;
+  const clip = (text: string) => {
+    const chars = [...redact(text)];
+    return chars.length > PACK_TEXT_CHARS
+      ? chars.slice(0, PACK_TEXT_CHARS - 1).join('') + '…'
+      : chars.join('');
+  };
+  const replace = (t: string) => t.split(HARNESS_RESUME).join(phrase);
+  const harness = (t: string | undefined) => !!t && t.includes(HARNESS_RESUME);
+  const own = (t: string | undefined) =>
+    clip(
+      (t ? replace(t) : `Продолжение — ${phrase}.`) +
+        ' Паузу поставил ведущий агент (queue_set)' +
+        (lead?.note ? `: ${lead.note}` : '.'),
+    );
+  const resumes = (x: { actor?: string | null; action?: string }) =>
+    x.actor === 'user' && x.action === 'resume-queue';
+  const toLead = <T extends { actor?: string | null; command?: unknown }>(
+    x: T,
+    field: 'detail' | 'message',
+  ): T => {
+    const out = {
+      ...x,
+      actor: 'lead',
+      [field]: own((x as Record<string, unknown>)[field] as string | undefined),
+    } as T;
+    delete out.command;
+    return out;
+  };
+  const queue =
+    lead && resumes(pack.queue)
+      ? toLead({ ...pack.queue }, 'detail')
+      : harness(pack.queue.detail)
+        ? { ...pack.queue, detail: clip(replace(pack.queue.detail!)) }
+        : pack.queue;
+  const stops = pack.stops.map((x) =>
+    lead && x.queue && resumes(x)
+      ? toLead(x, 'message')
+      : harness(x.message)
+        ? { ...x, message: clip(replace(x.message)) }
+        : x,
+  );
+  const works = pack.works.map((w) =>
+    lead && resumes(w.next)
+      ? { ...w, next: toLead(w.next, 'detail') }
+      : harness(w.next.detail)
+        ? { ...w, next: { ...w.next, detail: clip(replace(w.next.detail!)) } }
+        : w,
+  );
+  const next =
+    lead && resumes(pack.next)
+      ? toLead(pack.next, 'detail')
+      : harness(pack.next.detail)
+        ? { ...pack.next, detail: clip(replace(pack.next.detail!)) }
+        : pack.next;
+  return { ...pack, queue, stops, works, next };
+}
+
 /** Наследуемое значение короче — обычное слово или число, а не учётные данные. */
 const MIN_INHERITED = 8;
 
@@ -607,6 +730,8 @@ export interface HostContext {
   /** Задания досок (вид графа) в порядке `harnessOf`. */
   jobs: HarnessJob[];
   live: (job: HarnessJob) => boolean;
+  /** Устаревшие задания досок без задания по текущему входу (`LeadWorkflow.invalidated`). */
+  invalidated: () => ReturnType<LeadWorkflow['invalidated']>;
   current: (job: HarnessJob) => boolean;
   /** Причина, по которой вход доски не построить, или `undefined`. */
   inputError: (boardId: string) => string | undefined;
@@ -626,7 +751,19 @@ export function hostContext(
 ): HostContext {
   const reconfigure = { reconfigureApplies: harness.engine.reconfigureApplies(view) };
   let built: HandoffPack | undefined;
+  let invalidated: ReturnType<LeadWorkflow['invalidated']> | undefined;
   return {
+    invalidated: () =>
+      (invalidated ??=
+        h.config.approvalMode === 'operator'
+          ? []
+          : new LeadWorkflow(h)
+              .invalidated(undefined, state, (boardId, since) => !!reboundOf(h, boardId, since))
+              // Пакет одной доски называет только её перезапуск.
+              .filter((j) => {
+                const graph = (built ??= pack()).graphId;
+                return graph === undefined || j.boardId === graph;
+              })),
     h,
     get pack() {
       return (built ??= pack());
@@ -703,6 +840,27 @@ export function boardStep(boardId: string, ctx: HostContext): HandoffHostNext | 
 function closedBoard(state: State, boardId: string) {
   const tasks = boardTasks(state, boardId)?.tasks;
   return !!tasks?.length && tasks.every((t) => t.status === 'cancelled');
+}
+
+/**
+ * Завершённая операция изменения контракта, перепривязавшая задачи доски
+ * после старта её задания (`since`): последняя такая, если есть.
+ */
+function reboundBy(ctx: HostContext, boardId: string, since: string) {
+  return reboundOf(ctx.h, boardId, since);
+}
+/** Последняя завершённая перепривязка задач доски после `since` (id операции). */
+function reboundOf(h: DevContour, boardId: string, since: string) {
+  return new ContractChanges(h, '')
+    .list()
+    .filter(
+      (op) =>
+        op.status === 'completed' &&
+        op.boards.includes(boardId) &&
+        !!op.finishedAt &&
+        op.finishedAt >= since,
+    )
+    .sort((a, b) => (a.finishedAt! < b.finishedAt! ? 1 : -1))[0]?.id;
 }
 
 function boardDraft(boardId: string, ctx: HostContext): HostNextDraft | undefined {
@@ -830,6 +988,34 @@ function boardDraft(boardId: string, ctx: HostContext): HostNextDraft | undefine
   const plan = planStep(boardId, ctx);
   if (plan) return plan;
   const running = ctx.pack.active.some((a) => ctx.view.work(a.workId)?.graphId === boardId);
+  // Задание, которое вход доски сделал устаревшим (перепривязка контракта,
+  // политика, постановка): шаг — его перезапуск с причиной (F66).
+  const restart = ctx.invalidated().find((j) => j.boardId === boardId);
+  if (restart) {
+    const job = jobs.find((j) => j.key === restart.key) ?? jobs[0];
+    const operation = reboundBy(ctx, boardId, restart.startedAt);
+    const others = ctx
+      .invalidated()
+      .filter((j) => j.boardId !== boardId)
+      .map((j) => j.boardId);
+    return {
+      action: 'workflow_start',
+      boardId,
+      job: jobRef(job),
+      code: 'board-restart',
+      params: {
+        running,
+        authorRuntime: restart.authorRuntime,
+        // Своя пауза ведущего поставлена до нового задания: цикл его стадии
+        // задач её снимет (`operatorDecided`) — ведущий решает, зная это.
+        ...(pausedByLead(state)
+          ? { leadPause: leadPauseNote(state) ? { reason: leadPauseNote(state)! } : {} }
+          : {}),
+        ...(operation ? { operation } : {}),
+        ...(others.length ? { others } : {}),
+      },
+    };
+  }
   const previous = jobs.find((j) => j.status !== 'completed');
   return {
     action: 'workflow_start',
@@ -1285,7 +1471,7 @@ function hostStep(ctx: HostContext): HandoffHostNext | undefined {
     // Ожидание задания, цикл которого лишь ждёт задач, спрятало бы решение
     // пакета за «сервер продолжит»: вместо него — решение о плане доски,
     // если план не согласован, иначе шага нет и стоит шаг пакета.
-    return own
+    const chosen = own
       .map((id) => {
         const step = boardStep(id, ctx);
         if (step?.action === 'wait' && !acts(step.loop)) return planStep(id, ctx);
@@ -1294,13 +1480,32 @@ function hostStep(ctx: HostContext): HandoffHostNext | undefined {
       .filter((x): x is HandoffHostNext => !!x)
       .filter((x) => x.action !== 'workflow_start' && x.action !== 'queue_set')
       .sort((a, b) => rank(a) - rank(b))[0];
+    // Решение о плане — о будущем объёме; задание другой доски, которое
+    // устарело после перепривязки, стоит уже сейчас: сначала его перезапуск
+    // (F66). Перезапуск — шаг той доски, а не выдуманный шаг очереди.
+    if (chosen?.decision === 'plan' || (!chosen && pack.next.action === 'review-plan')) {
+      const restart = ctx
+        .invalidated()
+        .filter((j) => !own.includes(j.boardId))
+        .map((j) => boardStep(j.boardId, ctx))
+        .find((x) => x?.code === 'board-restart');
+      if (restart) return restart;
+    }
+    return chosen;
   }
-  const boards =
-    next && state.boards.some((b) => b.id === next)
-      ? [next]
-      : [...new Set(pack.works.map((w) => w.graphId))].filter((id) =>
-          state.boards.some((b) => b.id === id),
-        );
+  // Доски, чьи задания устарели (перепривязка контракта и т. п.), — среди
+  // кандидатов всегда: их перезапуск идёт раньше решения о плане другой
+  // доски, на которую указывает пакет (F66).
+  const boards = [
+    ...new Set([
+      ...(next && state.boards.some((b) => b.id === next)
+        ? [next]
+        : [...new Set(pack.works.map((w) => w.graphId))].filter((id) =>
+            state.boards.some((b) => b.id === id),
+          )),
+      ...ctx.invalidated().map((j) => j.boardId),
+    ]),
+  ];
   const steps = boards
     .map((id) => boardStep(id, ctx))
     .filter((x): x is HandoffHostNext => !!x)
@@ -1344,6 +1549,12 @@ function hostStep(ctx: HostContext): HandoffHostNext | undefined {
         params: { reason: stale },
       });
     }
+    // Устаревшее задание доски (перепривязка контракта и т. п.) — шаг
+    // ведущего уже сейчас, а ожидание задания другой доски, которое снимет
+    // паузу, его бы спрятало (F66). Паузу человека новое задание без его
+    // решения не обходит: её шаг — прежний.
+    const restart = steps.find((x) => x.code === 'board-restart');
+    if (restart && !(state.pauseReason === 'operator' && !pausedByLead(state))) return restart;
     // Пауза выдачи общая: её снимает любое действующее задание, чей цикл
     // снимет её — сразу или после такта, который сначала чинит задачу.
     for (const job of live)
@@ -1366,7 +1577,12 @@ function hostStep(ctx: HostContext): HandoffHostNext | undefined {
         action: 'queue_set',
         ...(first ? { boardId: first.id, job: jobRef(first), loop: ahead!.outlook } : {}),
         code: 'pause-operator',
-        params: leadLiftsPause(state) ? { by: 'lead' } : {},
+        params: leadLiftsPause(state)
+          ? {
+              by: 'lead',
+              ...(leadPauseNote(state) ? { reason: leadPauseNote(state)! } : {}),
+            }
+          : {},
       });
     }
   }
@@ -1446,22 +1662,56 @@ export function devcontourHandoffWithin(
       // Остановка очереди пакета без предела: пакет в пределе её возвращает,
       // если предел её отбросил (`withHeldBaseStop`).
       const full: { queueStop?: HandoffPack['stops'][number] } = {};
-      const stale = staleBaseStop(state, h.store.latestEvents(['scheduler.error'], 50));
-      const packOf = (options: Parameters<typeof handoffPack>[1]) =>
-        withStaleBaseStop(
-          withHeldBaseStop(
-            withoutShutdownFailures(
-              withoutIdleControllerStop(handoffPack(packSource, options)),
-              scopedRuns(state, options?.graphId),
+      const errors = h.store.latestEvents(['scheduler.error'], 50);
+      const stale = staleBaseStop(state, errors);
+      // Чем снимается пауза того же снимка: им пакет называет паузу вместо
+      // команды harness (`withQueuePauseText`).
+      const leadPause =
+        pausedByLead(state) && !heldBaseOf(state)
+          ? { ...(leadPauseNote(state) ? { note: leadPauseNote(state) } : {}) }
+          : undefined;
+      const phrase = state.paused
+        ? resumePhrase(
+            {
+              lead: !!leadPause,
+              held: !!heldBaseOf(state),
+              reason: state.pauseReason ?? (state.pausedAt ? 'runtime' : undefined),
+              approvalMode: h.config.approvalMode,
+            },
+            hintLocaleOf(h.config),
+          )
+        : undefined;
+      // На сколько байт тексты DevContour (`with…`) удлинили пакет последней
+      // сборки: предел пакета harness меряет пакет до них, поэтому начальный
+      // предел подбора вычитает и этот прирост. Это приближение (прирост
+      // полного пакета, а урезанный пакет удлиняется не больше): оно лишь
+      // задаёт стартовую точку, а предел ответа гарантирует цикл подбора
+      // ниже, который меряет готовый ответ.
+      let growth = 0;
+      const packOf = (options: Parameters<typeof handoffPack>[1]) => {
+        const raw = handoffPack(packSource, options);
+        const out = withQueuePauseText(
+          withStaleBaseStop(
+            withHeldBaseStop(
+              withoutShutdownFailures(
+                withoutIdleControllerStop(raw),
+                scopedRuns(state, options?.graphId),
+              ),
+              state,
+              options?.redact,
+              full.queueStop,
             ),
-            state,
+            stale,
             options?.redact,
-            full.queueStop,
+            h.config.approvalMode ?? 'agent',
           ),
-          stale,
+          phrase,
+          leadPause,
           options?.redact,
-          h.config.approvalMode ?? 'agent',
         );
+        growth = out === raw ? 0 : Math.max(0, bytes(out) - bytes(raw));
+        return out;
+      };
       // Короткая форма из журнала и панели (`B-xxxxxxxx`) — однозначный
       // префикс полного id; неоднозначный называет кандидатов.
       const boardId =
@@ -1564,7 +1814,7 @@ export function devcontourHandoffWithin(
           maxBytes,
           measure: limit.format === 'md' ? 'markdown' : 'json',
         });
-      let maxBytes = clamp(limit.bytes - (size(pack) - own));
+      let maxBytes = clamp(limit.bytes - (size(pack) - own) - growth);
       let best: { pack: HandoffPack; size: number } | undefined;
       let last = pack;
       /** Наименьший предел пакета, ответ которого превысил предел ответа. */

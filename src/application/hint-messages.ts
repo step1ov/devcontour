@@ -72,10 +72,25 @@ export interface HintParamMap {
   'job-idle': None;
   /** Действующего задания нет; `running` — идёт попытка без задания. */
   'board-start': { running: boolean };
+  /**
+   * Задание доски начато по прежнему входу и не продолжится (F66): вход
+   * сменился после его старта — `operation` — завершённая операция
+   * изменения контракта, чья перепривязка задач его сменила; `others` —
+   * другие доски с таким же заданием.
+   */
+  'board-restart': {
+    running: boolean;
+    /** Рантайм автора прежнего задания — тот же, что в `boardJobs.next` операции. */
+    authorRuntime: string;
+    /** Действует своя пауза ведущего (с его причиной): цикл нового задания её снимет. */
+    leadPause?: { reason?: string };
+    operation?: string;
+    others?: string[];
+  };
   /** Пауза выдачи, её снимет действующее задание; `pause` — причина паузы. */
   'pause-lift': { pause: string; stage: number };
   /** Пауза человека (`by: lead` — её поставил ведущий через queue_set), её не снимает ни одно задание. */
-  'pause-operator': { by?: 'lead' };
+  'pause-operator': { by?: 'lead'; reason?: string };
   /**
    * Перенос базы удержан до подтверждения человека (`base.check.held`):
    * `paths` — чувствительные пути (`компонент:путь`), которые цикл задания
@@ -225,7 +240,7 @@ function loopEn(o: LoopOutlook) {
 const STOP_REMEDY_EN =
   'Diagnose it; fix or retry the task by hand (MCP task_retry, or devcontour retry --task ID --by host [--reset --reason TEXT]; a property episode — recovery_decide) or ask the user. Retrying the job (workflow_retry) before that fails again.';
 const EDIT_EN =
-  'devcontour edit-task --task ID --file FILE --workspace …; fields absent from the file are kept, except repositoryId, scope, dependsOn and contracts, which fall back to their defaults: copy them from the current task';
+  'devcontour edit-task --task ID --file FILE --workspace …; fields absent from the file keep their current values, including repositoryId, scope, dependsOn and contracts; clear a field only with an explicit value (for example "dependsOn": [])';
 const SERVER_EN =
   'The running DevContour server continues it; if the server is stopped, start it (devcontour start --workspace …).';
 
@@ -332,11 +347,18 @@ const en: Catalog = {
     (p.running
       ? ' An attempt is running: the server finishes it without a job; the board can also be continued by hand (MCP task_retry or devcontour retry --by host, accept; docs/cli.md).'
       : ''),
+  'board-restart': (p, s) =>
+    `The lead workflow job of board ${s.boardId!}${s.job ? ` (${s.job.status}, key ${s.job.key})` : ''} was started on an earlier input: ${p.operation ? `contract-change ${p.operation} rebound its tasks` : 'its tasks, contracts or execution policy changed'} after it started, so it will not continue (it closes as stale). Start a new job: workflow_start {"kind": "board", "id": ${JSON.stringify(s.boardId!)}, "authorRuntime": ${JSON.stringify(p.authorRuntime)}} with the DevContour server running; the new job checks a moved base itself (base-check) and continues dispatch.` +
+    (p.leadPause
+      ? ` The loop of the new job lifts your own pause (queue_set${p.leadPause.reason ? `: ${p.leadPause.reason}` : ''}) at stage 1: restart once its reason is resolved, or keep the job unstarted until then.`
+      : '') +
+    (p.others?.length ? ` Restart the jobs of boards ${p.others.join(', ')} the same way.` : '') +
+    (p.running ? ' An attempt is running: the server finishes it without a job.' : ''),
   'pause-lift': (p, s) =>
     `Dispatch is paused (${p.pause}); the lead workflow job of board ${s.boardId!} lifts the pause at stage ${p.stage}${s.loop!.step === 'lift-pause' ? '' : ' after it ' + loopEn(s.loop!)}. ${SERVER_EN}`,
   'pause-operator': (p, s) =>
     (p.by === 'lead'
-      ? 'Dispatch is paused by the lead (queue_set) and no job loop lifts it: resume with queue_set {"paused": false} (devcontour queue --start --by host) once the reason for the pause is resolved.'
+      ? `Dispatch is paused by the lead (queue_set${p.reason ? `: ${p.reason}` : ''}) and no job loop lifts it: resume with queue_set {"paused": false} (devcontour queue --start --by host) once the reason for the pause is resolved.`
       : 'Dispatch is paused by the operator and no job loop lifts it: resume only on the user\'s decision with queue_set {"paused": false} (devcontour queue --start --by host).') +
     ' Over a base-check wait this lifts only the pause: the board workflow checks the base.' +
     (s.loop && s.boardId ? ` Meanwhile the job loop of board ${s.boardId} ${loopEn(s.loop)}.` : ''),
@@ -479,7 +501,7 @@ function loopRu(o: LoopOutlook) {
 const STOP_REMEDY_RU =
   'Разберите причину; исправьте или повторите задачу вручную (MCP task_retry или devcontour retry --task ID --by host [--reset --reason TEXT]; эпизод свойства — recovery_decide) либо спросите пользователя. Повтор задания (workflow_retry) до этого снова упадёт.';
 const EDIT_RU =
-  'devcontour edit-task --task ID --file FILE --workspace …; отсутствующие в файле поля сохраняются, кроме repositoryId, scope, dependsOn и contracts — они получают значения по умолчанию: перенесите их из текущей задачи';
+  'devcontour edit-task --task ID --file FILE --workspace …; отсутствующие в файле поля сохраняют текущие значения, в том числе repositoryId, scope, dependsOn и contracts; очищайте поле только явным значением (например, "dependsOn": [])';
 const SERVER_RU =
   'Его продолжает работающий сервер DevContour; если сервер остановлен, запустите его (devcontour start --workspace …).';
 
@@ -584,11 +606,18 @@ const ru: Catalog = {
     (p.running
       ? ' Идёт попытка: сервер завершит её и без задания; доску можно продолжить и вручную (MCP task_retry или devcontour retry --by host, accept; docs/cli.md).'
       : ''),
+  'board-restart': (p, s) =>
+    `Задание ведущего доски ${s.boardId!}${s.job ? ` (${s.job.status}, ключ ${s.job.key})` : ''} начато на прежнем входе: ${p.operation ? `операция contract-change ${p.operation} перепривязала его задачи` : 'после его старта изменились задачи, контракты или политика исполнения'}, поэтому оно не продолжится (закроется как stale). Начните новое задание: workflow_start {"kind": "board", "id": ${JSON.stringify(s.boardId!)}, "authorRuntime": ${JSON.stringify(p.authorRuntime)}} при работающем сервере DevContour; новое задание само проверит перенесённую базу (base-check) и продолжит выдачу.` +
+    (p.leadPause
+      ? ` Цикл нового задания на стадии 1 снимет вашу собственную паузу (queue_set${p.leadPause.reason ? `: ${p.leadPause.reason}` : ''}): перезапускайте, когда её причина устранена, иначе не начинайте задание до тех пор.`
+      : '') +
+    (p.others?.length ? ` Так же перезапустите задания досок ${p.others.join(', ')}.` : '') +
+    (p.running ? ' Идёт попытка: сервер завершит её и без задания.' : ''),
   'pause-lift': (p, s) =>
     `Выдача на паузе (${p.pause}); задание ведущего доски ${s.boardId!} снимет паузу на стадии ${p.stage}${s.loop!.step === 'lift-pause' ? '' : '; до этого цикл задания ' + loopRu(s.loop!)}. ${SERVER_RU}`,
   'pause-operator': (p, s) =>
     (p.by === 'lead'
-      ? 'Выдачу приостановил ведущий агент (queue_set), и ни один цикл задания её не снимет: возобновите queue_set {"paused": false} (devcontour queue --start --by host), когда причина паузы устранена.'
+      ? `Выдачу приостановил ведущий агент (queue_set${p.reason ? `: ${p.reason}` : ''}), и ни один цикл задания её не снимет: возобновите queue_set {"paused": false} (devcontour queue --start --by host), когда причина паузы устранена.`
       : 'Выдачу приостановил оператор, и ни один цикл задания её не снимет: возобновляйте только по решению пользователя — queue_set {"paused": false} (devcontour queue --start --by host).') +
     ' Над ожиданием проверки базы это снимает только паузу: базу проверит workflow доски.' +
     (s.loop && s.boardId ? ` Тем временем цикл задания доски ${s.boardId} ${loopRu(s.loop)}.` : ''),
