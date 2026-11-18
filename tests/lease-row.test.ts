@@ -548,3 +548,33 @@ test('F57: транзакция без записи документа не за
     store.close();
   }
 });
+
+test('F57: откат транзакции после чтения и записи документа не оставляет его в кэше', () => {
+  const dir = temp();
+  const store = new Store(join(dir, 'state.sqlite'));
+  try {
+    store.change('board.created', (s) => {
+      s.boards.push({ id: 'B-1', title: 'Доска', createdAt: new Date(0).toISOString() } as never);
+      return {};
+    });
+    store.view();
+    assert.throws(
+      () =>
+        store.atomic(() => {
+          store.change('board.renamed', (s) => {
+            s.boards[0].title = 'Откатится';
+            return {};
+          });
+          assert.equal(store.view().boards[0].title, 'Откатится');
+          store.saveLocal('workflow-jobs', undefined, 'job', { n: 1 });
+          throw new Error('rollback');
+        }),
+      /rollback/,
+    );
+    assert.equal(store.view().boards[0].title, 'Доска', 'после отката — документ до транзакции');
+    store.atomic(() => store.saveLocal('workflow-jobs', undefined, 'job', { n: 2 }));
+    assert.equal(store.view().boards[0].title, 'Доска');
+  } finally {
+    store.close();
+  }
+});
