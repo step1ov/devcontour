@@ -803,3 +803,52 @@ for (const reason of ['policy', 'context'] as const)
       await f.cleanup();
     }
   });
+
+test('F61b: idle passes with only consumed answers do not parse the stored requests; a new operator answer is resumed on the next tick', async () => {
+  const runtimes = controlled({ critical: true });
+  const f = await inputFixture(runtimes);
+  try {
+    const first = await question(f);
+    const lead = new LeadRunner(f.h, f.root, runtimes);
+    await tick(lead);
+    f.service.answerInTask(first.taskId, first.requestId, {
+      text: 'Keep JSON as now.',
+      optionId: 'json',
+      expectedVersion: first.version,
+    });
+    await tick(lead);
+    assert.equal(resumeRecord(f.h, first.requestId)?.phase, 'applied');
+
+    const { engine } = executionOf(f.h);
+    let reads = 0;
+    const inputRequests = engine.inputRequests.bind(engine);
+    engine.inputRequests = (...args) => {
+      reads++;
+      return inputRequests(...args);
+    };
+    try {
+      // Каждый такт — после записи данных: проход просматривает кандидатов
+      // заново, но без отвеченных запросов записи не разбирает.
+      for (let i = 0; i < 5; i++) {
+        f.store.atomic(() => f.store.saveLocal('fixture-probe', undefined, 'k', i));
+        lead.resumer.tick();
+      }
+      assert.equal(reads, 0, 'просмотр без отвеченных запросов не разбирает записи');
+
+      const second = await question(f);
+      f.service.answerInTask(second.taskId, second.requestId, {
+        text: 'Keep JSON as now.',
+        optionId: 'json',
+        expectedVersion: second.version,
+      });
+      lead.resumer.tick();
+      assert.ok(reads > 0, 'отвеченный запрос — полный просмотр');
+      await lead.resumer.settled();
+      assert.equal(resumeRecord(f.h, second.requestId)?.phase, 'applied', 'проход начат сразу');
+    } finally {
+      engine.inputRequests = inputRequests;
+    }
+  } finally {
+    await f.cleanup();
+  }
+});

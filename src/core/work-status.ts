@@ -54,6 +54,14 @@ export function queueStopReason(
  */
 export type QueueStopReason = NonNullable<DevContourState['pauseReason']> | 'not-started';
 
+/**
+ * Попытка, прерванная штатной остановкой controller: хранится как `failed`
+ * с классом `environment`, но не засчитана, и задача вернулась в очередь.
+ * Где её видят человек и ведущий, она — «прервана», а не провал.
+ */
+export const shutdownInterrupted = (run: Pick<Run, 'status' | 'interrupted'>) =>
+  run.status === 'failed' && run.interrupted === 'shutdown';
+
 /** Действующую паузу `operator` поставил ведущий агент (`queue_set`), а не человек. */
 export const pausedByLead = (
   state: Pick<DevContourState, 'paused' | 'pauseReason' | 'pausedAt' | 'pauseActor'>,
