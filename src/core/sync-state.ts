@@ -923,6 +923,17 @@ export function stateFromRecords(
     });
   const visible = new Set(s.boards.flatMap((b) => b.revisions.flatMap((r) => r.taskIds)));
   if (s.tasks.some((t) => !visible.has(t.id))) throw new Error('Задача без доски');
+  // Задача — на одной доске. Перенос черновика (`moveTask`) меняет состав
+  // двух ревизий; два клона, перенёсшие одну задачу на разные доски,
+  // объединились бы в задачу на двух досках — это конфликт, а не слияние.
+  const boardOf = new Map<string, string>();
+  for (const b of s.boards)
+    for (const id of b.revisions.flatMap((r) => r.taskIds)) {
+      const other = boardOf.get(id);
+      if (other && other !== b.id)
+        throw new Error(`Задача ${id} на двух досках: ${other} и ${b.id}`);
+      boardOf.set(id, b.id);
+    }
   // Задачи принятой ревизии неизменяемы (D11) и после слияния истории: clone,
   // ещё не знавший о приёмке, мог законно вернуть отменённую задачу в работу.
   // Локальный запрет такое объединение не видит, а возрождённая задача потом

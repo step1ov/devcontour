@@ -645,7 +645,7 @@ export class AgentService {
       case 'plan_review': {
         const v = agentInputs.plan_review.parse(input);
         return bounded(
-          (await reviewPlan(
+          await reviewPlan(
             this.h,
             this.root,
             v.boardId,
@@ -653,7 +653,7 @@ export class AgentService {
             this.options.runtimes ?? adapters,
             undefined,
             v.tasks,
-          )) as Record<string, unknown>,
+          ),
         );
       }
       case 'task_scenario_proof':

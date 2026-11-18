@@ -1573,15 +1573,19 @@ async function main() {
           throw new Error('Укажите --reason: почему задача больше не нужна');
         // Отмена выданной задачи по D46 навсегда останавливает задание её
         // доски (F75): ведущий подтверждает это явно, ответ называет пути.
-        const impact = cancelImpact(h, option('--task', ''), actorOf());
-        if (impact?.jobs.length && actorOf() === 'host' && !args.includes('--stop-job'))
-          throw new Error(
-            `${impact.warning} Повторите с --stop-job, если задание доски нужно остановить`,
-          );
-        result = {
-          ...h.cancel(option('--task', ''), option('--reason', ''), actorOf()),
-          ...(impact ? { jobStop: impact } : {}),
-        };
+        // Оценка и отмена — одна транзакция: выдача задачи между ними не
+        // обходит подтверждение.
+        result = h.store.atomic(() => {
+          const impact = cancelImpact(h, option('--task', ''), actorOf());
+          if (impact?.jobs.length && actorOf() === 'host' && !args.includes('--stop-job'))
+            throw new Error(
+              `${impact.warning} Повторите с --stop-job, если задание доски нужно остановить`,
+            );
+          return {
+            ...h.cancel(option('--task', ''), option('--reason', ''), actorOf()),
+            ...(impact ? { jobStop: impact } : {}),
+          };
+        });
       } else if (operation === 'move-task') {
         if (!args.includes('--reason') || !option('--reason', '').trim())
           throw new Error('Укажите --reason: почему задача переходит на другую доску');

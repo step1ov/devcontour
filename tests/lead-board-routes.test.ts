@@ -14,6 +14,7 @@ import { Store } from '../src/core/store.ts';
 import { DomainError } from '../src/core/model.ts';
 import { LeadWorkflow, WAITING_BOARDS } from '../src/core/lead-workflow.ts';
 import { Workspace } from '../src/core/workspace.ts';
+import { recordsFromState, stateFromRecords } from '../src/core/sync-state.ts';
 import { LeadRunner } from '../src/runner/lead-workflow.ts';
 import { cancelImpact } from '../src/runner/lead-outlook.ts';
 import { AgentService } from '../src/application/agent.ts';
@@ -349,10 +350,7 @@ test('F75: отмена выданной задачи называет оста�
       input: { boardId: b.id, task: input('Replacement') },
     }) as { taskId: string; jobStop?: { taskId: string; warning: string } };
     assert.equal(created.jobStop?.taskId, bad.id);
-    assert.match(
-      created.jobStop!.warning,
-      /любое задание ведущего этой ревизии остановится на ней/,
-    );
+    assert.match(created.jobStop.warning, /любое задание ведущего этой ревизии остановится на ней/);
     // host.next по черновику называет остановку и новую доску.
     let next = devcontourHandoff(f.h, { boardId: b.id }).host.next;
     assert.equal(next?.code, 'plan-unapproved', JSON.stringify(next));
@@ -417,6 +415,16 @@ test('F75: CLI cancel --by host выданной задачи с живым за
     assert.notEqual(refused.code, 0);
     assert.match(refused.stderr, /D46/);
     assert.match(refused.stderr, /--stop-job/);
+    // Отказ ничего не изменил: задача по-прежнему упавшая, не отменённая.
+    const read = () => {
+      const store = new Store(join(data, 'state.sqlite'));
+      try {
+        return store.read().tasks.find((t) => t.id === taskId)!;
+      } finally {
+        store.close();
+      }
+    };
+    assert.equal(read().status, 'failed');
     const done = await cli('--by', 'host', '--stop-job');
     assert.equal(done.code, 0, done.stderr);
     const out = JSON.parse(done.stdout) as {
@@ -428,6 +436,10 @@ test('F75: CLI cancel --by host выданной задачи с живым за
       out.jobStop.jobs.map((j) => j.key),
       [key],
     );
+    // Отмена записана: статус и актёр в базе.
+    const cancelled = read();
+    assert.equal(cancelled.status, 'cancelled');
+    assert.equal(cancelled.cancelledBy, 'host');
   } finally {
     assert.ok(root.includes('dc-lead-routes-'));
     await rm(root, { recursive: true, force: true });
@@ -479,7 +491,7 @@ test('F78: задание ChangeSet на стадии 0 называет дос�
     assert.equal(await runner.execute(claimed, new AbortController().signal), true);
     flow.finish(claimed, true);
     const again = flow.claim(job.key)!;
-    await runner.execute(again, new AbortController().signal);
+    assert.equal(await runner.execute(again, new AbortController().signal), true);
     flow.finish(again, true);
     assert.deepEqual(
       flow
@@ -488,7 +500,6 @@ test('F78: задание ChangeSet на стадии 0 называет дос�
         .map((h) => h.event),
       [WAITING_BOARDS],
     );
-    await runner.stop();
     // session_handoff: живое задание ChangeSet с досками и их причинами.
     for (const value of [devcontourHandoff(f.h), devcontourHandoff(f.h, { boardId: idle.id })]) {
       const [entry] = value.host.changesets ?? [];
@@ -505,6 +516,133 @@ test('F78: задание ChangeSet на стадии 0 называет дос�
     f.h.addTask(outside.id, input('Outside task'));
     f.h.approve(outside.id);
     assert.equal(devcontourHandoff(f.h, { boardId: outside.id }).host.changesets, undefined);
+    // Упавшее задание доски: причина — ошибка, маска — до усечения.
+    const idleJob = flow.start({ kind: 'board', id: idle.id, authorRuntime: 'codex' });
+    const secret = 'SECRET-VALUE-0123456789';
+    flow.fail(flow.claim(idleJob.key, 'main')!, 'x'.repeat(290) + secret);
+    const masked = flow.boardsWaitingOf(job, f.store.read(), (t) => t.replaceAll(secret, '***'));
+    const failedBoard = masked!.boards.find((x) => x.boardId === idle.id)!;
+    assert.equal(failedBoard.blocker.kind, 'job-failed');
+    const error = (failedBoard.blocker as { error?: string }).error ?? '';
+    assert.ok(error.endsWith('***'), error.slice(-30));
+    assert.ok(!error.includes('SECRET'));
+    // Доски приняты — стадия 0 больше не ждёт.
+    for (const board of [open, idle]) {
+      for (const t of f.store.read().tasks.filter((x) =>
+        f.store
+          .read()
+          .boards.find((y) => y.id === board.id)!
+          .revisions.at(-1)!
+          .taskIds.includes(x.id),
+      ))
+        complete(f.h, t.id);
+      f.h.accept(board.id, 'b'.repeat(40));
+    }
+    assert.equal(flow.waitingOf(job), undefined);
+    const last = flow.claim(job.key)!;
+    assert.equal(await runner.execute(last, new AbortController().signal), false);
+    flow.finish(last, false);
+    assert.equal(devcontourHandoff(f.h).host.changesets, undefined);
+    await runner.stop();
+  } finally {
+    f.cleanup();
+  }
+});
+
+test('F75: стадия 0 не останавливается на невыданной задаче, отменённой ведущим; отмена выданной во время ревью плана не даёт утвердить', async () => {
+  const f = fixture();
+  try {
+    // Невыданная задача, снятая ведущим, — объём плана: ревью и утверждение идут.
+    const scope = f.h.createBoard('Scope cut', '', 'main');
+    f.h.addTask(scope.id, input('Kept draft'));
+    const dropped = f.h.addTask(scope.id, input('Dropped draft'));
+    f.h.cancel(dropped.id, 'Out of scope', 'host');
+    const flow = new LeadWorkflow(f.h);
+    const kept = flow.start({ kind: 'board', id: scope.id, authorRuntime: 'codex' });
+    const runner = new LeadRunner(f.h, f.root);
+    const first = flow.claim(kept.key, 'main')!;
+    await runner.execute(first, new AbortController().signal);
+    flow.finish(first, false);
+    assert.equal(
+      f.store.read().tasks.find((t) => t.title === 'Kept draft')!.status,
+      'ready',
+      'стадия 0 утвердила план',
+    );
+    await runner.stop();
+  } finally {
+    f.cleanup();
+  }
+  const g = fixture();
+  try {
+    g.h.config.mode = 'local';
+    const b = g.h.createBoard('Race', '', 'main');
+    const issued = g.h.addTask(b.id, input('Issued'));
+    g.h.approve(b.id);
+    g.h.pause(false);
+    const run = g.h.claim('writer')!;
+    g.h.fail(run.id, run.token, 'gate failed', false, 'gate');
+    const replacement = g.h.addTask(b.id, input('Replacement'));
+    const flow = new LeadWorkflow(g.h);
+    const job = flow.start({ kind: 'board', id: b.id, authorRuntime: 'codex' });
+    // Ревьюер одобряет, а пока он думает, ведущий отменяет выданную задачу.
+    const proposals: Record<string, unknown>[] = [];
+    const approve = reviewer(proposals);
+    const racing = {
+      codex: {
+        ...approve.codex,
+        async execute(r: AgentRequest) {
+          g.h.cancel(issued.id, 'Cancelled during plan review', 'host');
+          return approve.codex.execute(r);
+        },
+      },
+      claude: {
+        ...approve.claude,
+        async execute(r: AgentRequest) {
+          g.h.cancel(issued.id, 'Cancelled during plan review', 'host');
+          return approve.claude.execute(r);
+        },
+      },
+    };
+    const runner = new LeadRunner(g.h, g.root, racing);
+    const claimed = flow.claim(job.key, 'main')!;
+    await assert.rejects(
+      runner.execute(claimed, new AbortController().signal),
+      new RegExp(`^Error: ${issued.id}: `),
+    );
+    assert.equal(proposals.length, 1, 'ревью было');
+    assert.equal(
+      g.store.read().tasks.find((t) => t.id === replacement.id)!.status,
+      'draft',
+      'утверждение после отмены не записано',
+    );
+    await runner.stop();
+  } finally {
+    g.cleanup();
+  }
+});
+
+test('F73: Git sync не объединяет задачу на двух досках (два клона перенесли её по-разному)', () => {
+  const f = fixture();
+  try {
+    const a = f.h.createBoard('Board A', '', 'main');
+    const t = f.h.addTask(a.id, input('Movable'));
+    const b = f.h.createBoard('Board B', '', 'main');
+    const c = f.h.createBoard('Board C', '', 'main');
+    f.h.moveTask(t.id, b.id, 'Moved by the first clone');
+    const state = f.store.read();
+    // Перенос сам по себе состояние sync не ломает.
+    const clean = stateFromRecords(f.h, state, recordsFromState(f.h, state), new Map());
+    assert.deepEqual(clean.boards.find((x) => x.id === b.id)!.revisions.at(-1)!.taskIds, [t.id]);
+    // Объединение двух переносов: задача в B и в C.
+    const merged = structuredClone(state);
+    merged.boards
+      .find((x) => x.id === c.id)!
+      .revisions.at(-1)!
+      .taskIds.push(t.id);
+    assert.throws(
+      () => stateFromRecords(f.h, state, recordsFromState(f.h, merged), new Map()),
+      new RegExp(`Задача ${t.id} на двух досках`),
+    );
   } finally {
     f.cleanup();
   }

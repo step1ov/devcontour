@@ -222,5 +222,12 @@
 // input_answer, input_propose, input_apply, input_cancel и input_supersede
 // требует одно из полей expectedVersion или version (anyOf required);
 // прочие операции байтово прежние.
-export const CATALOG_DIGEST = '967572e4ddbb68d37a8d5795ac4c3e430bf30ad9cd90b02e119cdf6c14bfd9f1';
+// Намеренное изменение (F73, F75, F76, F78): новые пишущие операции
+// task_move (перенос невыданного черновика на другую доску той же задачей)
+// и plan_review (ревью плана с областью tasks, как CLI review-plan) после
+// task_edit; описание task_create называет jobStop, workflow_status —
+// ожидание boards задания ChangeSet на стадии 0, session_handoff —
+// plan_review, plan.misrouted, params.stopper и host.changesets; прочие
+// операции байтово прежние.
+export const CATALOG_DIGEST = 'f4a2df31852fd90f39ddf1dc04dec095755cd357bb3b1cf698f0b2f3eedb11dd';
 export const SNAPSHOT_VERSION = '0.4.0-alpha.7';

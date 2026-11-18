@@ -584,11 +584,20 @@ export class LeadRunner {
         // которых не доведёт (F75).
         const stop = stageZeroStop(this.h, s, job, tasks);
         if (stop) throw new Error(stop.reason);
+        // Та же проверка — в транзакции утверждения: отмена во время ревью
+        // (или чтения требований) не даёт утвердить план, который задание
+        // не доведёт.
+        const approvalGuard = () => {
+          guard();
+          const now = this.h.store.read();
+          const late = stageZeroStop(this.h, now, job, boardTasks(now, job.id)!.tasks);
+          if (late) throw new Error(late.reason);
+        };
         if (loopOutlook(this.h, s, job).step !== 'review-plan') return false;
         await assertTasksRequirements(this.h, tasks);
         if (this.h.config.mode === 'demo')
           this.h.store.atomic(() => {
-            guard();
+            approvalGuard();
             this.h.approve(b.id);
           });
         else {
@@ -604,7 +613,7 @@ export class LeadRunner {
             b.id,
             job.authorRuntime,
             this.runtimes,
-            guard,
+            approvalGuard,
             undefined,
             false,
             signal,

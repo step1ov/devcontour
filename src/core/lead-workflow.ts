@@ -302,7 +302,12 @@ export class LeadWorkflow {
    * отсутствие. Без этого задание стояло `queued`, стадия 0, история пуста,
    * и ведущий не отличал «ждёт досок» от «не берётся». Чтение, без записи.
    */
-  boardsWaitingOf(job: Pick<WorkflowJob, 'kind' | 'id' | 'stage'>, s = this.h.store.read()) {
+  boardsWaitingOf(
+    job: Pick<WorkflowJob, 'kind' | 'id' | 'stage'>,
+    s = this.h.store.read(),
+    /** Маска секретов: применяется к ошибке задания до усечения. */
+    redact: (text: string) => string = (text) => text,
+  ) {
     if (job.kind !== 'changeset' || job.stage !== 0) return undefined;
     const c = s.changeSets.find((x) => x.id === job.id);
     if (!c || c.acceptance) return undefined;
@@ -330,7 +335,10 @@ export class LeadWorkflow {
           ? { kind: 'input', requestIds: input.requestIds.slice(0, 5) }
           : { kind: 'job' }
         : last?.status === 'failed'
-          ? { kind: 'job-failed', ...(last.error ? { error: last.error.slice(0, 300) } : {}) }
+          ? {
+              kind: 'job-failed',
+              ...(last.error ? { error: [...redact(last.error)].slice(0, 300).join('') } : {}),
+            }
           : last
             ? { kind: 'job-ended' }
             : { kind: 'no-job' };

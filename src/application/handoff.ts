@@ -340,6 +340,7 @@ function changesetsOf(
   h: DevContour,
   state: State,
   boardId?: string,
+  redact?: (text: string) => string,
 ): DevContourHandoff['host']['changesets'] {
   const workflow = new LeadWorkflow(h);
   const found = workflow
@@ -351,7 +352,7 @@ function changesetsOf(
         state.changeSets.some((c) => c.id === j.id && c.boardIds.includes(boardId)),
     )
     .flatMap((j) => {
-      const waiting = workflow.boardsWaitingOf(j, state);
+      const waiting = workflow.boardsWaitingOf(j, state, redact);
       return waiting
         ? [
             {
@@ -1914,8 +1915,9 @@ export function devcontourHandoffWithin(
         }
       };
       const verifications = verificationsOf(h, state, boardId);
-      // Ошибка задания доски может нести значения секретов: под маской пакета.
-      const changesets = redactDeep(changesetsOf(h, state, boardId), options.redact);
+      // Ошибка задания доски может нести значения секретов: маска — до
+      // усечения текста (`boardsWaitingOf`), иначе усечённый секрет ей не узнать.
+      let changesets = changesetsOf(h, state, boardId, options.redact);
       const corrections = correctionsOfHandoff(h, state, boardId);
       const withDiscussion = (discussion: DevContourHandoff['host']['discussion']) => ({
         ...(next ? { next } : {}),
@@ -1991,6 +1993,25 @@ export function devcontourHandoffWithin(
         host = withDiscussion(
           budget > 0 && i < 3 ? discussionOf(budget) : { requests: [], omitted: true },
         );
+      }
+      // Последним уступает место ожидание ChangeSet: без текстов ошибок и id
+      // вопросов, только доски и вид причины (подробности — workflow_status).
+      if (
+        changesets &&
+        bytes(handoffResponse({ pack: fitted, host, locale }, limit.format)) > limit.bytes
+      ) {
+        changesets = changesets.map((c) => ({
+          ...c,
+          waiting: {
+            ...c.waiting,
+            boards: c.waiting.boards.map((b) => ({
+              boardId: b.boardId,
+              ...(b.job ? { job: b.job } : {}),
+              blocker: { kind: b.blocker.kind } as BoardBlocker,
+            })),
+          },
+        }));
+        host = { ...host, changesets };
       }
       return {
         value: { pack: fitted, host, locale },
