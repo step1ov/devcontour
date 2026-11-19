@@ -59,7 +59,7 @@ import {
 import { executionOf, toDomain } from '../harness/execution.ts';
 import {
   ContractChanges,
-  invalidates,
+  invalidatedBy,
   openCorrections,
   type CorrectionEffect,
 } from '../runner/contract-change.ts';
@@ -416,7 +416,6 @@ type ChangesetRestart = ReturnType<LeadWorkflow['invalidatedChangesets']>[number
 function changesetRestarts(h: DevContour, state: State): ChangesetRestart[] {
   if (h.config.approvalMode === 'operator') return [];
   const workflow = new LeadWorkflow(h);
-  const boardsOf = (id: string) => state.changeSets.find((c) => c.id === id)?.boardIds ?? [];
   const jobs = new Map(
     ownersOf(h.config)
       .flatMap((owner) => workflow.list(owner))
@@ -424,9 +423,12 @@ function changesetRestarts(h: DevContour, state: State): ChangesetRestart[] {
       .map((j) => [j.key, j]),
   );
   return workflow
-    .invalidatedChangesets(state, (id, _since, job) => !!reboundOf(h, boardsOf(id), job))
+    .invalidatedChangesets(
+      state,
+      (id, _since, job) => !!reboundOf(h, { kind: 'changeset', id }, job),
+    )
     .map((r) => {
-      const operation = reboundOf(h, boardsOf(r.changeSetId), r);
+      const operation = reboundOf(h, { kind: 'changeset', id: r.changeSetId }, r);
       const job = jobs.get(r.key);
       return {
         ...r,
@@ -905,7 +907,7 @@ export function hostContext(
               .invalidated(
                 undefined,
                 state,
-                (boardId, _since, job) => !!reboundOf(h, [boardId], job),
+                (boardId, _since, job) => !!reboundOf(h, { kind: 'board', id: boardId }, job),
               )
               // Пакет одной доски называет только её перезапуск.
               .filter((j) => {
@@ -1006,25 +1008,21 @@ function closedBoard(state: State, boardId: string) {
 
 /**
  * Завершённая операция изменения контракта, которая сделала задание доски
- * устаревшим (`invalidates`: перепривязка её задач или перенастройка
- * контекста после старта задания): последняя такая, если есть.
+ * устаревшим (`invalidatedBy`: её запись завершения, у прежней версии —
+ * перепривязка задач доски после старта задания): последняя такая, если есть.
  */
-function reboundBy(
-  ctx: HostContext,
-  boardId: string,
-  job: { startedAt: string; status: string; finishedAt?: string },
-) {
-  return reboundOf(ctx.h, [boardId], job);
+function reboundBy(ctx: HostContext, boardId: string, job: { key: string; startedAt: string }) {
+  return reboundOf(ctx.h, { kind: 'board', id: boardId }, job);
 }
-/** Последняя завершённая операция, сменившая вход задания досок `boardIds` (id операции). */
+/** Последняя завершённая операция, сделавшая задание устаревшим (id операции). */
 function reboundOf(
   h: DevContour,
-  boardIds: readonly string[],
-  job: { startedAt: string; status: string; finishedAt?: string },
+  subject: { kind: 'board' | 'changeset'; id: string },
+  job: { key: string; startedAt: string },
 ) {
   return new ContractChanges(h, '')
     .list()
-    .filter((op) => invalidates(op, boardIds, job))
+    .filter((op) => invalidatedBy(op, subject, job))
     .sort((a, b) => (a.finishedAt! < b.finishedAt! ? 1 : -1))[0]?.id;
 }
 
@@ -1635,7 +1633,9 @@ function changesetStep(ctx: HostContext): HandoffHostNext | undefined {
   );
   const first = restarts[0];
   if (!first) return undefined;
-  const others = restarts.slice(1).map((r) => r.changeSetId);
+  // Список других наборов ограничен: шаг не растёт с их числом.
+  const rest = restarts.slice(1).map((r) => r.changeSetId);
+  const others = rest.slice(0, HANDOFF_VERIFICATIONS);
   return withDetail(ctx.h, {
     action: 'workflow_start',
     job: {
@@ -1652,8 +1652,17 @@ function changesetStep(ctx: HostContext): HandoffHostNext | undefined {
       authorRuntime: first.authorRuntime,
       ...(first.operation ? { operation: first.operation } : {}),
       ...(others.length ? { others } : {}),
+      ...(rest.length > others.length ? { more: rest.length - others.length } : {}),
     },
   });
+}
+
+/** Перезапуск устаревшего задания доски в области пакета (`board-restart`). */
+function boardRestart(ctx: HostContext): HandoffHostNext | undefined {
+  return ctx
+    .invalidated()
+    .map((j) => boardStep(j.boardId, ctx))
+    .find((x) => x?.code === 'board-restart');
 }
 
 function hostStep(ctx: HostContext): HandoffHostNext | undefined {
@@ -1661,10 +1670,12 @@ function hostStep(ctx: HostContext): HandoffHostNext | undefined {
   // Открытых поручений нет, но доска ещё не принята: шаг — только
   // восстановление её упавшего задания (без него ведущий не узнал бы, что
   // приёмку держит упавшее задание).
+  // Перезапуск устаревших заданий досок, затем ChangeSet (F84): новое
+  // задание ChangeSet иначе ждало бы досок, чьи задания не продолжатся.
   if (!pack.summary.open)
     return h.config.approvalMode === 'operator'
       ? undefined
-      : (jobBlocker(ctx) ?? changesetStep(ctx));
+      : (jobBlocker(ctx) ?? boardRestart(ctx) ?? changesetStep(ctx));
   const input = inputNext(ctx);
   if (input) return input;
   if (h.config.approvalMode === 'operator')
@@ -1821,8 +1832,10 @@ function hostStep(ctx: HostContext): HandoffHostNext | undefined {
   }
   // Перезапуск устаревшего задания ChangeSet — после перезапуска задания
   // доски и раньше старта нового, ожидания и решения о плане (F84).
+  // Перезапуск задания любой доски из кандидатов идёт раньше (его ранг тот
+  // же, что у старта задания новой доски).
   const first = steps[0];
-  if (!first || rank(first) > 2 || (rank(first) === 2 && first.code !== 'board-restart'))
+  if ((!first || rank(first) >= 2) && !steps.some((x) => x.code === 'board-restart'))
     return changesetStep(ctx) ?? first;
   return first;
 }

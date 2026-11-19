@@ -102,6 +102,8 @@ export interface HintParamMap {
     authorRuntime: string;
     operation?: string;
     others?: string[];
+    /** Сколько ещё таких наборов сверх `others`. */
+    more?: number;
   };
   /** Пауза выдачи, её снимет действующее задание; `pause` — причина паузы. */
   'pause-lift': { pause: string; stage: number };
@@ -413,7 +415,7 @@ const en: Catalog = {
   'changeset-restart': (p, s) =>
     `The lead workflow job of ChangeSet ${p.changeSetId}${s.job ? ` (${s.job.status}, key ${s.job.key})` : ''} was started on an earlier input: ${p.operation ? `contract-change ${p.operation} rebound the tasks of its boards or repinned the context` : 'the tasks of its boards, their contracts or the execution policy changed'} after it started, so it will not continue (it closes as stale), and release acceptance has no job. Start a new job: workflow_start {"kind": "changeset", "id": ${JSON.stringify(p.changeSetId)}, "authorRuntime": ${JSON.stringify(p.authorRuntime)}} with the DevContour server running; it waits for its boards again (host.changesets) and runs the joint verification; it neither needs nor lifts a queue pause.` +
     (p.others?.length
-      ? ` Restart the jobs of ChangeSets ${p.others.join(', ')} the same way.`
+      ? ` Restart the jobs of ChangeSets ${p.others.join(', ')}${p.more ? ` and ${p.more} more (workflow_status)` : ''} the same way.`
       : ''),
   'pause-lift': (p, s) =>
     `Dispatch is paused (${p.pause}); the lead workflow job of board ${s.boardId!} lifts the pause at stage ${p.stage}${s.loop!.step === 'lift-pause' ? '' : ' after it ' + loopEn(s.loop!)}. ${SERVER_EN}`,
@@ -707,7 +709,9 @@ const ru: Catalog = {
     (p.running ? ' Идёт попытка: сервер завершит её и без задания.' : ''),
   'changeset-restart': (p, s) =>
     `Задание ведущего ChangeSet ${p.changeSetId}${s.job ? ` (${s.job.status}, ключ ${s.job.key})` : ''} начато на прежнем входе: ${p.operation ? `операция contract-change ${p.operation} перепривязала задачи его досок или перезакрепила контекст` : 'после его старта изменились задачи его досок, их контракты или политика исполнения'}, поэтому оно не продолжится (закроется как stale), и у приёмки релиза нет задания. Начните новое задание: workflow_start {"kind": "changeset", "id": ${JSON.stringify(p.changeSetId)}, "authorRuntime": ${JSON.stringify(p.authorRuntime)}} при работающем сервере DevContour; оно снова ждёт приёмки своих досок (host.changesets) и проводит совместную проверку; пауза очереди ему не мешает, и он её не снимает.` +
-    (p.others?.length ? ` Так же перезапустите задания ChangeSet ${p.others.join(', ')}.` : ''),
+    (p.others?.length
+      ? ` Так же перезапустите задания ChangeSet ${p.others.join(', ')}${p.more ? ` и ещё ${p.more} (workflow_status)` : ''}.`
+      : ''),
   'pause-lift': (p, s) =>
     `Выдача на паузе (${p.pause}); задание ведущего доски ${s.boardId!} снимет паузу на стадии ${p.stage}${s.loop!.step === 'lift-pause' ? '' : '; до этого цикл задания ' + loopRu(s.loop!)}. ${SERVER_RU}`,
   'pause-operator': (p, s) =>

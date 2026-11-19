@@ -271,6 +271,7 @@ const samples: { [C in HintCode]: (HintSubject & Extract<HintOf, { code: C }>)[]
         authorRuntime: 'codex',
         operation: 'CC-1',
         others: ['CHG-2'],
+        more: 3,
       },
       job: { ...job, status: 'stale' },
     },
@@ -661,7 +662,7 @@ test('Подсказки шага: новая конфигурация setup п�
  * Намеренное изменение (F84): новый код `changeset-restart` — перезапуск
  * устаревшего задания ChangeSet.
  */
-const ENGLISH_SAMPLES_SHA256 = '3d1bc5712275bebf96f85bac5ff52e4976ed87d868daa47abade457ef36681ba';
+const ENGLISH_SAMPLES_SHA256 = '1e696eaadf62ceb81cb520678bcada0098cd41c5c4239c5a19597ad9546084f3';
 
 test('Подсказки шага: английские тексты образцов закреплены', () => {
   assert.equal(

@@ -171,6 +171,24 @@ export type ContractChange = {
   leaseUntil?: number;
   startedAt: string;
   finishedAt?: string;
+  /**
+   * Задания ведущего с устаревшим входом к началу операции (ключи, F84):
+   * действующие по прежнему входу и уже закрытые `stale` последние задания.
+   * Их устаревание — не её, и `invalidated` их не записывает. Продолжение
+   * операции (`previous`) наследует список первой редакции.
+   */
+  staleBefore?: string[];
+  /**
+   * Задания ведущего, которые операция сделала устаревшими (F84),
+   * записанные в транзакции её завершения: задания досок и ChangeSet,
+   * начатые до её окончания, вход которых сменила её перепривязка или
+   * перенастройка. Вид результата и пакет относят к операции только их.
+   * Нет поля — операция прежней версии (правило F66 по `boards`).
+   */
+  invalidated?: {
+    boards: { boardId: string; key: string }[];
+    changesets: { changeSetId: string; key: string }[];
+  };
   error?: string;
   contractId?: string;
   held: string[];
@@ -303,21 +321,44 @@ export const openCorrections = (op: Pick<ContractChange, 'status' | 'correctionD
   op.status === 'completed' ? (op.correctionDetails ?? []).filter((c) => !c.closed) : [];
 
 /**
- * Задание ведущего (доски или набора с досками `boardIds`) устарело из-за
- * завершённой операции `op` (F84): оно начато до её окончания, и операция
- * сменила его вход — перепривязала задачи одной из этих досок или
- * перенастроила контекст (политика исполнения каждой доски и набора).
- * Закрытое `stale` задание относится к операции, только если закрыто не
- * раньше её начала.
+ * Кандидат в устаревшие задания операции `op` при её завершении (F84):
+ * задание начато до её окончания, его вход уже не текущий (это решает
+ * вызывающий), а операция сменила его вход — перепривязала задачи одной из
+ * досок `boardIds` или перенастроила контекст (политика исполнения каждой
+ * доски и набора). Устаревшее к её началу (`staleBefore`) — не её.
  */
 export function invalidates(
-  op: Pick<ContractChange, 'status' | 'startedAt' | 'finishedAt' | 'boards' | 'config'>,
+  op: Pick<
+    ContractChange,
+    'status' | 'startedAt' | 'finishedAt' | 'boards' | 'config' | 'staleBefore'
+  >,
   boardIds: readonly string[],
-  job: { startedAt: string; status: string; finishedAt?: string },
+  job: { key?: string; startedAt: string },
 ) {
   if (op.status !== 'completed' || !op.finishedAt || job.startedAt > op.finishedAt) return false;
-  if (job.status === 'stale' && job.finishedAt && job.finishedAt < op.startedAt) return false;
+  if (job.key && op.staleBefore?.includes(job.key)) return false;
   return !!op.config?.after || boardIds.some((b) => op.boards.includes(b));
+}
+
+/**
+ * Операция относит к себе задание (`key`) доски или набора: по записи
+ * завершения (`invalidated`), а операция прежней версии без записи — по
+ * прежнему правилу F66 (задание доски, перепривязанной операцией, начатое
+ * до её окончания); задание ChangeSet она не называет.
+ */
+export function invalidatedBy(
+  op: ContractChange,
+  subject: { kind: 'board' | 'changeset'; id: string },
+  job: { key: string; startedAt: string },
+) {
+  if (op.status !== 'completed' || !op.finishedAt) return false;
+  if (op.invalidated)
+    return subject.kind === 'board'
+      ? op.invalidated.boards.some((j) => j.key === job.key && j.boardId === subject.id)
+      : op.invalidated.changesets.some((j) => j.key === job.key && j.changeSetId === subject.id);
+  return (
+    subject.kind === 'board' && op.boards.includes(subject.id) && job.startedAt <= op.finishedAt
+  );
 }
 
 /** Предел подробности записи истории и текста ошибки операции. */
@@ -442,16 +483,61 @@ export class ContractChanges {
     // не предлагается.
     if ((this.h.config.approvalMode ?? 'agent') === 'operator') return undefined;
     if (op.status !== 'completed' || !op.finishedAt) return undefined;
-    if (!op.boards.length && !op.config?.after) return undefined;
+    if (op.invalidated && !op.invalidated.boards.length && !op.invalidated.changesets.length)
+      return undefined;
+    if (!op.invalidated && !op.boards.length) return undefined;
     const s = this.h.store.read();
     const lead = new LeadWorkflow(this.h);
+    // Только задания, которые операция записала (у прежней версии — по
+    // правилу F66), пока у доски или набора нет задания по текущему входу.
     const jobs = lead
+      .invalidated(undefined, s, (board, _since, job) =>
+        invalidatedBy(op, { kind: 'board', id: board }, job),
+      )
+      .filter((j) => invalidatedBy(op, { kind: 'board', id: j.boardId }, j));
+    const changesets = lead
+      .invalidatedChangesets(s, (id, _since, job) =>
+        invalidatedBy(op, { kind: 'changeset', id }, job),
+      )
+      .filter((j) => invalidatedBy(op, { kind: 'changeset', id: j.changeSetId }, j));
+    return this.restartAdvice(op, s, jobs, changesets);
+  }
+
+  /**
+   * Задания, которые операция сделала устаревшими, в транзакции её
+   * завершения (F84): задания досок и ChangeSet без задания по текущему
+   * входу, которые `invalidates` относит к ней.
+   */
+  private invalidatedAtCompletion(op: ContractChange) {
+    const s = this.h.store.read();
+    const lead = new LeadWorkflow(this.h);
+    const boardsOf = (id: string) => s.changeSets.find((c) => c.id === id)?.boardIds ?? [];
+    const boards = lead
       .invalidated(undefined, s, (board, _since, job) => invalidates(op, [board], job))
       .filter((j) => invalidates(op, [j.boardId], j));
-    const boardsOf = (id: string) => s.changeSets.find((c) => c.id === id)?.boardIds ?? [];
     const changesets = lead
       .invalidatedChangesets(s, (id, _since, job) => invalidates(op, boardsOf(id), job))
       .filter((j) => invalidates(op, boardsOf(j.changeSetId), j));
+    return { boards, changesets };
+  }
+
+  /** Задания ведущего с устаревшим входом к началу операции (`staleBefore`). */
+  private staleAtStart() {
+    const s = this.h.store.read();
+    const lead = new LeadWorkflow(this.h);
+    // И уже закрытые `stale` последние задания: их закрыла не эта операция.
+    return [
+      ...lead.invalidated(undefined, s, () => true).map((j) => j.key),
+      ...lead.invalidatedChangesets(s, () => true).map((j) => j.key),
+    ];
+  }
+
+  private restartAdvice(
+    op: ContractChange,
+    s: ReturnType<DevContour['store']['read']>,
+    jobs: ReturnType<LeadWorkflow['invalidated']>,
+    changesets: ReturnType<LeadWorkflow['invalidatedChangesets']>,
+  ) {
     if (!jobs.length && !changesets.length) return undefined;
     const starts = [
       ...jobs.map(
@@ -567,6 +653,8 @@ export class ContractChanges {
         rebound: [],
         boards: [],
         corrections: [],
+        // Устаревшее к началу операции — не её (F84).
+        staleBefore: this.staleAtStart(),
         history: [],
         ...(include.length ? { include } : {}),
       };
@@ -627,18 +715,25 @@ export class ContractChanges {
         current.finishedAt = new Date().toISOString();
         current.token = undefined;
         current.leaseUntil = undefined;
-        // История называет задания, которые операция сделала устаревшими
-        // (F84): вид результата их перечисляет, пока их не перезапустили, а
-        // запись остаётся.
-        const invalid = this.boardJobs(current);
-        if (invalid)
+        // Задания, которые операция сделала устаревшими (F84), — запись
+        // завершения: вид результата и пакет относят к операции только их, а
+        // история называет их и после перезапуска.
+        const invalid = this.invalidatedAtCompletion(current);
+        current.invalidated = {
+          boards: invalid.boards.map((j) => ({ boardId: j.boardId, key: j.key })),
+          changesets: invalid.changesets.map((j) => ({
+            changeSetId: j.changeSetId,
+            key: j.key,
+          })),
+        };
+        if (invalid.boards.length || invalid.changesets.length)
           this.log(
             current,
             'release',
             'jobs-invalidated',
             [
-              ...invalid.jobs.map((j) => `board ${j.boardId} ${j.key.slice(0, 8)} ${j.status}`),
-              ...(invalid.changesets ?? []).map(
+              ...invalid.boards.map((j) => `board ${j.boardId} ${j.key.slice(0, 8)} ${j.status}`),
+              ...invalid.changesets.map(
                 (j) => `changeset ${j.changeSetId} ${j.key.slice(0, 8)} ${j.status}`,
               ),
             ].join('; '),
@@ -936,6 +1031,8 @@ export class ContractChanges {
         rebound: [],
         boards: [],
         corrections: [],
+        // Продолжение той же операции: устаревшее к началу первой редакции.
+        ...(current.staleBefore ? { staleBefore: current.staleBefore } : {}),
         history: [],
         previous: current.id,
         ...((include ?? current.include)?.length ? { include: include ?? current.include } : {}),
