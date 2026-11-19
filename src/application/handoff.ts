@@ -1278,6 +1278,17 @@ function boardDraft(boardId: string, ctx: HostContext): HostNextDraft | undefine
     // Цикл «проверит базу», которую `checkBase` не проверит (F93): шаг —
     // подтверждение человека, а не ожидание задания.
     if (loop.step === 'check-base') {
+      // Удержанный перенос — подтверждение человека и при выборе между
+      // досками (решение о плане другой доски), как в блоке паузы.
+      const held = heldBaseOf(state);
+      if (held)
+        return {
+          action: 'operator',
+          boardId,
+          job: jobRef(live),
+          code: 'base-held',
+          params: { paths: held.paths },
+        };
       const gap = baseWaitGap(h, state, ctx.jobs.filter(ctx.live));
       if (gap?.gap === 'unchecked') return baseUncheckedDraft(gap.failed, live);
     }

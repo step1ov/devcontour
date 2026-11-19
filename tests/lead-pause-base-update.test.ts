@@ -436,20 +436,38 @@ test('F93: session_handoff host.next names the real way out of a base check — 
     });
 });
 
-test('F93: host.next for a base wait the loop cannot check — with another board waiting for a plan decision, and with a failed check', async () => {
-  for (const name of ['other board plan', 'failed check'] as const)
+test('F93: host.next for a base wait the loop cannot check — with another board waiting for a plan decision, with a failed check and with a held move', async () => {
+  for (const name of ['other board plan', 'failed check', 'held move'] as const)
     await withRepo(async ({ h, data }) => {
       const agent = await leadPauseOverMove(h, data, 'board', (s) => {
+        if (name === 'held move') {
+          // Удержанный перенос с диапазоном: подтверждает только человек.
+          for (const w of s.waits ?? [])
+            w.detail = `${BASE_HELD_DETAIL} (main:verify.mjs): gates этой базы его не подтверждают`;
+          return;
+        }
         delete s.baseMoves;
         if (name === 'failed check')
           for (const w of s.waits ?? []) w.detail = 'Проверка базы не пройдена: main/unit';
       });
       // Черновик другой доски: решение о плане ждёт, а живое задание первой
       // доски не должно выглядеть ожиданием проверки базы.
-      if (name === 'other board plan') h.addTask(h.createBoard('Draft board').id, input('Draft'));
-      await agent.run({ operation: 'queue_set', input: { paused: false } });
+      if (name !== 'failed check') h.addTask(h.createBoard('Draft board').id, input('Draft'));
+      if (name === 'held move')
+        // Пауза ведущего над удержанием не снимается: ставим ожидание напрямую.
+        h.store.change('fixture.base-check', (s) => {
+          s.pauseReason = 'base-check';
+          delete s.pauseActor;
+        });
+      else await agent.run({ operation: 'queue_set', input: { paused: false } });
       assert.equal(h.store.read().pauseReason, 'base-check', name);
       const next = devcontourHandoff(h, {}).host.next!;
+      if (name === 'held move') {
+        assert.equal(next.action, 'operator', `${name}: ${JSON.stringify(next)}`);
+        assert.equal(next.code, 'base-held', name);
+        assert.deepEqual(next.params, { paths: ['main:verify.mjs'] });
+        return;
+      }
       assert.equal(next.action, 'operator', `${name}: ${JSON.stringify(next)}`);
       assert.equal(next.code, 'base-unchecked', name);
       if (name === 'failed check') {
