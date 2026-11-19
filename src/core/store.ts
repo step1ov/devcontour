@@ -1317,8 +1317,7 @@ export class Store {
     // каждом чтении. Строки аренды попыток — тоже счётчик сроков.
     // Продление под видом heartbeat выдачу не меняет (F79): для шлюза
     // простоя — нейтральная запись этого процесса.
-    if (documentChanged)
-      this.bumpAs(type === 'heartbeat' ? 'lease' : 'data', type === 'heartbeat');
+    if (documentChanged) this.bumpAs(type === 'heartbeat' ? 'lease' : 'data', type === 'heartbeat');
     else if (type !== 'heartbeat' || leasesChanged) this.bumpAs('lease', type === 'heartbeat');
     if (type !== 'heartbeat') {
       const at = new Date().toISOString();
