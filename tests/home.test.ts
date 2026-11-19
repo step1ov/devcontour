@@ -820,6 +820,50 @@ test('F90: a closed dead job is not a failed job on the home; a parked board say
   }
 });
 
+test('F90: a dead board job on the home is failed exactly when host.next has its stop, whichever cancelled task comes first', async () => {
+  for (const issuedFirst of [false, true]) {
+    const f = fixture();
+    try {
+      const board = f.h.createBoard('Мёртвая доска', '', 'main');
+      const a = f.h.addTask(board.id, input('Первая'));
+      const b = f.h.addTask(board.id, input('Вторая'));
+      const [issued, unissued] = issuedFirst ? [a, b] : [b, a];
+      f.h.approve(board.id);
+      const flow = new LeadWorkflow(f.h);
+      const job = flow.start({
+        kind: 'board',
+        id: board.id,
+        authorRuntime: 'codex',
+        maxAttempts: 3,
+      });
+      // Невыданную отменяет оператор до выдачи; выданная падает и отменена ведущим.
+      f.h.cancel(unissued.id, 'Not needed any more', 'operator');
+      f.h.pause(false);
+      const run = f.h.claim('test')!;
+      assert.equal(run.taskId, issued.id);
+      f.h.fail(run.id, run.token, 'gate failed', false, 'gate');
+      f.h.cancel(issued.id, 'Replanned on another board', 'host');
+      const runner = new LeadRunner(f.h, f.root);
+      for (let i = 0; i < 4; i++) await runner.tick();
+      await runner.stop();
+      assert.equal(flow.get(job.key, job.owner).status, 'failed');
+      const step = devcontourHandoff(f.h, { boardId: board.id }).host.next;
+      const dev = homeView({
+        state: f.store.view(),
+        h: f.h,
+        attention: await new AttentionService(f.store, f.h).active(),
+        revision: f.store.visibleRevision(),
+        now: Date.now(),
+      }).sections.development;
+      const shown = dev.jobs.top.some((j) => j.id === board.id);
+      assert.equal(shown, Boolean(step), `issuedFirst=${issuedFirst}: ${JSON.stringify(step)}`);
+      assert.deepEqual([dev.jobs.failed, dev.jobs.closed], step ? [1, 0] : [0, 1]);
+    } finally {
+      f.cleanup();
+    }
+  }
+});
+
 test('Home: a running attempt is shown; a write during the attention computation recomputes both on one version', async () => {
   const f = fixture();
   const board = f.h.createBoard('Доска', '', 'main');

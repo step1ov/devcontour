@@ -6,7 +6,7 @@ import { LeadWorkflow, type WorkflowJob } from '../core/lead-workflow.ts';
 import { closureOf, parkedBoards, parkedHold, type BoardPark } from '../core/board-hold.ts';
 import { boardPhase, heldBaseOf, type BoardPhase } from '../core/work-status.ts';
 import { readyTasks } from '../core/graph.ts';
-import { boardTasks } from '../runner/lead-outlook.ts';
+import { boardTasks, loopAhead } from '../runner/lead-outlook.ts';
 import { repositories } from '../core/repositories.ts';
 import {
   attentionSections,
@@ -802,19 +802,23 @@ function development(
       )
     : [];
   // Задание предмета — последнее по времени: прежние упавшие уже сменены.
-  const unissuedDead = (boardId: string) => {
-    const tasks = boardTasks(state, boardId)?.tasks ?? [];
-    return (
-      tasks.length > 0 &&
-      tasks.every((t) => t.status === 'cancelled') &&
-      !tasks.some(
-        (t) =>
-          t.attempt > 0 ||
-          !!t.failure ||
-          !!t.neutralFailures ||
-          state.runs.some((r) => r.taskId === t.id),
-      )
-    );
+  // Мёртвая доска (все задачи текущей ревизии отменены): упавшее задание —
+  // шаг `host.next`, только когда цикл остановился бы на отменённой задаче,
+  // которую уже выдавали (D46, `cancelledStop` пакета передачи).
+  const deadWithoutStop = (j: WorkflowJob) => {
+    if (!h) return false;
+    const tasks = boardTasks(state, j.id)?.tasks ?? [];
+    if (!tasks.length || tasks.some((t) => t.status !== 'cancelled')) return false;
+    const { outlook: loop } = loopAhead(h, state, { ...j, status: 'queued' });
+    if (loop.step !== 'stop' || !loop.taskId) return true;
+    const task = state.tasks.find((t) => t.id === loop.taskId);
+    if (task?.status !== 'cancelled') return true;
+    const issued =
+      task.attempt > 0 ||
+      !!task.failure ||
+      !!task.neutralFailures ||
+      state.runs.some((r) => r.taskId === task.id);
+    return !issued;
   };
   const latest = new Map<string, (typeof jobs)[number]>();
   for (const j of jobs) {
@@ -829,11 +833,11 @@ function development(
       ? state.boards.find((b) => b.id === j.id)?.revisions.at(-1)?.status === 'accepted'
       : Boolean(state.changeSets.find((c) => c.id === j.id)?.acceptance);
   // Упавшее задание, остановка которого уже не шаг `host.next` (F90):
-  // закрытое `workflow_close`, задание отложенной доски или мёртвой доски,
-  // ни одну задачу которой не выдавали (остановки D46 у неё нет).
+  // закрытое `workflow_close`, задание отложенной доски или мёртвой доски
+  // без остановки D46.
   const settled = (j: WorkflowJob) =>
     j.kind === 'board' &&
-    (parked.has(j.id) || unissuedDead(j.id) || Boolean(h && closureOf(h, state, j.id, j)));
+    (parked.has(j.id) || deadWithoutStop(j) || Boolean(h && closureOf(h, state, j.id, j)));
   const failedLatest = [...latest.values()].filter((j) => j.status === 'failed' && !accepted(j));
   const closedJobs = failedLatest.filter(settled);
   const current = [...latest.values()].filter(
