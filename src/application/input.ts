@@ -17,6 +17,8 @@ import {
   blocksWork,
   contextDigest,
   contextIssues,
+  forOperator,
+  impactOf,
   inputContextSource,
   inputManifestOf,
   inputSourceId,
@@ -44,6 +46,12 @@ import {
   inputReviewSubject,
 } from '../harness/input-host.ts';
 import { runtimeAdapters } from '../harness/adapters.ts';
+import { LEAD_ANSWERS, leadDecides } from '../harness/policy.ts';
+import {
+  clearReviewDecisions,
+  escalationRefusal,
+  pendingReviewDecisions,
+} from '../core/review-decisions.ts';
 import { boardOf, UNASSIGNED_GRAPH } from '../harness/projection.ts';
 import { adapters, type AgentAdapter } from '../runner/adapters.ts';
 import { checkoutRoots } from '../runner/checkout-root.ts';
@@ -321,6 +329,12 @@ export const inputOperationInputs = {
       text: z.string().trim().min(1).max(INPUT_LIMITS.answer),
       optionId: z.string().max(40).optional(),
       kind: z.enum(['clarification', 'requirement-change']).default('clarification'),
+      /**
+       * Почему ведущий выбрал ответ: обязательна для ответа ведущего на
+       * блокирующий технический вопрос (запись ответа хранит её и показывает
+       * владельцу); у ответа оператора не нужна.
+       */
+      reason: z.string().trim().min(1).max(INPUT_LIMITS.reason).optional(),
       ...versionFields,
     })
     .meta(versionRequired)
@@ -574,10 +588,34 @@ export class InputService {
 
   /**
    * Ведущий (агентский API или CLI `--by host`) отвечает и снимает вопрос
-   * сам, только если вопрос без минимумов и режим `agent` (Q7, R7-1).
+   * сам (Q7, R7-1) только в режиме `agent`: неблокирующий запрос — без
+   * минимумов, блокирующий вопрос — только технический (`impact: technical`,
+   * без минимумов, серьёзность до 9; правило `inputPolicy.leadAnswers`
+   * harness). Вопрос, меняющий результат для пользователя, — владельцу.
    */
-  leadMayDecide(request: Pick<InputRequest, 'floors'>) {
-    return request.floors.length === 0 && this.h.config.approvalMode === 'agent';
+  leadMayDecide(
+    request: Pick<InputRequest, 'kind' | 'blocking' | 'effectiveSeverity' | 'floors' | 'question'>,
+  ) {
+    return leadDecides(this.h.config, request);
+  }
+
+  /**
+   * Сохранённый ответ ведущего (или хоста) на блокирующий вопрос, который
+   * ведущий решать не вправе: ответ записан до обновления правила (вопрос
+   * без `impact`) или до смены режима. Такой ответ не применяется и не
+   * переносится — вопрос снова ждёт владельца. Причина отказа или `undefined`.
+   */
+  leadAnswerHeld(request: InputRequest) {
+    if (!forOperator(request) || this.leadMayDecide(request)) return undefined;
+    const last = latestAnswer(request);
+    if (!last || last.actor.kind === 'operator') return undefined;
+    return `Ответ на вопрос ${request.id} дал ведущий, но вопрос решает владелец (${
+      request.floors.length
+        ? 'критический: ' + request.floors.join(', ')
+        : this.h.config.approvalMode === 'operator'
+          ? 'approvalMode operator'
+          : 'меняет результат для пользователя'
+    }): ответ не применяется, владелец отвечает в панели`;
   }
 
   /* -------------------------------------------------------------- */
@@ -979,10 +1017,26 @@ export class InputService {
     // Заменённый вопрос ждёт переноса ответа. Выдачу он не держит (правило
     // движка), поэтому шаг называет порядок: перенос в черновике, затем
     // утверждение — оно сохраняет перенесённый ответ (F14).
-    if (state === 'superseded' && request.closed?.carry && !request.target)
+    if (
+      state === 'superseded' &&
+      request.closed?.carry &&
+      !request.target &&
+      !this.leadAnswerHeld(request)
+    )
       return {
         actor: 'lead' as const,
         next: carryStep(task, !!task && !!this.unreleasedBoard(task)),
+      };
+    // Ответ ведущего на вопрос владельца не доводится: отвечает владелец.
+    if (
+      this.leadAnswerHeld(request) &&
+      ['answer-saved', 'context-review', 'ready-to-apply', 'review-rejected', 'stale'].includes(
+        state,
+      )
+    )
+      return {
+        actor: 'operator' as const,
+        next: `the saved answer is the lead's, but this question is the owner's (it changes the result for the user, is critical, or approvalMode is operator): the operator answers in the panel: ${hrefs.input(request.workId)}`,
       };
     switch (state) {
       case 'awaiting-answer':
@@ -1183,6 +1237,8 @@ export class InputService {
         const context = this.summaryContext();
         return requests.flatMap((request) => {
           if (request.kind !== 'question' || !request.blocking || request.target) return [];
+          // Ответ ведущего на вопрос владельца не переносится (`leadAnswerHeld`).
+          if (this.leadAnswerHeld(request)) return [];
           // Переносить некуда: задача снята или принята (движок откажет).
           const task = context.tasks.get(request.workId);
           if (!task || task.status === 'cancelled' || task.status === 'done') return [];
@@ -1238,6 +1294,8 @@ export class InputService {
                 optionId: a.optionId,
                 actor: a.actor,
                 ...(a.messageRef ? { messageRef: a.messageRef } : {}),
+                ...(a.basis ? { basis: a.basis } : {}),
+                ...(a.reason ? { reason: a.reason } : {}),
                 digest: a.digest,
                 at: a.at,
                 excerpt: a.text.slice(0, EARLIER_EXCERPT),
@@ -1282,8 +1340,19 @@ export class InputService {
         'OPERATOR_ANSWERS',
         request.floors.length
           ? `Вопрос ${request.id} критический (${request.floors.join(', ')}): отвечает оператор в панели`
-          : `В approvalMode operator на вопрос ${request.id} отвечает оператор в панели`,
+          : this.h.config.approvalMode === 'operator'
+            ? `В approvalMode operator на вопрос ${request.id} отвечает оператор в панели`
+            : impactOf(request.question) !== 'technical'
+              ? `Вопрос ${request.id} меняет результат для пользователя (impact ${request.question.impact ?? 'не указан'}): отвечает владелец в панели; ведущий может предложить ответ (input_propose)`
+              : `Вопрос ${request.id} серьёзнее порога ответов ведущего (${request.effectiveSeverity} > ${LEAD_ANSWERS.maxSeverity}): отвечает владелец в панели; ведущий может предложить ответ (input_propose)`,
         403,
+      );
+    // Технический вопрос ведущий решает с записанной причиной: её читает владелец.
+    if (actor !== 'operator' && forOperator(request) && !input.reason)
+      throw refuse(
+        'INVALID_INPUT',
+        `Вопрос ${request.id}: ответ ведущего на технический вопрос — с причиной (reason, CLI --reason): почему этот вариант`,
+        400,
       );
     // Ответ и решение за владельца — одна транзакция: записанный ответ без
     // записи решения не остаётся (вложенный `atomic`, как у ответа из обсуждения).
@@ -1303,8 +1372,13 @@ export class InputService {
           text: input.text,
           optionId: input.optionId ?? null,
           kind: input.kind,
-          actor: { kind: actor },
+          // Ведущий через CLI (`--by host`) отвечает на блокирующий вопрос по
+          // тому же правилу политики, что агентский API: движок проверяет его
+          // и записывает правило (`basis`) только у актёра `lead`.
+          actor: { kind: actor === 'host' && forOperator(request) ? 'lead' : actor },
           ...(link.messageRef ? { messageRef: link.messageRef } : {}),
+          // Причина — только у ответа ведущего: ответ оператора её не несёт.
+          ...(actor !== 'operator' && input.reason ? { reason: input.reason } : {}),
         },
         input.expectedVersion,
       );
@@ -1465,8 +1539,21 @@ export class InputService {
       throw refuse(
         'OPERATOR_ANSWERS',
         `Вопрос ${request.id} заменяет оператор: ${
-          request.floors.length ? 'вопрос критический' : 'approvalMode operator'
+          request.floors.length
+            ? 'вопрос критический'
+            : this.h.config.approvalMode === 'operator'
+              ? 'approvalMode operator'
+              : 'вопрос меняет результат для пользователя'
         }`,
+        403,
+      );
+    // Замена перенесла бы ответ ведущего на вопрос владельца, который не
+    // применяется: сначала отвечает владелец (или снимает вопрос).
+    const held = open ? this.leadAnswerHeld(request) : undefined;
+    if (held)
+      throw refuse(
+        'OPERATOR_ANSWERS',
+        held + '; замените вопрос после ответа владельца или снимите его',
         403,
       );
     // Пока исходная остановка держится (постановка задачи прежняя, задача на
@@ -1987,15 +2074,24 @@ export class InputService {
       // Итог ревью ответа читает оператор в центре внимания: на его языке.
       ...reviewLanguageInstructions(hintLocaleOf(this.h.config)),
     ];
+    const reviewSubjectId = inputReviewSubject(request.id);
     try {
+      // Решения владельца по находкам после эскалации — этим раундом (alpha.54).
+      const dispositions = pendingReviewDecisions(
+        this.h.store,
+        'plan',
+        reviewSubjectId,
+        engine.reviews('plan', reviewSubjectId).at(-1),
+      );
       const record = await technicalReview(
         engine,
         engine.policy,
         runtimeAdapters(this.h, engine.policy, this.runtimes),
         {
           kind: 'plan',
-          subject: inputReviewSubject(request.id),
+          subject: reviewSubjectId,
           digest: inputReviewDigest(this.h, task, request.id, answer.digest),
+          ...(dispositions.length ? { dispositions } : {}),
           author: input.authorRuntime,
           instructions,
           context: snapshot,
@@ -2013,6 +2109,7 @@ export class InputService {
             : AbortSignal.timeout(this.h.config.runTimeoutMs),
         },
       );
+      clearReviewDecisions(this.h.store, 'plan', reviewSubjectId, dispositions, record);
       // Маршрут, признанный на постановке, которую ревью читало (F85): позже
       // задача может закрепить и другие контракты, основание — этот снимок.
       const routed = record.approved
@@ -2070,7 +2167,7 @@ export class InputService {
           : {}),
       };
     } catch (error) {
-      throw toDomain(error);
+      throw escalationRefusal(error, 'plan', reviewSubjectId) ?? toDomain(error);
     }
   }
 
@@ -2160,6 +2257,8 @@ export class InputService {
         'В approvalMode agent ответ применяет ведущий агент: input_target, затем input_apply',
       );
     const request = this.request(input.requestId);
+    const held = this.leadAnswerHeld(request);
+    if (held) throw refuse('OPERATOR_ANSWERS', held, 403);
     const approval = actor === 'operator' ? ('operator' as const) : ('agent' as const);
     const { store, engine } = executionOf(this.h);
     try {

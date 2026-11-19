@@ -1,5 +1,10 @@
 import { assertNotHeld } from '../core/owner-questions.ts';
 import { technicalReview } from 'devcontour-harness';
+import {
+  clearReviewDecisions,
+  escalationRefusal,
+  pendingReviewDecisions,
+} from '../core/review-decisions.ts';
 import { attemptNumbers } from '../core/attempt-numbers.ts';
 import { clipAtBoundary } from '../core/clip.ts';
 import { reviewExecutionOf, toDomain } from '../harness/execution.ts';
@@ -518,16 +523,25 @@ async function review(
   const { engine } = reviewExecutionOf(h);
   const plan = kind === 'plan' ? (proposal as { tasks?: { id?: string }[] }) : undefined;
   const history = legacyHistory(h, subject, title);
+  const harnessSubject = consolidation
+    ? reviewSubject(kind, 'consolidation:' + title, repositoryId)
+    : reviewSubject(kind, title, repositoryId, subjectId);
+  // Решения владельца по находкам после эскалации — этим раундом (alpha.54).
+  const dispositions = pendingReviewDecisions(
+    h.store,
+    kind,
+    harnessSubject,
+    engine.reviews(kind, harnessSubject).at(-1),
+  );
   const record = await technicalReview(
     engine,
     engine.policy,
     runtimeAdapters(h, engine.policy, runtimes),
     {
       kind,
-      subject: consolidation
-        ? reviewSubject(kind, 'consolidation:' + title, repositoryId)
-        : reviewSubject(kind, title, repositoryId, subjectId),
+      subject: harnessSubject,
       digest: digest(proposal),
+      ...(dispositions.length ? { dispositions } : {}),
       author,
       instructions,
       ...(repositoryId ? { repositoryId } : {}),
@@ -558,8 +572,9 @@ async function review(
         : AbortSignal.timeout(h.config.runTimeoutMs),
     },
   ).catch((error: unknown) => {
-    throw toDomain(error);
+    throw escalationRefusal(error, kind, harnessSubject) ?? toDomain(error);
   });
+  clearReviewDecisions(h.store, kind, harnessSubject, dispositions, record);
   const opened = record.findings.filter((f) => f.status === 'open' && f.openedIn === record.round);
   recordContractAttempt(h, {
     id: artifact.split('/').at(-1) ?? artifact,

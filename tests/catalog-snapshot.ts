@@ -261,5 +261,11 @@
 // вопросов владельцу по разделам (описание session_handoff называет и
 // host.parked, и host.questions); главная панели (/api/home) и простой
 // сервера (F83) каталог не меняют.
-export const CATALOG_DIGEST = '4f13c831b2791fa3842047c2ac1fefd1bfd0af6f64dbffeefca160c010ff617e';
+// Намеренное изменение (harness 0.1.0-alpha.55, ответы ведущего): input_answer
+// принимает reason, а discussion_post — input.reason; описания input_answer,
+// input_propose, discussion_post и session_handoff называют правило: ведущий
+// решает только технический вопрос (impact technical, без минимумов,
+// серьёзность до 9) с причиной, вопрос для пользователя — владельцу;
+// прочие операции байтово прежние.
+export const CATALOG_DIGEST = '47db844adae98478cbb4185992da186a01d353f2f1e9a76f6a86c74d34049481';
 export const SNAPSHOT_VERSION = '0.4.0-alpha.7';

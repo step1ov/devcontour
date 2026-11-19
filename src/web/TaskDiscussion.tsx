@@ -31,7 +31,7 @@ export interface DiscussionMessage {
   };
   /** Ответ на вопрос исполнителя: версия ответа или поздний ответ без продолжения. */
   input?:
-    | { requestId: string; revision: number; answerDigest: string }
+    | { requestId: string; revision: number; answerDigest: string; reason?: string }
     | { requestId: string; accepted: false; lifecycle: string };
   /** Решение ведущего за владельца: какой вопрос закрыт и на что влияет. */
   standIn?: { question: string; impact: string };
@@ -494,6 +494,14 @@ export function TaskDiscussion({
                   {correction && <span className="sr-only">Исправлено: </span>}
                   {m.text}
                 </p>
+                {m.input && 'revision' in m.input && m.input.reason && (
+                  <p
+                    className="text-muted-foreground m-0 mt-1 text-xs whitespace-pre-wrap [overflow-wrap:anywhere]"
+                    data-answer-reason
+                  >
+                    Причина ведущего: {m.input.reason}
+                  </p>
+                )}
                 {m.standIn && (
                   <dl className="m-0 mt-1 grid gap-0.5 text-xs [overflow-wrap:anywhere]">
                     <div>

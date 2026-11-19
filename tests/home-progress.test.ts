@@ -1206,6 +1206,16 @@ test('Home strings never carry lead commands: each pause kind gets its operator 
       [
         'lead',
         { pauseReason: 'operator', pauseActor: { by: 'lead', at: pausedAt, reason: 'ревью' } },
+        'Выдачу остановил ведущий агент: ревью',
+        `Свою паузу ведущий агент снимает сам; запустить раньше — ${START}.`,
+      ],
+      [
+        // Причина ведущего с его командой не показывается (F93).
+        'lead-command-note',
+        {
+          pauseReason: 'operator',
+          pauseActor: { by: 'lead', at: pausedAt, reason: 'до queue_set {"paused": false}' },
+        },
         'Выдачу остановил ведущий агент',
         `Свою паузу ведущий агент снимает сам; запустить раньше — ${START}.`,
       ],
@@ -1321,6 +1331,28 @@ test('Home queue text: who resumes depends on the lead workflow and the approval
     'Ведущий агент проверит базу и продолжит выдачу сам.',
   );
   assert.match(operatorQueue(q('operator'), wait, agentLive).hint, /Проверьте базу gates/);
+  // Пауза ведущего над тем же ожиданием (F93): снимает ведущий, базу проверяет
+  // цикл — если её проверит стадия доски по диапазону переноса
+  // (`baseLoopChecks`); иначе действие остаётся оператору — и при паузе
+  // base-check тоже.
+  const loop = { ...agentLive, baseByLoop: true };
+  const noLoop = { ...agentLive, baseByLoop: false };
+  assert.equal(
+    operatorQueue(q('operator', { by: 'lead' }), wait, loop).hint,
+    'Свою паузу ведущий агент снимает сам; затем он проверит базу и продолжит выдачу.',
+  );
+  assert.match(operatorQueue(q('operator', { by: 'lead' }), wait, noLoop).hint, /Проверьте базу gates/);
+  assert.match(operatorQueue(q('base-check'), wait, noLoop).hint, /Проверьте базу gates/);
+  // Без задания ведущего цикл базу не проверит: действие остаётся оператору.
+  assert.match(
+    operatorQueue(q('operator', { by: 'lead' }), wait, { ...loop, workflowActive: false }).hint,
+    /Проверьте базу gates/,
+  );
+  assert.match(
+    operatorQueue(q('operator', { by: 'lead' }), wait, { ...loop, approvalMode: 'operator' })
+      .hint,
+    /Проверьте базу gates/,
+  );
   assert.equal(
     operatorQueue(q('reconfigure'), wait, agentLive).hint,
     'Ничего не требуется: пауза снимется сама.',
@@ -1399,4 +1431,11 @@ test('Home budget: a line per scope, holding first; engine text gets Russian cou
     ['доски «Доска один»', undefined, 'задачи «T-1»'],
   );
   assert.equal(budget.reason, 'у 1 попытки вызовы не записаны');
+  // Строка оператора — в API рядом с сырым текстом расчёта, как на панели.
+  assert.equal(budget.text, 'Бюджет доски «B-1»: исчерпан · ~$1.23 из $10 (12 %)');
+  assert.equal(
+    budget.scopes[1].text,
+    'Бюджет workspace: не определён · ~$1.23 из $10 (12 %); у 1 вызова стоимость неизвестна — сумма занижена',
+  );
+  assert.equal(named.scopes[0].text, 'Бюджет доски «Доска один»: исчерпан · ~$1.23 из $10 (12 %)');
 });

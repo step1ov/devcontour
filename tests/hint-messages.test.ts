@@ -347,6 +347,13 @@ const samples: { [C in HintCode]: (HintSubject & Extract<HintOf, { code: C }>)[]
       job,
       loop: { step: 'accept' },
     },
+    { code: 'pause-operator', params: { by: 'lead', base: 'unchecked' } },
+    { code: 'pause-operator', params: { by: 'lead', base: 'no-board' } },
+  ],
+  'base-unchecked': [
+    { code: 'base-unchecked', params: {} },
+    { code: 'base-unchecked', params: { failed: true } },
+    { code: 'base-unchecked', params: {}, boardId: 'board-1', job },
   ],
   'base-held': [
     { code: 'base-held', params: { paths: [] } },
@@ -725,8 +732,13 @@ test('Подсказки шага: новая конфигурация setup п�
  * (новые коды contract-change-required, changeset-restart, owner-answer,
  * owner-question-pending, образцы closable и plan.questions); тексты прежних
  * образцов байтово прежние.
+ * Намеренное изменение (harness 0.1.0-alpha.55): образец `answer-lead` называет
+ * технический вопрос и поле `reason` ответа ведущего; прочие образцы прежние.
+ * Намеренное изменение (F93): новый код base-unchecked и образец
+ * pause-operator с base: unchecked и no-board, base-unchecked с failed; тексты
+ * прежних образцов байтово прежние.
  */
-const ENGLISH_SAMPLES_SHA256 = '24e67e66b80e8edac26c874cbbee20245b339500fc0ce515d1d48f6031f16aa8';
+const ENGLISH_SAMPLES_SHA256 = 'c9d3de5e6d289f1e7e0ef57d6d439d3ac939f9e8238e5b78dc71a43045981aca';
 
 test('Подсказки шага: английские тексты образцов закреплены', () => {
   assert.equal(

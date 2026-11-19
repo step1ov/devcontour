@@ -352,19 +352,39 @@ test('inputPolicy bounds 1..11; absent leaves the policy and config digest as be
       () => (write({ inputPolicy: { threshold: 5, extra: 1 } }), loadConfig(path)),
       /inputPolicy/,
     );
+    // В режиме operator правила ответов ведущего нет: без inputPolicy
+    // политика harness поля не получает.
+    write({ approvalMode: 'operator' });
+    assert.equal('inputPolicy' in policyFromConfig(loadConfig(path)), false);
+    // В режиме agent ведущий решает технические вопросы (leadAnswers):
+    // порог по умолчанию, digest исполнения прежний.
     write({});
     const plain = loadConfig(path);
-    assert.equal('inputPolicy' in policyFromConfig(plain), false);
+    assert.equal(plain.approvalMode, 'agent');
+    assert.deepEqual(policyFromConfig(plain).inputPolicy, {
+      threshold: 7,
+      criticalPaths: [],
+      leadAnswers: { maxSeverity: 9, technical: true },
+    });
     write({ inputPolicy: { threshold: 11 } });
     const autonomous = loadConfig(path);
     assert.deepEqual(policyFromConfig(autonomous).inputPolicy, {
       threshold: 11,
       criticalPaths: [],
+      leadAnswers: { maxSeverity: 9, technical: true },
     });
     assert.equal(
       executionDigest(policyFromConfig(autonomous)),
       executionDigest(policyFromConfig(plain)),
     );
+    // Основание прежней версии: та же политика без inputPolicy (до правила
+    // ответов ведущего) — digest исполнения тот же.
+    const before = { ...policyFromConfig(plain) };
+    delete before.inputPolicy;
+    assert.equal(executionDigest(before), executionDigest(policyFromConfig(plain)));
+    // Утверждаемая часть политики не зависит от режима и правила ответов.
+    write({ approvalMode: 'operator' });
+    assert.equal(approvalPolicyDigest(loadConfig(path)), approvalPolicyDigest(plain));
     assert.equal(approvalPolicyDigest(autonomous), approvalPolicyDigest(plain));
     assert.equal(workspacePolicyDigest(autonomous), workspacePolicyDigest(plain));
   } finally {

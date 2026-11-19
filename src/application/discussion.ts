@@ -137,13 +137,21 @@ export class DiscussionService {
     const value = row as { text?: unknown; input?: { requestId: string; revision?: number } };
     if (value.text === undefined && value.input?.revision !== undefined) {
       let text = '(ответ не найден в запросе исполнителя)';
+      let reason: string | undefined;
       try {
         const request = executionOf(this.h).engine.inputRequest(value.input.requestId);
-        text = request.answers.find((a) => a.revision === value.input!.revision)?.text ?? text;
+        const answer = request.answers.find((a) => a.revision === value.input!.revision);
+        text = answer?.text ?? text;
+        // Причина ведущего — из той же версии ответа (у ответа оператора её нет).
+        if (answer?.reason && answer.actor.kind !== 'operator') reason = answer.reason;
       } catch {
         /* Запрос не найден: сообщение остаётся читаемым. */
       }
-      return discussionMessage.parse({ ...value, text });
+      return discussionMessage.parse({
+        ...value,
+        text,
+        ...(reason ? { input: { ...value.input, reason } } : {}),
+      });
     }
     return discussionMessage.parse(row);
   }
@@ -579,6 +587,7 @@ export class DiscussionService {
       expectedVersion: number;
       optionId?: string;
       kind?: 'clarification' | 'requirement-change';
+      reason?: string;
       supersedes?: string;
       replyTo?: string;
     },
@@ -592,6 +601,8 @@ export class DiscussionService {
       requestId: v.requestId,
       optionId: v.optionId ?? null,
       answerKind: v.kind ?? 'clarification',
+      // Причина ведущего — часть ответа: другая причина под тем же ключом — другой ответ.
+      ...(v.reason ? { reason: v.reason } : {}),
       replyTo: v.replyTo ?? null,
       supersedes: v.supersedes ?? null,
     });
@@ -642,6 +653,7 @@ export class DiscussionService {
             text: v.text,
             ...(v.optionId ? { optionId: v.optionId } : {}),
             ...(v.kind ? { kind: v.kind } : {}),
+            ...(v.reason ? { reason: v.reason } : {}),
             expectedVersion: v.expectedVersion,
           },
           author,

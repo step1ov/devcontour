@@ -12,7 +12,7 @@ import {
   type DevContourState,
   type Task,
 } from '../core/model.ts';
-import type { DevContour } from '../core/service.ts';
+import { baseMovesOf, type DevContour } from '../core/service.ts';
 import {
   carriedTaskIds,
   heldBaseOf,
@@ -368,7 +368,10 @@ export function liftsPause(h: DevContour, s: DevContourState, job: WorkflowJob):
   if (outlook.step === 'lift-pause') return true;
   // Удержанное ожидание проверка базы не снимет, пока перенос не подтвердит
   // человек (или ревью не одобрит документ контракта).
-  if (outlook.step === 'check-base') return !heldBaseOf(s);
+  // Ожидание без диапазона этого переноса (поставлено до переноса или
+  // прежней версией, диапазон устарел) проверка тоже не снимет: `checkBase`
+  // отказывает, решение — человека (F93, `baseLoopChecks`).
+  if (outlook.step === 'check-base') return !heldBaseOf(s) && !!baseMovesOf(s);
   const first =
     outlook.step === 'repair' ||
     (outlook.step === 'recovery' && (outlook.action === 'retry-task' || outlook.action === 'wait'));

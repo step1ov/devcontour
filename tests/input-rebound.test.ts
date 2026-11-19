@@ -30,6 +30,7 @@ import { repositories } from '../src/core/repositories.ts';
 import { LeadRunner } from '../src/runner/lead-workflow.ts';
 import { LeadWorkflow } from '../src/core/lead-workflow.ts';
 import { AttentionService } from '../src/application/attention.ts';
+import { RESUME, RESUME_DRIVER } from '../src/application/input-resume.ts';
 
 after(() => inputDemos.close());
 
@@ -407,6 +408,75 @@ test('F39: with a running server a moved stop stops the pass with the real actor
     await lead.settled();
     assert.equal(reviews(prompts), before, 'проход ревью не вызывает');
     assert.equal(reviews(prompts), 0);
+  } finally {
+    await f.cleanup();
+  }
+});
+
+test('F91: a long lead stage (base check) keeps the server heartbeat: the moved card keeps its version, title and read mark', async () => {
+  const { f, runtimes, boardId, taskId, v1, requestId } = await answeredQuestion({
+    prompts: [],
+    paused: false,
+  });
+  try {
+    rebind(f, taskId, v1.id);
+    const task = () => f.store.read().tasks.find((t) => t.id === taskId)!;
+    f.h.editTask(
+      taskId,
+      {
+        title: 'Task bound to a contract asks, respecified',
+        description: task().description,
+        role: task().role,
+        acceptance: task().acceptance,
+        dependsOn: task().dependsOn,
+        contracts: task().contracts,
+      },
+      specDigest(task()),
+    );
+    f.h.approve(boardId, [taskId]);
+    new LeadWorkflow(f.h).start({ kind: 'board', id: boardId, authorRuntime: 'codex' });
+    const lead = new LeadRunner(f.h, f.root, runtimes);
+    for (let i = 0; i < 3; i++) {
+      await lead.tick();
+      await lead.settled();
+    }
+    const attention = new AttentionService(f.store, f.h, { root: f.root });
+    const card = async () =>
+      (await attention.active()).items.find((i) => i.sourceKey === `input:${requestId}`)!;
+    const before = await card();
+    assert.match(before.sourceVersion, /:r-moved$/);
+    await attention.mark({
+      marks: [
+        {
+          sourceKey: before.sourceKey,
+          occurrenceId: before.occurrenceId,
+          version: before.sourceVersion,
+          kind: 'read',
+        },
+      ],
+    });
+    assert.equal((await card()).state.read, true);
+    // Стадия доски ждёт долго (проверка базы идёт минуты): такт цикла
+    // ведущего занят, следующие такты таймера возвращают ту же стадию.
+    let release!: () => void;
+    const stage = new Promise<void>((resolve) => (release = resolve));
+    const advance = (lead as unknown as { advance: () => Promise<void> }).advance;
+    (lead as unknown as { advance: () => Promise<void> }).advance = () => stage;
+    const running = lead.tick();
+    // Срок прежней отметки сервера истёк, пока стадия идёт.
+    f.store.atomic(() =>
+      f.store.saveLocal(RESUME, undefined, RESUME_DRIVER, { leaseUntil: Date.now() - 1 }, 'lease'),
+    );
+    void lead.tick();
+    const during = await card();
+    assert.equal(f.service.list({ taskId }).requests[0].resume?.phase, 'moved');
+    assert.equal(during.sourceVersion, before.sourceVersion);
+    assert.equal(during.title, before.title);
+    assert.equal(during.state.read, true, 'вопрос не изменился — отметка прочтения держится');
+    release();
+    await running;
+    (lead as unknown as { advance: () => Promise<void> }).advance = advance;
+    await lead.settled();
   } finally {
     await f.cleanup();
   }
