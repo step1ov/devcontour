@@ -234,7 +234,7 @@ export async function serve(
     generatedAt: string;
     sections: ReturnType<typeof questionSummary>;
   }>({ maxAgeMs: PROJECTION_MAX_AGE_MS });
-  const preparations = new ProjectionCache<string>({ maxAgeMs: QUICK_FACTS_MAX_AGE_MS });
+  const preparations = new ProjectionCache<Etagged>({ maxAgeMs: QUICK_FACTS_MAX_AGE_MS });
   const products = new ProjectionCache<string>({
     maxAgeMs: SLOW_TIER_MS,
     minAgeMs: SLOW_TIER_MS,
@@ -279,6 +279,7 @@ export async function serve(
       product,
       ...(budgets ? { budgets } : {}),
       usage: usageTotals(records),
+      usageRecords: records,
       gapEvents: engine.store.eventsSince(
         ['server.loop-stalled', 'server.clock-jump'],
         new Date(Date.now() - 60 * 60 * 1000).toISOString(),
@@ -450,19 +451,22 @@ export async function serve(
         if (req.method === 'GET' && path === '/api/preparation' && preparationStore) {
           // Экран этапа опрашивается так же часто: ответ версии данных — из
           // кэша (F60). Причина отказа подключения и движок — вне базы.
-          jsonText(
-            res,
-            preparations.get(
-              scopeOf(url),
-              String(preparationStore.visibleRevision()),
-              [preparationStore, h, configKey(h), startupError],
-              () => ({
-                value: JSON.stringify(
-                  preparationView(preparationStore, url.searchParams.get('change') ?? undefined),
-                ),
-              }),
-            ),
+          // Клиент с меткой прежнего ответа получает «без изменений» (F88):
+          // полное тело экрана — сотни килобайт на каждый опрос.
+          const preparation = preparations.get(
+            scopeOf(url, 'etag'),
+            String(preparationStore.visibleRevision()),
+            [preparationStore, h, configKey(h), startupError],
+            (previous) => ({
+              value: etagged(
+                {
+                  ...preparationView(preparationStore, url.searchParams.get('change') ?? undefined),
+                },
+                previous,
+              ),
+            }),
           );
+          jsonText(res, etaggedBody(preparation, url.searchParams.get('etag')));
           return;
         }
         // Поручение быстрого изменения вводит оператор в панели: происхождение

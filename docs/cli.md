@@ -256,6 +256,7 @@ devcontour decision-reverse --message DM-... --text "что сделать вз�
 | `POST /api/changesets/:id/verify`                                  | Запустить асинхронную Verification; started не означает PASS                                                                 |
 | `POST /api/changesets/:id/accept`                                  | Ручная приёмка ChangeSet                                                                                                     |
 | `POST /api/changesets/:id/handoff`, `/remote-check`                | Подготовка/наблюдение публикации                                                                                             |
+| `GET /api/preparation`, `?change=`, `?etag=`                       | Экран этапа: статус, setup, исполнители, очередь (`etag`; с прежней меткой — `unchanged`); работает и до setup               |
 | `POST /api/preparation/quick`                                      | Поручение быстрого изменения от оператора (вход `preparation_quick`; повтор `requestKey` — та же запись)                     |
 | `GET /api/preparation/quick?change=ID`                             | Быстрое изменение (по умолчанию активное): поручение, предложение setup, факты, план файлов, шаги и результат                |
 | `GET /api/attention`, `?view=history`                              | Центр внимания: активные карточки или история ([данные](attention.md#чтение)); работает и до setup                           |

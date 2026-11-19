@@ -135,8 +135,14 @@ test('F60: опрос обзора, центра внимания, сводки 
     });
     await get('/api/attention');
     assert.equal(attentions.computations, 1);
-    await get('/api/preparation');
-    await get('/api/preparation');
+    // Экран этапа (F88): метка, «без изменений» с ней, метка — не часть области.
+    const preparation = await get('/api/preparation');
+    assert.equal(typeof preparation.etag, 'string');
+    assert.deepEqual(await get('/api/preparation'), preparation);
+    assert.deepEqual(await get('/api/preparation?etag=' + preparation.etag), {
+      unchanged: true,
+      etag: preparation.etag,
+    });
     assert.equal(preparations.computations, 1);
 
     // Сводка: вторая вкладка без номера получает посчитанный ответ.
@@ -153,12 +159,25 @@ test('F60: опрос обзора, центра внимания, сводки 
     });
     assert.equal(overviews.computations, 2);
 
+    // Запись без перемены экрана этапа: пересчёт, метка прежняя.
+    assert.deepEqual(await get('/api/preparation?etag=' + preparation.etag), {
+      unchanged: true,
+      etag: preparation.etag,
+    });
+    assert.equal(preparations.computations, 2);
+
     // Настоящая перемена — новый ответ и новая метка.
     f.h.createBoard('Новое изменение', '', 'main');
     f.h.addTask(f.store.read().boards[0].id, input());
     const fresh = await get('/api/overview?etag=' + overview.etag);
     assert.notEqual(fresh.etag, overview.etag);
     assert.ok((fresh.changes as { title: string }[]).some((c) => c.title === 'Новое изменение'));
+    // Экран этапа: перемена очереди — полный ответ и новая метка по старой.
+    f.h.pause(!f.store.read().paused);
+    const changed = await get('/api/preparation?etag=' + preparation.etag);
+    assert.equal(changed.unchanged, undefined);
+    assert.notEqual(changed.etag, preparation.etag);
+    assert.notDeepEqual(changed.queue, preparation.queue);
     const next = await get('/api/summary?revision=' + String(summary.revision));
     assert.equal(next.unchanged, undefined);
     assert.equal((next.boards as unknown[]).length, 1);
