@@ -100,6 +100,8 @@ export type ContractChangeTrace = Pick<
   | 'version'
   | 'contractId'
   | 'rebound'
+  | 'reboundSpecs'
+  | 'approvedSpecs'
   | 'held'
   | 'startedAt'
   | 'finishedAt'
