@@ -441,15 +441,23 @@ test('a finding longer than the card gets no panel decision: the card names the 
       const huge = 'Oversized finding: ' + 'the error states are undefined '.repeat(110);
       // Находка, которую движок записал с маской: решения в панели тоже нет.
       const masked = 'Token [REDACTED] leaks into logs';
+      // Раунд 1 — другая находка; эскалированная появляется в раунде 2:
+      // команда называет ответ раунда её появления, а не первого.
+      let calls = 0;
       const make = (name: 'codex' | 'claude'): AgentAdapter => ({
         name,
-        execute: () =>
+        execute: (r) =>
           Promise.resolve({
             data: {
               approved: false,
               summary: 'Explicit test fixture',
-              findings: [{ severity: 'blocking', message: which === 'huge' ? huge : masked }],
-              previous: [],
+              findings: [
+                {
+                  severity: 'blocking',
+                  message: ++calls === 1 ? 'Small first finding' : which === 'huge' ? huge : masked,
+                },
+              ],
+              previous: calls === 2 ? closePrevious(r.prompt) : [],
             },
             log: 'Fixture only; no provider called',
             command: ['fixture'],
@@ -457,7 +465,7 @@ test('a finding longer than the card gets no panel decision: the card names the 
       });
       const runtimes = { codex: make('codex'), claude: make('claude') };
       const proposal = { title: 'Huge API v1', content: 'GET /huge.' };
-      for (let i = 0; i < 3; i++)
+      for (let i = 0; i < 4; i++)
         await assert.rejects(reviewContract(f.h, f.root, proposal, 'codex', runtimes));
       const attention = new AttentionService(f.store, f.h);
       const card = (await attention.active()).items.find((i) => i.source === 'review')!;
@@ -475,10 +483,11 @@ test('a finding longer than the card gets no panel decision: the card names the 
         command.command,
         /^devcontour review-decide --kind contract --subject "contract-/,
       );
-      // Текст находки — в ответе раунда её появления (первого), а не последнего.
+      // Текст находки — в ответе раунда её появления (второго), а не последнего.
       const subject = /--subject "([^"]+)"/.exec(command.command)![1];
       const rounds = executionOf(f.h).engine.reviews('contract', subject);
-      assert.ok(command.command.endsWith(`# находка: ${rounds[0].artifact}`), command.command);
+      assert.ok(command.command.endsWith(`# находка: ${rounds[1].artifact}`), command.command);
+      assert.notEqual(rounds[1].artifact, rounds[3].artifact);
       assert.match(card.reason, /не помещается в карточку/);
       await assert.rejects(
         attention.act({

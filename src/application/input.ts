@@ -533,9 +533,14 @@ export function stopQuestions(h: DevContour, workId?: string): Map<string, Input
 export function ownerAnswersAgain(summary: { state: string; leadAnswerHeld?: true }) {
   return (
     !!summary.leadAnswerHeld &&
-    ['answer-saved', 'context-review', 'ready-to-apply', 'review-rejected', 'stale'].includes(
-      summary.state,
-    )
+    [
+      'answer-saved',
+      'context-review',
+      'ready-to-apply',
+      'review-rejected',
+      'contract-change-required',
+      'stale',
+    ].includes(summary.state)
   );
 }
 
@@ -1048,9 +1053,14 @@ export class InputService {
     // Ответ ведущего на вопрос владельца не доводится: отвечает владелец.
     if (
       this.leadAnswerHeld(request) &&
-      ['answer-saved', 'context-review', 'ready-to-apply', 'review-rejected', 'stale'].includes(
-        state,
-      )
+      [
+        'answer-saved',
+        'context-review',
+        'ready-to-apply',
+        'review-rejected',
+        'contract-change-required',
+        'stale',
+      ].includes(state)
     )
       return {
         actor: 'operator' as const,
