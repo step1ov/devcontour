@@ -1257,7 +1257,7 @@ test('Home strings never carry lead commands: each pause kind gets its operator 
             at: at(60_000),
             type: 'scheduler.error',
             data: { error: 'нужен devcontour --workspace /p base-update --by host' },
-          } as AuditEvent,
+          },
         ],
       ],
     ];
