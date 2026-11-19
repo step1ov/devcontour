@@ -5,9 +5,11 @@ import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { DatabaseSync } from 'node:sqlite';
 import {
+  API_VERSION,
   WORKSPACE_OWNER,
   digestOf,
   type ExecutionStore,
+  type ExecutionTransaction,
   type JointVerificationState,
 } from 'devcontour-harness';
 import { executionStoreContract } from 'devcontour-harness/testing';
@@ -127,6 +129,49 @@ for (const [name, open] of [
   ['central', central],
   ['component', component],
 ] as const) {
+  test(`${name}: продление совместной проверки с чтением документа нейтрально, правка через stateOf после него — нет (F79)`, () => {
+    const dir = temp();
+    const s = open(dir);
+    try {
+      seed(s.store);
+      const active: JointVerificationState = {
+        apiVersion: API_VERSION,
+        id: 'jv-renew',
+        token: 'token-'.padEnd(32, 'x'),
+        leaseUntil: Date.now() + 60_000,
+        startedAt: '2026-01-01T00:00:00.000Z',
+        status: 'active',
+        policyDigest: policy,
+        specDigest: digestOf('spec'),
+        workIds: ['T-1'],
+        evidence: [],
+      };
+      contractOptions.startVerification(s, active);
+      const renew = (tx: ExecutionTransaction) => {
+        // Порты хоста читают документ до продления (`jointUpdate`).
+        assert.ok(s.stateOf(tx).tasks.length);
+        const current = tx.verification(active.id)!;
+        tx.putVerification({ ...current, leaseUntil: current.leaseUntil + 1 });
+      };
+      const idle = s.store.idleVersion();
+      const lease = s.store.version().lease;
+      s.transact('heartbeat', (tx) => renew(tx));
+      assert.ok(s.store.version().lease > lease, 'продление записано');
+      assert.deepEqual(s.store.idleVersion(), idle, 'продление с чтением — нейтральная запись');
+      s.transact('heartbeat', (tx) => {
+        renew(tx);
+        s.stateOf(tx).tasks[0].hold = { operation: 'fixture', reason: 'fixture' };
+      });
+      assert.ok(
+        s.read((v) => s.stateOf(v).tasks[0].hold),
+        'правка записана',
+      );
+      assert.notDeepEqual(s.store.idleVersion(), idle, 'правка через stateOf открывает шлюз');
+    } finally {
+      s.close();
+    }
+  });
+
   test(`${name}: задача доски — поручение графа доски; поля продукта сохраняются при записи исполнения`, () => {
     const dir = temp();
     const s = open(dir);
@@ -405,7 +450,10 @@ for (const [name, open] of [
     assert.equal(s.store.read().tasks[0].status, 'running', 'внешняя транзакция сохранена');
     assert.equal(s.store.read().tasks[0].title, 'Добавить приветствие');
     assert.deepEqual(
-      s.store.allEvents().slice(events).map((e) => e.type),
+      s.store
+        .allEvents()
+        .slice(events)
+        .map((e) => e.type),
       ['run.claimed'],
       'события вложенного изменения в журнале нет',
     );
@@ -423,10 +471,7 @@ for (const [name, open] of [
         }),
       nested,
     );
-    assert.throws(
-      () => s.store.change('a', () => s.store.update('b', (d) => d.current)),
-      nested,
-    );
+    assert.throws(() => s.store.change('a', () => s.store.update('b', (d) => d.current)), nested);
     assert.equal(s.store.read().tasks[0].title, 'Добавить приветствие');
     assert.equal(s.store.read().tasks[0].status, 'running');
     assert.equal(s.store.eventCount(), events + 1);

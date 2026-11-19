@@ -467,6 +467,10 @@ export class Store {
               raw.changeSets ??= [];
               for (const task of raw.tasks) task.repositoryId ??= 'main';
               this.components.write(raw);
+              // Документ и локальные записи переезжают в базы компонентов:
+              // процесс, открывший базу раньше, видит их иначе — ревизия
+              // данных растёт, как у любой записи данных.
+              this.bump('data');
               const events = this.db
                 .prepare('SELECT * FROM main.events ORDER BY id')
                 .all() as unknown as { id: number; at: string; type: string; data: string }[];
@@ -1125,8 +1129,16 @@ export class Store {
    * То же изменение, но документ открывается только при первом вызове
    * `draft()`. Транзакция, которая его не открыла (продление аренды строкой),
    * документ не разбирает, не пишет и событий журнала не пишет.
+   *
+   * `renewalOnly` для изменения `heartbeat` вызывается после успешного
+   * действия, когда вызывающий знает все его записи: `true` — документ
+   * изменён только в сроках владения (продление срока совместной проверки).
+   * Такая запись этого процесса выдачу не меняет — нейтральна для
+   * `idleVersion` (F79). Без него документ, изменённый под видом heartbeat,
+   * шлюз простоя открывает. Решение — значение этого вызова, а не состояние
+   * соединения: откат точки сохранения его не переносит на другое изменение.
    */
-  lazyUpdate<T>(type: string, action: (draft: () => Draft) => T): T {
+  lazyUpdate<T>(type: string, action: (draft: () => Draft) => T, renewalOnly?: () => boolean): T {
     // Вложенное изменение записало бы документ и событие журнала, а внешнее
     // при фиксации переписало бы документ своей копией: изменение пропало
     // бы, событие о нём осталось. Отказ — до любой записи.
@@ -1147,7 +1159,9 @@ export class Store {
       } finally {
         this.editing = false;
       }
-      return open ? this.closeDraft(open, type, result) : result;
+      if (!open) return result;
+      const neutral = type === 'heartbeat' && renewalOnly?.() === true;
+      return this.closeDraft(open, type, result, neutral);
     });
   }
   /** Начало изменения: документ транзакции (`Draft`) со сроками и ролью из строк. */
@@ -1213,7 +1227,12 @@ export class Store {
     };
   }
   /** Конец изменения: документ с метками, строки роли и аренды, событие журнала. */
-  private closeDraft<T>(open: ReturnType<Store['openDraft']>, type: string, result: T): T {
+  private closeDraft<T>(
+    open: ReturnType<Store['openDraft']>,
+    type: string,
+    result: T,
+    renewalOnly = false,
+  ): T {
     const { draft, row, before, documentLeader, leases } = open;
     const leader = draft.leader;
     const leaderChanged = JSON.stringify(leader ?? null) !== open.leaderBefore;
@@ -1318,8 +1337,12 @@ export class Store {
     // Продление строк аренды под видом heartbeat выдачу не меняет (F79):
     // для шлюза простоя — нейтральная запись этого процесса. Документ,
     // изменённый под видом heartbeat, — нет: движок может записать в такой
-    // транзакции и то, что меняет выдачу (снятое удержание).
-    if (documentChanged) this.bump(type === 'heartbeat' ? 'lease' : 'data');
+    // транзакции и то, что меняет выдачу (снятое удержание). Документ, в
+    // котором вызывающий изменил только сроки (`renewalOnly` у `lazyUpdate`:
+    // продление срока совместной проверки), — тоже нейтральная запись.
+    if (documentChanged)
+      if (type === 'heartbeat') this.bumpAs('lease', renewalOnly);
+      else this.bump('data');
     else if (type !== 'heartbeat' || leasesChanged) this.bumpAs('lease', type === 'heartbeat');
     if (type !== 'heartbeat') {
       const at = new Date().toISOString();
@@ -1849,6 +1872,18 @@ export class Store {
       .prepare(`DELETE FROM ${schema}.local_workflow WHERE namespace=? AND owner=? AND key=?`)
       .run(namespace, owner ?? '@workspace', key);
     if (removed.changes) this.bump('data');
+  }
+  /** Открыта ли транзакция записи (`atomic`) этого соединения. */
+  get inTransaction() {
+    return this.transaction;
+  }
+  /**
+   * Поднять ревизию данных в открытой транзакции: изменение, которое Store
+   * по виду считает продлением сроков (`heartbeat`), изменило данные.
+   */
+  markDataChanged() {
+    if (!this.transaction) throw new Error('Store.markDataChanged требует открытой транзакции');
+    this.bump('data');
   }
   private bump(kind: 'data' | 'lease') {
     this.db

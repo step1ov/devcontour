@@ -124,11 +124,44 @@ test('F62: пакет передачи — счёт отброшенных пр�
     );
     // 12 настоящих провалов, показано 10.
     assert.equal(whole.truncated.failures, 2);
+    // Прерывания пакет harness считает отдельно (0.1.0-alpha.52).
+    assert.equal(whole.interruptions, 2);
 
     const scoped = devcontourHandoff(f.h, { boardId: a.id }).pack;
     assert.equal(scoped.failures.length, 10);
     // Прерывание на доске B не уменьшает счёт пакета доски A.
     assert.equal(scoped.truncated.failures, 2);
+    assert.equal(scoped.interruptions, 1);
+  } finally {
+    f.cleanup();
+  }
+});
+
+test('F62: десять прерываний новее настоящего провала не вытесняют его из пакета передачи', async () => {
+  const f = fixture();
+  try {
+    const b = f.h.createBoard('Board');
+    f.h.addTask(b.id, input('Failing task'));
+    f.h.addTask(b.id, input('Interrupted task'));
+    f.h.approve(b.id);
+    f.h.pause(false);
+    const first = f.h.claim('test')!;
+    f.h.fail(first.id, first.token, 'gate failed', false, 'gate');
+    // Прерванная попытка не засчитана: та же задача выдаётся снова.
+    for (let i = 0; i < 10; i++) {
+      await new Promise((resolve) => setTimeout(resolve, 3));
+      const run = f.h.claim('test')!;
+      assert.ok(run, 'задача снова выдаётся после прерывания');
+      interrupt(f, run);
+    }
+    const pack = devcontourHandoff(f.h).pack;
+    assert.deepEqual(
+      pack.failures.map((x) => x.runId),
+      [first.id],
+      'настоящий провал в списке',
+    );
+    assert.equal(pack.truncated.failures, 0);
+    assert.equal(pack.interruptions, 10);
   } finally {
     f.cleanup();
   }
