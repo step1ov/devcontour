@@ -7,6 +7,9 @@ import {
 } from './runner/workspace-mode.ts';
 import { startWorkspace, requirePreparation, preparationStore } from './runner/start.ts';
 import { PreparationAgent, WorkspaceAgent } from './application/preparation-agent.ts';
+import { Preparation } from './core/preparation.ts';
+import { questionSections } from './core/preparation-model.ts';
+import { answeredPending, choicesOf, sectionOf } from './core/owner-questions.ts';
 import { preparationInputs } from './core/preparation-model.ts';
 import { proveScenario } from './runner/scenario-proof.ts';
 import { IntentService } from './runner/intent.ts';
@@ -426,6 +429,80 @@ async function main() {
       }
       return;
     }
+  }
+  // Вопросы владельцу: список (только чтение) и ответ оператора из CLI — та
+  // же запись, что форма панели. До setup и после него.
+  if (operation === 'questions') {
+    const store = preparationStore(root, true);
+    try {
+      const section = args.includes('--section') ? option('--section', '') : undefined;
+      if (section && !(questionSections as readonly string[]).includes(section))
+        throw new Error('--section: ' + questionSections.join('|'));
+      const all = args.includes('--all');
+      const rows = (store.read().preparation?.changes ?? []).flatMap((c) =>
+        (c.questions ?? [])
+          .filter(
+            (q) =>
+              (all || q.status === 'open' || answeredPending(c, q)) &&
+              (!section || sectionOf(q) === section),
+          )
+          .map((q) => ({
+            changeId: c.id,
+            id: q.id,
+            section: sectionOf(q),
+            stage: q.stage,
+            status: q.status,
+            ...(answeredPending(c, q) ? { pendingLead: true } : {}),
+            text: q.text,
+            ...(q.why ? { why: q.why } : {}),
+            choices: choicesOf(q),
+            ...(q.recommended !== undefined ? { recommended: q.recommended } : {}),
+            ...(q.links ? { links: q.links } : {}),
+            ...(q.blocks ? { blocks: q.blocks } : {}),
+            ...(q.origin ? { origin: q.origin } : {}),
+            ...(q.answer ? { answer: q.answer } : {}),
+          })),
+      );
+      console.log(JSON.stringify({ questions: rows }, null, 2));
+    } finally {
+      store.close();
+    }
+    return;
+  }
+  if (operation === 'question-answer') {
+    const questionId = option('--id', '');
+    if (!questionId) throw new Error('Укажите --id Q-…');
+    const store = preparationStore(root);
+    try {
+      const change = store
+        .read()
+        .preparation?.changes.find((c) => (c.questions ?? []).some((q) => q.id === questionId));
+      if (!change) throw new Error('Вопрос не найден: ' + questionId);
+      const text = args.includes('--text') ? option('--text', '') : undefined;
+      const choice = args.includes('--option') ? Number(option('--option', '')) : undefined;
+      if (choice !== undefined && !Number.isInteger(choice))
+        throw new Error('--option: номер варианта с 0');
+      new Preparation(store, 'operator').answer({
+        changeId: change.id,
+        questionId,
+        ...(text ? { text } : {}),
+        ...(choice !== undefined ? { choice } : {}),
+      });
+      const q = store
+        .read()
+        .preparation!.changes.find((c) => c.id === change.id)!
+        .questions.find((x) => x.id === questionId)!;
+      console.log(
+        JSON.stringify(
+          { changeId: change.id, id: q.id, status: q.status, answer: q.answer },
+          null,
+          2,
+        ),
+      );
+    } finally {
+      store.close();
+    }
+    return;
   }
   if (operation === 'sync' && workspacePath && !(await exists(join(root, 'config.json')))) {
     const store = preparationStore(root);

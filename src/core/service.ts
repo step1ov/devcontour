@@ -1,3 +1,4 @@
+import { assertNotHeld } from './owner-questions.ts';
 import { domain, executionOf } from '../harness/execution.ts';
 import { readFileSync, realpathSync } from 'node:fs';
 import {
@@ -1908,6 +1909,13 @@ export class DevContour {
           }))
       )
         throw new DomainError('План изменился во время ревью; требуется повторная проверка');
+      // Черновик, который держит вопрос владельцу, не выпускается, пока
+      // вопрос не решён или не снят (409 QUESTION_PENDING): правка черновика
+      // удержание не снимает.
+      assertNotHeld(
+        s,
+        selected.filter((id) => task(s, id).status === 'draft'),
+      );
       // Связь с историей INTENT — предусловие выпуска, как связь с фичей:
       // без неё принятая работа держала бы историю непроверенной навсегда.
       storyCheck(selected.map((id) => task(s, id)).filter((t) => t.status === 'draft'));

@@ -32,6 +32,8 @@ import { z } from 'zod';
 import { dirname, resolve } from 'node:path';
 import { heldByServer } from '../runner/server-record.ts';
 import { DomainError, type Config, type DevContourState } from '../core/model.ts';
+import type { QuestionSection } from '../core/preparation-model.ts';
+import { answeredPending, choicesOf, questionHolds, sectionOf } from '../core/owner-questions.ts';
 import type { DevContour } from '../core/service.ts';
 import {
   LeadWorkflow,
@@ -162,7 +164,7 @@ interface HandoffHostNextFields {
    * О чём решение `decide`: `plan` — план доски не согласован (объём работы
    * решает ведущий или пользователь), `job` — задание ведущего.
    */
-  decision?: 'plan' | 'job';
+  decision?: 'plan' | 'job' | 'question';
   /** Задачи, из-за которых план не согласован (`decision: plan`). */
   plan?: {
     drafts: string[];
@@ -183,7 +185,15 @@ interface HandoffHostNextFields {
      */
     misrouted?: { id: string; role: string; path: string; owners: string[] }[];
     misroutedCount?: number;
+    /**
+     * Черновики, которые держит вопрос владельцу (до 20): вне ревью до
+     * решения по вопросу (`preparation_resolve`) или его снятия.
+     */
+    questions?: { id: string; questionId: string }[];
+    questionsCount?: number;
   };
+  /** Вопрос владельцу, к которому относится шаг (`owner-answer`). */
+  question?: { id: string; changeId: string; section: QuestionSection };
   /**
    * Вопрос исполнителя, к которому относится шаг (`answer-input`, `apply-input`,
    * `close-follow-up`); у переноса ответа заменённого вопроса (`apply-carry`)
@@ -269,7 +279,117 @@ export interface DevContourHandoff {
       }[];
       more?: number;
     };
+    /**
+     * Вопросы владельцу (`preparation_question`) по всему workspace: открытые
+     * по разделам и ответы, которые ждут решения ведущего (до пяти, старые
+     * первыми, выдержки после редактора секретов; `more` — сколько ещё).
+     * Ответ закрывается `preparation_resolve` с `questionId` и `refs`;
+     * `held` — черновиков, которые держат вопросы. Нет поля — вопросов нет.
+     */
+    questions?: HandoffQuestions;
   };
+}
+
+export interface HandoffQuestions {
+  open: Record<QuestionSection, number>;
+  answered: {
+    id: string;
+    changeId: string;
+    section: QuestionSection;
+    stage: string;
+    text: string;
+    answer: string;
+    choice?: string;
+    links?: Record<string, string[]>;
+    blocks?: string[];
+  }[];
+  more?: number;
+  held: number;
+}
+
+/** Предел записей `host.questions.answered` и выдержки их текстов. */
+const HANDOFF_QUESTIONS = 5;
+const QUESTION_EXCERPT = 300;
+const excerpt = (text: string) => {
+  const chars = [...text.replace(/\s+/g, ' ').trim()];
+  return chars.length > QUESTION_EXCERPT
+    ? chars.slice(0, QUESTION_EXCERPT - 1).join('') + '…'
+    : chars.join('');
+};
+
+/** Ответы владельца без решения ведущего: старые первыми. */
+function answeredQuestions(state: State) {
+  return (state.preparation?.changes ?? [])
+    .flatMap((c) => (c.questions ?? []).filter((q) => answeredPending(c, q)).map((q) => ({ c, q })))
+    .sort((a, b) => a.q.answer!.at.localeCompare(b.q.answer!.at));
+}
+
+/** `host.questions` по состоянию; маска — до выдержки. */
+function questionsOfHandoff(state: State, redact: Redactor): HandoffQuestions | undefined {
+  const open: HandoffQuestions['open'] = { product: 0, architecture: 0, design: 0, development: 0 };
+  for (const c of state.preparation?.changes ?? [])
+    for (const q of c.questions ?? []) if (q.status === 'open') open[sectionOf(q)]++;
+  const all = answeredQuestions(state);
+  const holds = questionHolds(state);
+  if (!all.length && !Object.values(open).some(Boolean)) return undefined;
+  const answered = all.slice(0, HANDOFF_QUESTIONS).map(({ c, q }) => {
+    const chosen = q.answer!.choice !== undefined ? choicesOf(q)[q.answer!.choice] : undefined;
+    const blocks = (q.blocks?.taskIds ?? []).filter((id) => holds.get(id)?.questionId === q.id);
+    const links = Object.fromEntries(
+      Object.entries(q.links ?? {}).filter(([, ids]) => (ids as string[] | undefined)?.length),
+    ) as Record<string, string[]>;
+    return {
+      id: q.id,
+      changeId: c.id,
+      section: sectionOf(q),
+      stage: q.stage,
+      text: excerpt(redact(q.text)),
+      answer: excerpt(redact(q.answer!.text)),
+      ...(chosen ? { choice: excerpt(redact(chosen.label)) } : {}),
+      ...(Object.keys(links).length ? { links } : {}),
+      ...(blocks.length ? { blocks } : {}),
+    };
+  });
+  return {
+    open,
+    answered,
+    ...(all.length > answered.length ? { more: all.length - answered.length } : {}),
+    held: holds.size,
+  };
+}
+
+/** Шаг по ответу владельца: старейший ответ без решения ведущего. */
+function ownerAnswerStep(ctx: HostContext): HandoffHostNext | undefined {
+  const all = answeredQuestions(ctx.state);
+  const first = all[0];
+  if (!first) return undefined;
+  return withDetail(ctx.h, {
+    action: 'decide',
+    decision: 'question',
+    question: { id: first.q.id, changeId: first.c.id, section: sectionOf(first.q) },
+    code: 'owner-answer',
+    params: { count: all.length, stage: first.q.stage },
+  });
+}
+
+/**
+ * Ожидание владельца: шагов нет, а черновики держат открытые вопросы — не
+ * холостой цикл, а ожидание ответа в панели.
+ */
+function ownerWaitStep(ctx: HostContext): HandoffHostNext | undefined {
+  const all = questionHolds(ctx.state);
+  const holds = [...all.values()].filter((x) => x.status === 'open');
+  // Только когда вся невыпущенная работа удержана: иначе шаг — её план.
+  if (!holds.length || ctx.state.tasks.some((t) => t.status === 'draft' && !all.has(t.id)))
+    return undefined;
+  return withDetail(ctx.h, {
+    action: 'wait',
+    code: 'owner-question-pending',
+    params: {
+      questions: [...new Set(holds.map((x) => x.questionId))].slice(0, PLAN_HINT_IDS),
+      held: holds.length,
+    },
+  });
 }
 
 /** Предел записей `host.corrections`. */
@@ -876,9 +996,22 @@ export function planStep(boardId: string, ctx: HostContext): HandoffHostNext | u
   // не включает их в область ревью, а без других задач ревью не предлагает
   // вовсе — оно было бы оплачено впустую. Списки с текстом причин ограничены,
   // как подсказка: `host` не растёт с числом черновиков.
-  const held = new Set([...why.blocked.map((b) => b.id), ...why.unverified]);
+  const asked = new Set(why.questions.map((q) => q.id));
+  const held = new Set([...why.blocked.map((b) => b.id), ...why.unverified, ...asked]);
   const scope = [...why.drafts, ...why.stale];
   const review = scope.filter((id) => !held.has(id));
+  // Вся оставшаяся работа плана ждёт ответа владельца: решения о плане нет,
+  // есть ожидание вопроса (ответ придёт в host.questions и шагом owner-answer).
+  if (!review.length && !why.unverified.length && !why.blocked.length && asked.size)
+    return withDetail(ctx.h, {
+      action: 'wait',
+      boardId,
+      code: 'owner-question-pending',
+      params: {
+        questions: [...new Set(why.questions.map((q) => q.questionId))],
+        held: asked.size,
+      },
+    });
   const plan = {
     drafts: why.drafts,
     stale: why.stale,
@@ -891,6 +1024,12 @@ export function planStep(boardId: string, ctx: HostContext): HandoffHostNext | u
       reason: b.reason.length > REASON_CHARS ? b.reason.slice(0, REASON_CHARS - 1) + '…' : b.reason,
     })),
     blockedCount: why.blocked.length,
+    ...(why.questions.length
+      ? {
+          questions: why.questions.slice(0, PLAN_HINT_IDS),
+          questionsCount: why.questions.length,
+        }
+      : {}),
     ...(why.misrouted.length
       ? {
           misrouted: why.misrouted.slice(0, PLAN_HINT_IDS).map((m) => ({
@@ -1423,7 +1562,11 @@ function hostNext(ctx: HostContext): HandoffHostNext | undefined {
   // Они — раньше решения о плане.
   // Действующее задание другой доски — тоже раньше: решение о плане не
   // срочнее работы других досок (`rank`), и шаг называет, что идёт сейчас.
-  if (step?.decision === 'plan') return liveBlocker(ctx) ?? liveJobStep(ctx, step.boardId) ?? step;
+  // Ответ владельца на вопрос ведущего — ниже вопросов исполнителя и
+  // решений о задании, выше решения о плане: удержанные им черновики ждут
+  // решения ведущего по ответу.
+  if (step?.decision === 'plan')
+    return liveBlocker(ctx) ?? ownerAnswerStep(ctx) ?? liveJobStep(ctx, step.boardId) ?? step;
   // Перенос ответа — раньше шагов очереди и ожидания (`rank` больше 0): они
   // выдали бы задачу без ответа. Решения о задании, вопросы и режим
   // оператора — прежде переноса.
@@ -1435,16 +1578,18 @@ function hostNext(ctx: HostContext): HandoffHostNext | undefined {
   // другие ожидания и шаги паузы: снятие паузы до переноса выдало бы задачу
   // без ответа.
   const carry = carryNext(ctx);
+  if (carry && carry.action !== 'wait') return carry;
+  const owner = ownerAnswerStep(ctx);
+  if (owner) return owner;
   if (
     carry &&
-    (carry.action !== 'wait' ||
-      !step ||
+    (!step ||
       rank(step) >= rank(carry) ||
       step.action === 'queue_set' ||
       step.boardId === carry.boardId)
   )
     return carry;
-  return step ?? followUpNext(ctx);
+  return step ?? followUpNext(ctx) ?? ownerWaitStep(ctx);
 }
 
 /**
@@ -1884,12 +2029,14 @@ export function devcontourHandoffWithin(
       // усечения текста (`boardsWaitingOf`), иначе усечённый секрет ей не узнать.
       let changesets = changesetsOf(h, state, boardId, options.redact);
       const corrections = correctionsOfHandoff(h, state, boardId);
+      const questions = questionsOfHandoff(state, options.redact);
       const withDiscussion = (discussion: DevContourHandoff['host']['discussion']) => ({
         ...(next ? { next } : {}),
         liveBoards,
         ...(verifications ? { verifications } : {}),
         ...(changesets ? { changesets } : {}),
         ...(corrections ? { corrections } : {}),
+        ...(questions ? { questions } : {}),
         ...(discussion ? { discussion } : {}),
       });
       let budget = limit
@@ -2082,6 +2229,22 @@ function hostMarkdown(
                 .map((r) => `${r.taskId} (${r.id}${r.reopened ? ', есть ответ оператора' : ''})`)
                 .join(', ')}${host.discussion.nextCursor ? ' и ещё — discussion_inbox' : ''}`
             : '- Есть обращения к ведущему без обработки — discussion_inbox',
+        ]
+      : []),
+    ...(host.questions
+      ? [
+          `- Вопросы владельцу: открыто ${
+            Object.entries(host.questions.open)
+              .filter(([, n]) => n)
+              .map(([section, n]) => `${section} ${n}`)
+              .join(', ') || '0'
+          }; удержано черновиков: ${host.questions.held}${
+            host.questions.answered.length
+              ? `; ответы ждут решения ведущего (preparation_resolve): ${host.questions.answered
+                  .map((q) => `${q.id} (${q.section})`)
+                  .join(', ')}${host.questions.more ? ` и ещё ${host.questions.more}` : ''}`
+              : ''
+          }`,
         ]
       : []),
     ...(refs

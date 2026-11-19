@@ -30,6 +30,7 @@ const item = (over: Partial<AttentionItem> & { sourceKey: string }): AttentionIt
   source: 'input',
   category: 'question',
   actor: 'operator',
+  section: 'development',
   title: 'Карточка ' + over.sourceKey,
   reason: 'Причина',
   impact: { tasks: 1, waiting: 0, boards: [], taskIds: [] },
@@ -52,6 +53,12 @@ const view = (items: AttentionItem[], over: Partial<AttentionView> = {}): Attent
     byActor: {
       operator: { active: 0, unread: 0 },
       lead: { active: 0, unread: 0 },
+    },
+    bySection: {
+      product: { operator: 0, lead: 0, unread: 0 },
+      architecture: { operator: 0, lead: 0, unread: 0 },
+      design: { operator: 0, lead: 0, unread: 0 },
+      development: { operator: 0, lead: 0, unread: 0 },
     },
   },
   items,
@@ -172,6 +179,12 @@ test('Optimistic marks apply only to the version shown and lower the badge', () 
       active: 250,
       unread: 230,
       byActor: { operator: { active: 0, unread: 0 }, lead: { active: 0, unread: 0 } },
+      bySection: {
+        product: { operator: 0, lead: 0, unread: 0 },
+        architecture: { operator: 0, lead: 0, unread: 0 },
+        design: { operator: 0, lead: 0, unread: 0 },
+        development: { operator: 0, lead: 0, unread: 0 },
+      },
     },
   });
   const marked = withOptimistic(

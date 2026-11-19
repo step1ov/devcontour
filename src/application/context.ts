@@ -1,3 +1,4 @@
+import { questionHolds } from '../core/owner-questions.ts';
 import { memoryDirectory } from '../core/placement.ts';
 import { assertTaskPreparation } from '../core/preparation.ts';
 import { ProjectMemory } from './memory.ts';
@@ -155,6 +156,9 @@ export function taskProgress(h: DevContour, s: DevContourState, t: Task, now: nu
   // паузу или зависимости и не знал, что задача не выйдет и после них.
   const hold = t.hold && !['done', 'cancelled'].includes(t.status) ? t.hold : undefined;
   if (hold) before.push('held_by_operation');
+  // Черновик держит вопрос владельцу: до решения по вопросу он не выпускается.
+  const question = t.status === 'draft' ? questionHolds(s).get(t.id) : undefined;
+  if (question) before.push('owner_question_pending');
   // Бюджет не пускает задачу к выдаче: причина (какой предел, сколько
   // израсходовано) видна на карточке задачи, а не только в цепочке ожидания.
   // Записанный `budgetBlock` — лишь кэш расчёта claim (claim его не обновляет

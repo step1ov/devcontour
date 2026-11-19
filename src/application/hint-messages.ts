@@ -158,6 +158,16 @@ export interface HintParamMap {
    * (шаг `queue_set`), иначе по окончании попыток задачу выдадут без ответа.
    */
   'apply-carry': { order: CarryOrder; active?: string[]; pause?: true; userPause?: true };
+  /**
+   * Владелец ответил на вопрос ведущего (`question` шага), решения ведущего
+   * по ответу ещё нет; `count` — всего таких ответов (`host.questions.answered`).
+   */
+  'owner-answer': { count: number; stage: string };
+  /**
+   * Оставшуюся работу плана держат открытые вопросы владельцу (`questions`,
+   * до 20 id); `held` — удержанных черновиков.
+   */
+  'owner-question-pending': { questions: string[]; held: number };
 }
 /** Порядок переноса ответа заменённого вопроса (`apply-carry`). */
 export type CarryOrder = 'draft' | 'unreleased' | 'now';
@@ -179,8 +189,11 @@ export interface HintSubject {
     blockedCount: number;
     misrouted?: { id: string; role: string; path: string; owners: string[] }[];
     misroutedCount?: number;
+    questions?: { id: string; questionId: string }[];
+    questionsCount?: number;
   };
   input?: { requestId: string; taskId: string };
+  question?: { id: string; changeId: string; section: string };
 }
 
 /** Код шага и его параметры одной парой (по ней сужается тип параметров). */
@@ -293,6 +306,13 @@ function planEn(p: HintParamMap['plan-unapproved'], s: HintSubject) {
   const misrouted = plan.misroutedCount
     ? ` ${plan.misroutedCount} finding draft(s) have a role whose write scope does not cover the finding path, so its writer could not edit that file: set the owning role (in parentheses after the arrow) when triaging them (${EDIT_EN}; an edit that changes only the role keeps the finding unverified, for one that waits on an owner decision): ${misroutedList(s, 'no role with an explicit scope')}.`
     : '';
+  const asked = plan.questionsCount
+    ? ` ${plan.questionsCount} draft task(s) wait on an owner question and stay out of review until the question is resolved (preparation_resolve) or withdrawn; editing them does not release them: ${hintList(
+        (plan.questions ?? []).map((q) => `${q.id} (${q.questionId})`),
+        plan.questionsCount,
+        'plan.questions',
+      )}.`
+    : '';
   const stopper = p.stopper
     ? ` Task ${p.stopper} of this revision was cancelled by a person or after issue (D46): every lead workflow job of the revision stops on it before its tasks run, and tasks approved here would run with no job to repair or accept them. Retry ${p.stopper} if it is still needed (task_retry), or plan the replacement on a new board (plan_import without boardId, then workflow_start {"kind": "board"}); move drafts that belong there with task_move.`
     : '';
@@ -306,7 +326,7 @@ function planEn(p: HintParamMap['plan-unapproved'], s: HintSubject) {
   const next = plan.reviewCount
     ? ` Review the plan with an explicit scope (plan_review ${reviewArgs(s, whole)}, CLI devcontour review-plan --board ${boardId} ${tasks}--author-runtime codex|claude --workspace …, keeping only the tasks to run; plan review also checks INTENT story bindings, which this hint does not), or edit/cancel the tasks first; register workflow_start only for an approved plan.`
     : ` No task of the plan is ready for review: review only after these are handled — once triaged, release just those drafts (their ids as tasks) with plan_review {"boardId": ${JSON.stringify(boardId)}, "tasks": ["ID"], "authorRuntime": "codex|claude"} (CLI devcontour review-plan --board ${boardId} --tasks ID,ID); the other drafts stay drafts. Register workflow_start only for an approved plan.`;
-  return `The plan of board ${boardId} is not approved (${plan.drafts.length} draft task(s)${plan.stale.length ? `, ${plan.stale.length} approved under another policy` : ''}).${stopper}${unverified}${misrouted}${blocked} workflow_start would send the whole plan to review and run every task once approved: choosing the scope is the lead's or the user's decision.${next}`;
+  return `The plan of board ${boardId} is not approved (${plan.drafts.length} draft task(s)${plan.stale.length ? `, ${plan.stale.length} approved under another policy` : ''}).${stopper}${unverified}${misrouted}${blocked}${asked} workflow_start would send the whole plan to review and run every task once approved: choosing the scope is the lead's or the user's decision.${next}`;
 }
 
 const failedEn = (error: string | undefined) => (error ? ': ' + error : '');
@@ -316,6 +336,12 @@ const en: Catalog = {
   operator: () =>
     'approvalMode operator: lead workflow jobs do not run. The operator reviews plans and accepts boards in the panel, starts the queue (devcontour queue --start --workspace …) and retries failed tasks (devcontour retry --task ID --workspace …).',
   'plan-unapproved': planEn,
+  'owner-answer': (p, s) => {
+    const q = s.question!;
+    return `The owner answered question ${q.id} (section ${q.section}) of change ${q.changeId}${p.count > 1 ? `; ${p.count} answers wait for you in host.questions.answered` : ''}. Act on the answer in its section — product: a product revision (preparation_product, then preparation_submit for the owner) and/or an ADR in the product repository; architecture: contract-change or an architecture revision; design: a revision of the design stage; development: board and task edits (edit-task, task_move, cancel --by host) — then close it: preparation_resolve {"changeId": ${JSON.stringify(q.changeId)}, "questionId": ${JSON.stringify(q.id)}, "statement": …, "rationale": …, "refs": {"productRevision"|"boardId"|"taskIds"|"contractChangeId"|"adr": …}}. Drafts the question holds stay out of plan review until then; edit them to match the answer first.`;
+  },
+  'owner-question-pending': (p, s) =>
+    `${s.boardId ? `The remaining plan of board ${s.boardId}` : 'The remaining work'} waits on the owner: open question(s) ${p.questions.slice(0, 5).join(', ')}${p.questions.length > 5 ? ', …' : ''} hold ${p.held} draft task(s) (host.questions). Do not review or start these drafts and do not ask again in chat or repository files: the owner answers in the panel, and the answer comes back in session_handoff as host.questions.answered and host.next owner-answer. Withdraw a question (preparation_question {"withdraw": [ID]}) only if it no longer applies.`,
   'job-stops': (p, s) =>
     `Next, at stage ${p.stage}, the lead workflow job of board ${s.boardId!} stops: ${reasonOf(s.loop)}. ${STOP_REMEDY_EN}`,
   'job-live': (p, s) =>
@@ -561,6 +587,13 @@ function planRu(p: HintParamMap['plan-unapproved'], s: HintSubject) {
   const misrouted = plan.misroutedCount
     ? ` Черновики находок, роль которых не может изменить файл находки (путь вне её области записи): ${plan.misroutedCount}. При разборе назначьте роль-владельца пути (после стрелки) (${EDIT_RU}; правка одной роли оставляет находку неразобранной — для ждущей решения владельца): ${misroutedList(s, 'нет роли с явной областью')}.`
     : '';
+  const asked = plan.questionsCount
+    ? ` Черновики, которые ждут решения владельца по вопросу: ${plan.questionsCount}. До решения по вопросу (preparation_resolve) или его снятия они вне ревью; правка их не выпускает: ${hintList(
+        (plan.questions ?? []).map((q) => `${q.id} (${q.questionId})`),
+        plan.questionsCount,
+        'plan.questions',
+      )}.`
+    : '';
   const stopper = p.stopper
     ? ` Задача ${p.stopper} этой ревизии отменена человеком или после выдачи (D46): любое задание ведущего ревизии остановится на ней раньше её задач, и утверждённые здесь задачи пошли бы без задания, которое их чинит и принимает. Повторите ${p.stopper}, если она ещё нужна (task_retry), или планируйте замену на новой доске (plan_import без boardId, затем workflow_start {"kind": "board"}); черновики, которым место там, переносите task_move.`
     : '';
@@ -574,7 +607,7 @@ function planRu(p: HintParamMap['plan-unapproved'], s: HintSubject) {
   const next = plan.reviewCount
     ? ` Проведите ревью плана с явной областью (plan_review ${reviewArgs(s, whole)}, CLI devcontour review-plan --board ${boardId} ${tasks}--author-runtime codex|claude --workspace …, оставив только задачи к исполнению; ревью плана проверяет и привязки к историям INTENT, чего эта подсказка не делает) или сначала исправьте либо отмените задачи; workflow_start регистрируйте только для утверждённого плана.`
     : ` Ни одна задача плана не готова к ревью: ревью — только после разбора этих задач; разобранные выпускайте отдельно (их id — в tasks) — plan_review {"boardId": ${JSON.stringify(boardId)}, "tasks": ["ID"], "authorRuntime": "codex|claude"} (CLI devcontour review-plan --board ${boardId} --tasks ID,ID), остальные черновики останутся черновиками. workflow_start регистрируйте только для утверждённого плана.`;
-  return `План доски ${boardId} не утверждён (черновиков: ${plan.drafts.length}${plan.stale.length ? `, утверждено при другой политике: ${plan.stale.length}` : ''}).${stopper}${unverified}${misrouted}${blocked} workflow_start отправил бы на ревью весь план и после утверждения запустил бы все его задачи: выбор объёма — решение ведущего или пользователя.${next}`;
+  return `План доски ${boardId} не утверждён (черновиков: ${plan.drafts.length}${plan.stale.length ? `, утверждено при другой политике: ${plan.stale.length}` : ''}).${stopper}${unverified}${misrouted}${blocked}${asked} workflow_start отправил бы на ревью весь план и после утверждения запустил бы все его задачи: выбор объёма — решение ведущего или пользователя.${next}`;
 }
 
 const failedRu = (error: string | undefined) => (error ? ': ' + error : '');
@@ -584,6 +617,12 @@ const ru: Catalog = {
   operator: () =>
     'approvalMode operator: задания ведущего не исполняются. Оператор проводит ревью планов и принимает доски в панели, запускает очередь (devcontour queue --start --workspace …) и повторяет упавшие задачи (devcontour retry --task ID --workspace …).',
   'plan-unapproved': planRu,
+  'owner-answer': (p, s) => {
+    const q = s.question!;
+    return `Владелец ответил на вопрос ${q.id} (раздел ${q.section}) изменения ${q.changeId}${p.count > 1 ? `; всего ответов ждут вас в host.questions.answered: ${p.count}` : ''}. Действуйте по разделу ответа — продукт: новая редакция постановки (preparation_product, затем preparation_submit владельцу) и/или ADR в репозитории продукта; архитектура: contract-change или новая редакция архитектуры; дизайн: редакция этапа дизайна; разработка: правка доски и задач (edit-task, task_move, cancel --by host) — затем закройте вопрос: preparation_resolve {"changeId": ${JSON.stringify(q.changeId)}, "questionId": ${JSON.stringify(q.id)}, "statement": …, "rationale": …, "refs": {"productRevision"|"boardId"|"taskIds"|"contractChangeId"|"adr": …}}. До этого удержанные вопросом черновики вне ревью плана; сначала исправьте их по ответу.`;
+  },
+  'owner-question-pending': (p, s) =>
+    `${s.boardId ? `Оставшийся план доски ${s.boardId}` : 'Оставшаяся работа'} ждёт владельца: открытые вопросы ${p.questions.slice(0, 5).join(', ')}${p.questions.length > 5 ? ', …' : ''} держат черновики (${p.held}) (host.questions). Не отправляйте эти черновики на ревью, не запускайте их и не переспрашивайте в чате или файлах репозитория: владелец отвечает в панели, ответ придёт в session_handoff как host.questions.answered и шаг host.next owner-answer. Снимайте вопрос (preparation_question {"withdraw": [ID]}) только если он больше не нужен.`,
   'job-stops': (p, s) =>
     `На следующем такте, на стадии ${p.stage}, задание ведущего доски ${s.boardId!} остановится: ${reasonOf(s.loop)}. ${STOP_REMEDY_RU}`,
   'job-live': (p, s) =>

@@ -1,3 +1,4 @@
+import { assertNotHeld } from '../core/owner-questions.ts';
 import { technicalReview } from 'devcontour-harness';
 import { attemptNumbers } from '../core/attempt-numbers.ts';
 import { clipAtBoundary } from '../core/clip.ts';
@@ -1116,6 +1117,12 @@ export async function reviewPlan(
     ...stopperWarning(state, boardId),
   };
   if (!drafts.length) return { status: 'already-approved', boardId, ...coverage };
+  // Черновики, которые держит вопрос владельцу, не выпускаются (409
+  // QUESTION_PENDING) — до вызова модели, как и предусловия утверждения.
+  assertNotHeld(
+    state,
+    drafts.filter((t) => t.status === 'draft').map((t) => t.id),
+  );
   // Предусловия утверждения — до ревью: отказ после одобрения тратил вызов
   // модели впустую. Повторное утверждение по политике постановку не меняет.
   drafts.filter((t) => t.status === 'draft').forEach((t) => h.approvable(state, t));

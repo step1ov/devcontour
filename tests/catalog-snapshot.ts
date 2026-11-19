@@ -233,5 +233,12 @@
 // предела ответа md — раздел DevContour ссылается на host.next.detail и
 // commands того же ответа вместо повтора их текста; прочие операции
 // байтово прежние.
-export const CATALOG_DIGEST = '400fda86407382ab00f5e5b5d6058a6b5ea23adc3ee4812c932d3412f9d90d3d';
+// Намеренное изменение (вопросы владельцу по разделам): preparation_question
+// принимает section и stage development, choices с consequence, recommended,
+// links, blocks, origin и revise, его stage необязателен; preparation_resolve —
+// refs и необязательный stage; описания preparation_question,
+// preparation_resolve и session_handoff называют разделы, удержание
+// черновиков (QUESTION_PENDING), host.questions и шаги owner-answer и
+// owner-question-pending; прочие операции байтово прежние.
+export const CATALOG_DIGEST = 'b6ef4f820432baedcfcf0cc1f86eb2d1d51ac1bd4d480c8dc3ab0c21767abf42';
 export const SNAPSHOT_VERSION = '0.4.0-alpha.7';

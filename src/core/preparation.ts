@@ -10,6 +10,7 @@ import {
   preparationState,
   type PreparationBinding,
   type PreparationOperation,
+  type PreparationQuestion,
   type ProductChange,
   type ArchitectureBrief,
   type ReferencesBrief,
@@ -19,6 +20,7 @@ import {
   type C4Diagram,
 } from './preparation-model.ts';
 import { slugify } from './slug.ts';
+import { choicesOf, placeQuestion, sectionOf } from './owner-questions.ts';
 const hash = (value: unknown) =>
   createHash('sha256')
     .update(
@@ -449,6 +451,49 @@ function validateJournal(c: ProductChange) {
     throw new DomainError('Повтор ID решения: ' + c.id);
   if (decisions.some((d) => d.questionId && !ids.includes(d.questionId)))
     throw new DomainError('Решение ссылается на несуществующий вопрос');
+  for (const q of questions) {
+    if (q.choices && q.options.length)
+      throw new DomainError('Варианты вопроса задаются либо choices, либо options: ' + q.id, 400);
+    const choices = choicesOf(q);
+    if (q.recommended !== undefined && q.recommended >= choices.length)
+      throw new DomainError('Рекомендованный вариант вне списка вариантов: ' + q.id, 400);
+    if (q.answer?.choice !== undefined && q.answer.choice >= choices.length)
+      throw new DomainError('Выбранный вариант вне списка вариантов: ' + q.id, 400);
+    if (q.section && q.section !== sectionOf({ stage: q.stage }))
+      throw new DomainError('Раздел вопроса не соответствует этапу: ' + q.id, 400);
+  }
+  const refs = questions.flatMap((q) =>
+    q.origin?.ref ? [q.origin.kind + ':' + q.origin.ref] : [],
+  );
+  if (new Set(refs).size !== refs.length)
+    throw new DomainError('Повтор источника вопроса (origin.ref): ' + c.id, 409);
+}
+/**
+ * Ссылки и удержания вопроса указывают на существующее: задачи, доски и
+ * контракты состояния; удерживать можно только черновики.
+ */
+function assertQuestionRefs(s: DevContourState, q: PreparationQuestion) {
+  const tasks = new Map(s.tasks.map((t) => [t.id, t]));
+  const missing = [...(q.links?.taskIds ?? []), ...(q.blocks?.taskIds ?? [])].filter(
+    (id) => !tasks.has(id),
+  );
+  if (missing.length) throw new DomainError('Задачи не найдены: ' + missing.join(', '), 404);
+  const boards = (q.links?.boardIds ?? []).filter((id) => !s.boards.some((b) => b.id === id));
+  if (boards.length) throw new DomainError('Доски не найдены: ' + boards.join(', '), 404);
+  const contracts = (q.links?.contractIds ?? []).filter(
+    (id) => !s.contracts.some((x) => x.id === id),
+  );
+  if (contracts.length) throw new DomainError('Контракты не найдены: ' + contracts.join(', '), 404);
+  const released = (q.blocks?.taskIds ?? []).filter((id) => tasks.get(id)!.status !== 'draft');
+  if (released.length)
+    throw new DomainError(
+      'Удержать можно только черновики (выпущенную работу держит вопрос исполнителя): ' +
+        released.join(', '),
+      409,
+    );
+  const choices = choicesOf(q);
+  if (q.recommended !== undefined && q.recommended >= choices.length)
+    throw new DomainError('Рекомендованный вариант вне списка вариантов', 400);
 }
 // SemVer ordering: releases are delivered in the order they are listed, so a
 // later entry must carry a higher version. A prerelease sorts below its release.
@@ -737,10 +782,14 @@ export function validatePreparation(s: DevContourState, previous?: DevContourSta
     }
     for (const before of old.questions ?? []) {
       const after = (next.questions ?? []).find((q) => q.id === before.id);
+      // Открытый вопрос ведущий уточняет (`revise`); отвеченный и снятый
+      // неизменяемы, как и момент вопроса и ответ.
+      const settled = before.status !== 'open';
       if (
         !after ||
-        after.text !== before.text ||
+        (settled && hash(after) !== hash(before)) ||
         after.createdAt !== before.createdAt ||
+        hash(after.origin ?? null) !== hash(before.origin ?? null) ||
         (before.answer && hash(before.answer) !== hash(after.answer))
       )
         throw new DomainError('История вопросов и ответов неизменяема');
@@ -1099,6 +1148,7 @@ export class Preparation {
     return this.store.atomic(() => {
       this.enable();
       let selected: string | undefined;
+      const added: { id: string; changeId: string; existing: boolean }[] = [];
       this.store.change(operation, (s) => {
         const before = structuredClone(s),
           p = s.preparation!;
@@ -1294,8 +1344,8 @@ export class Preparation {
             if (c.activity.length > 200) c.activity.splice(0, c.activity.length - 200);
           } else if (operation === 'preparation_question') {
             const v = preparationInputs[operation].parse(input);
-            if (!v.add.length && !v.withdraw.length)
-              throw new DomainError('Укажите вопросы для добавления или снятия');
+            if (!v.add.length && !v.withdraw.length && !v.revise.length)
+              throw new DomainError('Укажите вопросы для добавления, уточнения или снятия');
             for (const q of v.withdraw) {
               const existing = c.questions.find((item) => item.id === q);
               if (!existing) throw new DomainError('Вопрос не найден: ' + q, 404);
@@ -1303,16 +1353,81 @@ export class Preparation {
                 throw new DomainError('Отвеченный вопрос нельзя снять: ' + q, 409);
               existing.status = 'withdrawn';
             }
-            for (const q of v.add)
-              c.questions.push({
+            for (const r of v.revise) {
+              const q = c.questions.find((item) => item.id === r.id);
+              if (!q) throw new DomainError('Вопрос не найден: ' + r.id, 404);
+              if (q.status !== 'open')
+                throw new DomainError('Уточнить можно только открытый вопрос: ' + r.id, 409);
+              if (r.text !== undefined) q.text = r.text;
+              if (r.why !== undefined) q.why = r.why;
+              if (r.stage !== undefined || r.section !== undefined)
+                Object.assign(
+                  q,
+                  placeQuestion(
+                    r.stage ?? (r.section === sectionOf(q) ? q.stage : undefined),
+                    r.section,
+                    q.stage,
+                  ),
+                );
+              if (r.choices !== undefined) {
+                if (r.choices === null) delete q.choices;
+                else {
+                  q.choices = r.choices;
+                  q.options = [];
+                }
+              }
+              if (r.recommended !== undefined) {
+                if (r.recommended === null) delete q.recommended;
+                else q.recommended = r.recommended;
+              }
+              for (const field of ['links', 'blocks'] as const)
+                if (r[field] !== undefined) {
+                  if (r[field] === null) delete q[field];
+                  else (q as Record<string, unknown>)[field] = r[field];
+                }
+              assertQuestionRefs(s, q);
+              q.revisedAt = now();
+            }
+            for (const q of v.add) {
+              // Перенос из файла репозитория: тот же источник — тот же вопрос.
+              if (q.origin?.ref) {
+                const same = p.changes
+                  .flatMap((item) => (item.questions ?? []).map((x) => ({ item, x })))
+                  .find(
+                    ({ x }) => x.origin?.kind === q.origin!.kind && x.origin?.ref === q.origin!.ref,
+                  );
+                if (same) {
+                  added.push({ id: same.x.id, changeId: same.item.id, existing: true });
+                  continue;
+                }
+              }
+              if (q.choices && q.options.length)
+                throw new DomainError('Варианты задаются либо choices, либо options', 400);
+              // Этап и раздел вопроса заменяют общие поля операции целиком.
+              const own = q.stage !== undefined || q.section !== undefined;
+              const place = placeQuestion(
+                own ? q.stage : v.stage,
+                own ? q.section : v.section,
+                'product',
+              );
+              const record = {
                 id: 'Q-' + randomUUID(),
-                stage: v.stage,
+                ...place,
                 createdAt: now(),
-                status: 'open',
+                status: 'open' as const,
                 text: q.text,
                 why: q.why,
                 options: q.options,
-              });
+                ...(q.choices ? { choices: q.choices } : {}),
+                ...(q.recommended !== undefined ? { recommended: q.recommended } : {}),
+                ...(q.links ? { links: q.links } : {}),
+                ...(q.blocks ? { blocks: q.blocks } : {}),
+                origin: q.origin ?? { kind: 'lead' as const },
+              };
+              assertQuestionRefs(s, record);
+              c.questions.push(record);
+              added.push({ id: record.id, changeId: c.id, existing: false });
+            }
           } else if (operation === 'preparation_resolve') {
             const v = preparationInputs[operation].parse(input);
             for (const at of v.withdraw) {
@@ -1325,19 +1440,29 @@ export class Preparation {
               if (!v.withdraw.length)
                 throw new DomainError('Укажите решение и обоснование либо решения к отзыву');
             } else {
+              const q = v.questionId
+                ? c.questions.find((item) => item.id === v.questionId)
+                : undefined;
               if (v.questionId) {
-                const q = c.questions.find((item) => item.id === v.questionId);
                 if (!q) throw new DomainError('Вопрос не найден: ' + v.questionId, 404);
                 if (q.status === 'open')
                   throw new DomainError('Сначала дождитесь ответа пользователя на вопрос', 409);
               }
+              if (v.refs?.boardId && !s.boards.some((b) => b.id === v.refs!.boardId))
+                throw new DomainError('Доска не найдена: ' + v.refs.boardId, 404);
+              const missing = (v.refs?.taskIds ?? []).filter(
+                (id) => !s.tasks.some((t) => t.id === id),
+              );
+              if (missing.length)
+                throw new DomainError('Задачи не найдены: ' + missing.join(', '), 404);
               c.decisions.push({
                 id: 'D-' + randomUUID(),
-                stage: v.stage,
+                stage: v.stage ?? q?.stage ?? 'product',
                 createdAt: now(),
                 statement: v.statement,
                 rationale: v.rationale,
                 ...(v.questionId ? { questionId: v.questionId } : {}),
+                ...(v.refs && Object.keys(v.refs).length ? { refs: v.refs } : {}),
               });
             }
           } else if (operation === 'preparation_submit') {
@@ -1358,7 +1483,9 @@ export class Preparation {
         validatePreparation(s, before);
         return { changeId: selected };
       });
-      return this.status(selected, { content: false });
+      const view = this.status(selected, { content: false });
+      // Id добавленных вопросов (и уже перенесённых по origin.ref) — по порядку `add`.
+      return operation === 'preparation_question' ? { ...view, questions: added } : view;
     });
   }
   // The answer comes from the panel form, like a stage decision: the agent asks,
@@ -1371,8 +1498,16 @@ export class Preparation {
         q = c.questions.find((item) => item.id === v.questionId);
       if (!q) throw new DomainError('Вопрос не найден', 404);
       if (q.status !== 'open') throw new DomainError('Вопрос уже закрыт', 409);
+      const choices = choicesOf(q);
+      if (v.choice !== undefined && v.choice >= choices.length)
+        throw new DomainError('Такого варианта у вопроса нет', 400);
+      const label = v.choice !== undefined ? choices[v.choice].label : undefined;
       q.status = 'answered';
-      q.answer = { at: now(), text: v.text };
+      q.answer = {
+        at: now(),
+        text: v.text ?? label!,
+        ...(v.choice !== undefined ? { choice: v.choice } : {}),
+      };
       validatePreparation(s, before);
       return { changeId: c.id, questionId: q.id };
     });

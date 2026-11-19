@@ -2,6 +2,7 @@
 // следующем такте — чистые правила без записи. Цикл исполняет ровно эти
 // решения, пакет передачи контекста (`session_handoff`) объясняет по ним
 // следующий шаг: правила одни, разойтись им негде.
+import { questionHolds } from '../core/owner-questions.ts';
 import { LeadWorkflow, type WorkflowJob } from '../core/lead-workflow.ts';
 import { boardOwner } from '../core/sync-state.ts';
 import {
@@ -241,9 +242,17 @@ export function planApproved(
  * правка черновика, которая исправляет и предусловия утверждения.
  */
 export function unapprovedTasks(h: DevContour, s: DevContourState, tasks: readonly Task[]) {
-  const drafts = tasks.filter((t) => t.status === 'draft');
+  const all = tasks.filter((t) => t.status === 'draft');
+  // Черновики, которые держит вопрос владельцу: их не разбирают и не
+  // выпускают до решения по вопросу, поэтому они вне `unverified` и `blocked`.
+  const holds = questionHolds(s);
+  const questions = all
+    .filter((t) => holds.has(t.id))
+    .map((t) => ({ id: t.id, questionId: holds.get(t.id)!.questionId }));
+  const drafts = all.filter((t) => !holds.has(t.id));
   return {
-    drafts: drafts.map((t) => t.id),
+    drafts: all.map((t) => t.id),
+    questions,
     stale: tasks.filter((t) => t.status !== 'draft' && h.approvalStale(t)).map((t) => t.id),
     unverified: drafts.filter(unverifiedFinding).map((t) => t.id),
     // Черновики находок, чья роль не может изменить файл находки (F73):

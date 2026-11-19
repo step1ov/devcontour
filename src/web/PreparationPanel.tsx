@@ -291,95 +291,176 @@ function AgentWork({
 }
 
 // Open questions used to be a throwaway array inside a draft. They are now
-// durable and the operator answers them here rather than in chat.
+// durable and the operator answers them here rather than in chat. Owner
+// questions are shown in the tab of their section's stage: product in the
+// product tab, architecture in its own, design steps in theirs and
+// development questions in the development tab. The lead's recommended
+// option is marked; choosing an option answers with its label.
+const sectionLabels: Record<string, string> = {
+  product: 'Продукт',
+  architecture: 'Архитектура',
+  design: 'Дизайн',
+  development: 'Разработка',
+};
 function Questions({
   stage,
   questions,
   busy,
   onAnswer,
 }: {
-  stage: Exclude<Stage, 'development'>;
+  stage: Stage;
   questions: PreparationQuestion[];
   busy: boolean;
-  onAnswer: (questionId: string, text: string) => void;
+  onAnswer: (questionId: string, text: string, choice?: number) => void;
 }) {
   const [drafts, setDrafts] = useState<Record<string, string>>({});
+  const [chosen, setChosen] = useState<Record<string, number>>({});
   const mine = questions.filter((q) => q.stage === stage && q.status !== 'withdrawn');
   const open = mine.filter((q) => q.status === 'open');
   return (
     <Foldable id={'questions-' + stage} title="Открытые вопросы" count={open.length}>
       <p className="text-muted-foreground mb-4 max-w-[78ch]">
-        Агент не отвечает на них сам. Пока есть неотвеченные вопросы этапа, версию нельзя отправить
-        на утверждение.
+        {stage === 'development'
+          ? 'Вопросы ведущего по разработке: инструменты, окружение, проверки и бюджеты. Агент не отвечает на них сам; черновики, которые держит вопрос, не выпускаются до решения.'
+          : 'Агент не отвечает на них сам. Пока есть неотвеченные вопросы этапа, версию нельзя отправить на утверждение; черновики, которые держит вопрос, не выпускаются до решения.'}
       </p>
       {!mine.length && <p className="text-muted-foreground">Вопросов по этому этапу не было.</p>}
       <ul className="grid gap-4">
-        {mine.map((q) => (
-          <li key={q.id}>
-            <Card>
-              <CardHeader className="gap-2 pb-3">
-                <div className="flex flex-wrap items-start justify-between gap-3">
-                  <CardTitle className="flex items-start gap-2">
-                    <MessageCircleQuestion
-                      className="text-primary mt-0.5 size-4 shrink-0"
-                      aria-hidden="true"
-                    />
-                    <span className="max-w-[70ch] break-words whitespace-pre-wrap">{q.text}</span>
-                  </CardTitle>
-                  <Badge variant={q.status === 'answered' ? 'success' : 'warning'}>
-                    {q.status === 'answered' ? 'Отвечено' : 'Ждёт ответа'}
-                  </Badge>
-                </div>
-                {q.why && <p className="text-muted-foreground text-sm">На что влияет: {q.why}</p>}
-                {q.options.length > 0 && (
-                  <div className="flex flex-wrap gap-2">
-                    {q.options.map((option, i) => (
-                      <Badge key={i} variant="outline">
-                        {option}
+        {mine.map((q) => {
+          const choices =
+            q.choices ?? q.options.map((label) => ({ label, consequence: undefined }));
+          const picked = chosen[q.id];
+          const text = (drafts[q.id] ?? '').trim();
+          const blocks = q.blocks?.taskIds ?? [];
+          const links = q.links?.taskIds ?? [];
+          return (
+            <li key={q.id} data-question={q.id}>
+              <Card>
+                <CardHeader className="gap-2 pb-3">
+                  <div className="flex flex-wrap items-start justify-between gap-3">
+                    <CardTitle className="flex items-start gap-2">
+                      <MessageCircleQuestion
+                        className="text-primary mt-0.5 size-4 shrink-0"
+                        aria-hidden="true"
+                      />
+                      <span className="max-w-[70ch] break-words whitespace-pre-wrap">{q.text}</span>
+                    </CardTitle>
+                    <div className="flex flex-wrap gap-2">
+                      {q.section && <Badge variant="outline">{sectionLabels[q.section]}</Badge>}
+                      <Badge variant={q.status === 'answered' ? 'success' : 'warning'}>
+                        {q.status === 'answered' ? 'Отвечено' : 'Ждёт ответа'}
                       </Badge>
-                    ))}
-                  </div>
-                )}
-              </CardHeader>
-              <CardContent className="pt-0">
-                {q.answer ? (
-                  <div className="border-primary bg-secondary border-l-[3px] p-3">
-                    <strong className="text-sm">Ваш ответ · {ago(q.answer.at)}</strong>
-                    <p className="mt-1 max-w-[70ch] break-words whitespace-pre-wrap">
-                      {q.answer.text}
-                    </p>
-                  </div>
-                ) : (
-                  <form
-                    className="grid gap-2"
-                    onSubmit={(e) => {
-                      e.preventDefault();
-                      onAnswer(q.id, drafts[q.id] ?? '');
-                    }}
-                  >
-                    <Label htmlFor={'answer-' + q.id}>Ваш ответ</Label>
-                    <Textarea
-                      id={'answer-' + q.id}
-                      rows={2}
-                      maxLength={3000}
-                      value={drafts[q.id] ?? ''}
-                      onChange={(e) => setDrafts({ ...drafts, [q.id]: e.target.value })}
-                    />
-                    <div>
-                      <Button
-                        type="submit"
-                        size="sm"
-                        disabled={busy || (drafts[q.id] ?? '').trim().length < 1}
-                      >
-                        Ответить
-                      </Button>
                     </div>
-                  </form>
-                )}
-              </CardContent>
-            </Card>
-          </li>
-        ))}
+                  </div>
+                  {q.why && <p className="text-muted-foreground text-sm">На что влияет: {q.why}</p>}
+                  {blocks.length > 0 && (
+                    <p className="text-muted-foreground text-sm break-words">
+                      До решения не выпускаются задачи: {blocks.join(', ')}
+                    </p>
+                  )}
+                  {links.length > 0 && (
+                    <p className="text-muted-foreground text-sm break-words">
+                      Связанные задачи: {links.join(', ')}
+                    </p>
+                  )}
+                  {choices.length > 0 && q.status !== 'open' && (
+                    <ul className="grid gap-1 text-sm" aria-label="Варианты">
+                      {choices.map((choice, i) => (
+                        <li key={i} className="break-words">
+                          <Badge variant="outline">{choice.label}</Badge>
+                          {q.recommended === i && (
+                            <span className="text-primary ml-2">рекомендация ведущего</span>
+                          )}
+                          {q.answer?.choice === i && <span className="ml-2">— выбрано</span>}
+                        </li>
+                      ))}
+                    </ul>
+                  )}
+                </CardHeader>
+                <CardContent className="pt-0">
+                  {q.answer ? (
+                    <div className="border-primary bg-secondary border-l-[3px] p-3">
+                      <strong className="text-sm">Ваш ответ · {ago(q.answer.at)}</strong>
+                      <p className="mt-1 max-w-[70ch] break-words whitespace-pre-wrap">
+                        {q.answer.text}
+                      </p>
+                    </div>
+                  ) : (
+                    <form
+                      className="grid gap-3"
+                      onSubmit={(e) => {
+                        e.preventDefault();
+                        onAnswer(q.id, text, picked);
+                      }}
+                    >
+                      {choices.length > 0 && (
+                        <fieldset className="grid gap-2">
+                          <legend className="mb-1 text-sm font-medium">Варианты</legend>
+                          {choices.map((choice, i) => {
+                            const recommended = q.recommended === i;
+                            return (
+                              <label
+                                key={i}
+                                data-recommended={recommended || undefined}
+                                className={cn(
+                                  'flex cursor-pointer items-start gap-2 rounded-md border p-3',
+                                  recommended && 'border-primary bg-accent',
+                                  picked === i && 'ring-primary ring-2',
+                                )}
+                              >
+                                <input
+                                  type="radio"
+                                  name={'choice-' + q.id}
+                                  className="mt-1"
+                                  checked={picked === i}
+                                  onChange={() => setChosen({ ...chosen, [q.id]: i })}
+                                />
+                                <span className="grid gap-1 break-words">
+                                  <span>
+                                    {choice.label}
+                                    {recommended && (
+                                      <Badge variant="outline" className="ml-2">
+                                        Рекомендация ведущего
+                                      </Badge>
+                                    )}
+                                  </span>
+                                  {choice.consequence && (
+                                    <span className="text-muted-foreground text-sm">
+                                      {choice.consequence}
+                                    </span>
+                                  )}
+                                </span>
+                              </label>
+                            );
+                          })}
+                        </fieldset>
+                      )}
+                      <Label htmlFor={'answer-' + q.id}>
+                        {choices.length ? 'Комментарий (необязательно)' : 'Ваш ответ'}
+                      </Label>
+                      <Textarea
+                        id={'answer-' + q.id}
+                        rows={2}
+                        maxLength={3000}
+                        value={drafts[q.id] ?? ''}
+                        onChange={(e) => setDrafts({ ...drafts, [q.id]: e.target.value })}
+                      />
+                      <div>
+                        <Button
+                          type="submit"
+                          size="sm"
+                          disabled={busy || (text.length < 1 && picked === undefined)}
+                        >
+                          Ответить
+                        </Button>
+                      </div>
+                    </form>
+                  )}
+                </CardContent>
+              </Card>
+            </li>
+          );
+        })}
       </ul>
     </Foldable>
   );
@@ -768,6 +849,19 @@ export function PreparationPanel() {
       setBusy(false);
     }
   };
+  // Ответ на вопрос владельцу: выбранный вариант и (или) свой текст.
+  const answerQuestion = (questionId: string, text: string, choice?: number) => {
+    const changeId = view?.enabled ? view.current?.id : undefined;
+    if (!changeId) return;
+    void run(() =>
+      request('preparation/answer', {
+        changeId,
+        questionId,
+        ...(text ? { text } : {}),
+        ...(choice !== undefined ? { choice } : {}),
+      }),
+    );
+  };
   if (view && !view.enabled)
     return (
       <Suspense fallback={<p role="status">Загрузка панели…</p>}>
@@ -1149,6 +1243,12 @@ export function PreparationPanel() {
                         </p>
                       )}
                       <Workers workers={view.workers ?? []} concurrency={view.setup?.concurrency} />
+                      <Questions
+                        stage="development"
+                        questions={c.questions}
+                        busy={busy}
+                        onAnswer={answerQuestion}
+                      />
                       {/* Принятые доски — история релиза. В общем списке они
                       выглядели параллельными потоками рядом с текущей работой. */}
                       {view.delivery.boards.some((b) => b.phase !== 'accepted') && (
@@ -1474,11 +1574,7 @@ export function PreparationPanel() {
                         stage={tab}
                         questions={c.questions}
                         busy={busy}
-                        onAnswer={(questionId, text) =>
-                          void run(() =>
-                            request('preparation/answer', { changeId: c.id, questionId, text }),
-                          )
-                        }
+                        onAnswer={answerQuestion}
                       />
                       <Decisions stage={tab} decisions={c.decisions} questions={c.questions} />
                     </>

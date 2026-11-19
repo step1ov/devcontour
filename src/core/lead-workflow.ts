@@ -1,3 +1,4 @@
+import { assertNotHeld } from './owner-questions.ts';
 import { assertAnyDevelopmentReady, assertTaskPreparation } from './preparation.ts';
 import { carriedTaskIds } from './work-status.ts';
 import { z } from 'zod';
@@ -506,6 +507,18 @@ export class LeadWorkflow {
   }
   start(raw: unknown) {
     const input = workflowInput.parse(raw);
+    // Задание доски с неутверждённым планом отправит на ревью весь план, а
+    // черновик, который держит вопрос владельцу, ревью не выпустит: отказ
+    // 409 QUESTION_PENDING до регистрации задания.
+    if (input.kind === 'board') {
+      const s = this.h.store.read();
+      const revision = s.boards.find((b) => b.id === input.id)?.revisions.at(-1);
+      if (revision && revision.status !== 'accepted')
+        assertNotHeld(
+          s,
+          revision.taskIds.filter((id) => s.tasks.find((t) => t.id === id)?.status === 'draft'),
+        );
+    }
     return domain(() => this.queue().start(input)) as WorkflowJob;
   }
   /**
