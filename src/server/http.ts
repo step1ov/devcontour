@@ -499,25 +499,32 @@ export async function serve(
                 // подключённый за время ожидания центра внимания.
                 const engine = h;
                 const before = await previous?.catch(() => undefined);
-                const { view } = await attention;
-                const home = store.snapshot(() =>
-                  homeView({
-                    state: store.view(),
-                    h: engine,
-                    attention: view,
-                    revision: store.revision(),
-                    now: Date.now(),
-                    ...(startupError ? { startupError } : {}),
-                    ...(engine
-                      ? { events: engine.store.latestEvents(['scheduler.error'], 50) }
-                      : {}),
-                  }),
-                );
+                const compute = (view: AttentionView) =>
+                  store.snapshot(() =>
+                    homeView({
+                      state: store.view(),
+                      h: engine,
+                      attention: view,
+                      revision: store.revision(),
+                      now: Date.now(),
+                      ...(startupError ? { startupError } : {}),
+                      ...(engine
+                        ? { events: engine.store.latestEvents(['scheduler.error'], 50) }
+                        : {}),
+                    }),
+                  );
+                let { view } = await attention;
+                let home = compute(view);
+                // Запись между центром внимания и снимком: плитки и вопросы разных
+                // версий. Центр внимания новой версии — и главная заново (один раз:
+                // при непрерывных записях ответ отдаётся, а опрос считает снова).
+                if (home.revision !== view.revision) {
+                  ({ view } = await activeAttention(store, ACTIVE_ATTENTION_SCOPE, {}));
+                  home = compute(view);
+                }
                 if (value) {
                   const until = attentionUntil(store, view);
                   if (until !== undefined) homes.limit('home', value, until);
-                  // Запись между центром внимания и снимком: плитки и вопросы
-                  // разных версий. Ответ отдаётся, но следующий опрос считает заново.
                   if (home.revision !== view.revision) homes.limit('home', value, Date.now());
                 }
                 // Ревизия — момент чтения, как и время: запись, не изменившая

@@ -634,9 +634,59 @@ test('Home: a failed job of an accepted board is settled; a truncated attention 
     jobs = home.sections.development.jobs;
     assert.deepEqual([jobs.failed, jobs.top.map((j) => j.id)], [1, [other.id]]);
     for (const section of Object.values(home.sections)) assert.equal(section.questions.more, true);
+    // Очередь идёт, выдавать нечего, задание ведущего остановлено окончательно.
+    f.h.pause(false);
+    const stopped = at().sections.development;
+    assert.equal(stopped.state, 'blocked');
+    assert.match(stopped.blocker!, /остановлены: 1/);
     assert.equal(home.attention.truncated, 201);
   } finally {
     list.mock.restore();
+    f.cleanup();
+  }
+});
+
+test('Home: a running attempt is shown; a write during the attention computation recomputes both on one version', async () => {
+  const f = fixture();
+  const board = f.h.createBoard('Доска', '', 'main');
+  const task = f.h.addTask(board.id, input('Идущая задача'));
+  f.h.approve(board.id);
+  f.h.pause(false);
+  const run = f.h.claim('test')!;
+  assert.equal(run.taskId, task.id);
+  const app = await serve(f.h, new Scheduler(f.h, f.root), { port: 0 });
+  const proto = AttentionService.prototype as unknown as {
+    view: (this: AttentionService, ...args: Parameters<AttentionService['view']>) => AttentionView;
+  };
+  const original = proto.view;
+  let writes = 0;
+  const view = mock.method(
+    AttentionService.prototype,
+    'view',
+    function (this: AttentionService, ...args: Parameters<AttentionService['view']>) {
+      const value = original.apply(this, args);
+      // Первая проекция центра внимания устаревает сразу: запись другого
+      // клиента между ней и снимком главной.
+      if (!writes++)
+        f.store.atomic(() => f.store.saveLocal('home-race', undefined, 'k', { at: 1 }));
+      return value;
+    },
+  );
+  try {
+    const { body } = await getter(app.url)();
+    view.mock.restore();
+    assert.equal(writes, 2, 'attention computed again for the new version');
+    assert.equal(body.revision, f.store.revision());
+    const dev = body.sections.development;
+    assert.equal(dev.state, 'running');
+    assert.equal(dev.runningTotal, 1);
+    assert.equal(dev.runningNow[0].taskId, task.id);
+    assert.equal(dev.runningNow[0].attempt, run.attempt);
+    assert.match(dev.runningNow[0].href, /task=/);
+    assert.equal(dev.boards.top[0].phase, 'running');
+  } finally {
+    view.mock.restore();
+    await app.close();
     f.cleanup();
   }
 });

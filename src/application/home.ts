@@ -423,6 +423,10 @@ function development(
     .sort((a, b) => b.impact.waiting - a.impact.waiting)[0];
   const open = state.tasks.filter((t) => t.status === 'ready' && !t.activeRunId).length;
   const failedTasks = state.tasks.filter((t) => t.status === 'failed').length;
+  const failedJobs = current.filter((j) => j.status === 'failed');
+  const verifying = state.changeSets.some((c) =>
+    c.verifications.some((v) => v.status === 'active'),
+  );
 
   let devState: DevelopmentState;
   let blocker: string | undefined;
@@ -435,7 +439,9 @@ function development(
         : prep.enabled
           ? prep.blocker || undefined
           : 'Подготовка не начата: опишите продукт';
-  } else if (active.length || shownJobs.some((j) => j.status === 'running')) devState = 'running';
+  } else if (active.length || verifying || shownJobs.some((j) => j.status === 'running'))
+    // Совместная проверка ChangeSet идёт без попыток задач, задание стоит queued.
+    devState = 'running';
   else if (queue?.paused) {
     devState = queue.failed ? 'blocked' : 'paused';
     blocker = queue.stopReason;
@@ -443,6 +449,10 @@ function development(
     // Очередь идёт, но выдавать нечего: работу держат упавшие задачи.
     devState = 'blocked';
     blocker = `Задачи с ошибкой: ${failedTasks}; зависимые от них не выдаются`;
+  } else if (!ready && failedJobs.length && !current.some((j) => j.status === 'queued')) {
+    // Задание ведущего остановлено окончательно, а предмет не принят.
+    devState = 'blocked';
+    blocker = `Задания ведущего остановлены: ${failedJobs.length}`;
   } else devState = 'idle';
 
   return {
