@@ -13,7 +13,9 @@ import {
   budgetOf,
   coverageOf,
   gatesOf,
+  gateTrendOf,
   homeSlowView,
+  spendOf,
   homeView,
   loadOf,
   type HomeView,
@@ -21,6 +23,7 @@ import {
 import { serve } from '../src/server/http.ts';
 import { Scheduler } from '../src/runner/scheduler.ts';
 import { harnessVersion } from '../src/harness/index.ts';
+import type { UsageRecord } from '../src/core/usage.ts';
 
 // Плитки «Ход работ» и «Исполнение» главной (S4): агрегаты по снимку версии
 // и медленный ярус (карта продукта, проверки за сутки, бюджеты, расход).
@@ -732,6 +735,255 @@ test('Home health: exact loop-stall counts come from the slow tier when present'
     });
     assert.equal(home.harness!.health.loopStalls1h, 300);
     assert.equal(home.harness!.health.clockJumps1h, 300);
+  } finally {
+    f.cleanup();
+  }
+});
+
+test('Home gate trend: records per hour over [now - 24 h, now), passed, failed and reused; not-applicable is not a record', () => {
+  const now = NOW + 7 * 60_000;
+  const ago = (ms: number) => new Date(now - ms).toISOString();
+  const runs = [
+    run({
+      id: 'r1',
+      evidence: [
+        evidence('unit', true, { createdAt: ago(30 * 60_000) }),
+        evidence('unit', false, { createdAt: ago(30 * 60_000) }),
+        evidence('e2e', true, { createdAt: ago(30 * 60_000), reusedEvidence: { runId: 'x' } }),
+        evidence('types', false, { createdAt: ago(30 * 60_000), kind: 'not-applicable' }),
+        // Ровно сутки назад — первый час окна; ровно now — ещё нет.
+        evidence('edge', false, { createdAt: ago(24 * HOUR) }),
+        evidence('future', true, { createdAt: ago(0) }),
+      ],
+    }),
+    // Кончилась больше суток назад — записей в окне не несёт.
+    run({
+      id: 'old',
+      startedAt: ago(30 * HOUR),
+      finishedAt: ago(29 * HOUR),
+      evidence: [evidence('lint', false, { createdAt: ago(29 * HOUR) })],
+    }),
+  ];
+  const trend = gateTrendOf(runs, now);
+  assert.equal(trend.hourly.length, 24);
+  assert.equal(trend.from, ago(24 * HOUR));
+  assert.equal(trend.to, ago(0));
+  assert.deepEqual(trend.hourly[23], [1, 1, 1]);
+  assert.deepEqual(trend.hourly[0], [0, 1, 0]);
+  const sum = trend.hourly.reduce((n, [p, f, r]) => n + p + f + r, 0);
+  assert.equal(sum, 4, 'unit twice, reused e2e and the edge record');
+  // Отказы тренда — те же, что у сводки проверок за сутки.
+  const failing = gatesOf(runs, now).failing.reduce((n, g) => n + g.failed, 0);
+  assert.equal(
+    trend.hourly.reduce((n, [, f]) => n + f, 0),
+    failing,
+  );
+  // Размер постоянный при любой истории.
+  const many = Array.from({ length: 2000 }, (_, i) =>
+    run({
+      id: `m${i}`,
+      evidence: [evidence('g', i % 2 === 0, { createdAt: ago((i % 1440) * 60_000) })],
+    }),
+  );
+  const big = gateTrendOf(many, now);
+  assert.equal(big.hourly.length, 24);
+  assert.ok(JSON.stringify(big).length < 1024);
+});
+
+test('Home spend: per server-local day over a week, unknown cost counted apart, the workspace limit kept', () => {
+  const record = (over: Partial<UsageRecord> & { id: string; startedAt: string }): UsageRecord =>
+    ({
+      stage: 'implement',
+      runtime: 'claude',
+      model: 'm',
+      runtimeVersion: null,
+      outcome: 'returned',
+      promptBytes: 0,
+      promptDigest: '',
+      usage: { complete: true },
+      costUsd: 1,
+      costSource: 'provider-reported',
+      ...over,
+    }) as UsageRecord;
+  const midnight = (shift: number) => {
+    const d = new Date(NOW);
+    d.setHours(0, 0, 0, 0);
+    d.setDate(d.getDate() + shift);
+    return d.getTime();
+  };
+  const iso = (ms: number) => new Date(ms).toISOString();
+  const records = [
+    record({ id: 'today', startedAt: iso(midnight(0) + 1000), costUsd: 2.5 }),
+    record({ id: 'today-midnight', startedAt: iso(midnight(0)), costUsd: 0.25 }),
+    record({ id: 'first', startedAt: iso(midnight(-6)), costUsd: 1 }),
+    record({ id: 'before', startedAt: iso(midnight(-6) - 1), costUsd: 10 }),
+    // Неизвестная стоимость: не входит в сумму, считается вызовом.
+    record({
+      id: 'unknown',
+      startedAt: iso(midnight(-2) + HOUR),
+      costUsd: null,
+      costSource: 'unknown',
+    }),
+    // Прерванный с оценкой по тарифу: оценка — нижняя граница, вызов неизвестен.
+    record({
+      id: 'abandoned',
+      startedAt: iso(midnight(-2) + HOUR),
+      outcome: 'abandoned',
+      costUsd: 0.5,
+      costSource: 'tariff-estimate',
+    }),
+    record({
+      id: 'old-unknown',
+      startedAt: iso(midnight(-30)),
+      costUsd: null,
+      costSource: 'unknown',
+    }),
+    // Начало позже now (часы переведены) — в последнем дне.
+    record({ id: 'future', startedAt: iso(NOW + HOUR), costUsd: 0.25 }),
+  ];
+  const spend = spendOf(records, NOW, 100);
+  assert.equal(spend.days.length, HOME_LIMITS.spendDays);
+  assert.equal(spend.days[0].start, iso(midnight(-6)));
+  assert.equal(spend.days[6].start, iso(midnight(0)));
+  assert.deepEqual(spend.days[6], { start: iso(midnight(0)), usd: 3, calls: 3, unknown: 0 });
+  assert.deepEqual(spend.days[0], { start: iso(midnight(-6)), usd: 1, calls: 1, unknown: 0 });
+  assert.deepEqual(spend.days[4], { start: iso(midnight(-2)), usd: 0.5, calls: 2, unknown: 2 });
+  assert.equal(spend.beforeUsd, 10);
+  assert.equal(spend.beforeUnknown, 1);
+  assert.equal(spend.limitUsd, 100);
+  // Сумма окна и до него — известная оценка всех записей (как usageTotals).
+  const week = spend.days.reduce((n, d) => n + d.usd, 0);
+  assert.equal(week + spend.beforeUsd, 14.5);
+  assert.equal(spendOf([], NOW).limitUsd, undefined);
+  assert.deepEqual(
+    spendOf([], NOW).days.map((d) => d.usd),
+    [0, 0, 0, 0, 0, 0, 0],
+  );
+  // Длинная история — тот же размер.
+  const many = Array.from({ length: 5000 }, (_, i) =>
+    record({ id: `u${i}`, startedAt: iso(NOW - (i % 600) * HOUR), costUsd: 0.01 }),
+  );
+  const big = spendOf(many, NOW, 5);
+  assert.equal(big.days.length, HOME_LIMITS.spendDays);
+  assert.ok(JSON.stringify(big).length < 1024);
+});
+
+test('Home slow tier: gate trend and spend carry asOf; the workspace limit comes from the budgets', () => {
+  const f = fixture();
+  try {
+    const slow = homeSlowView({
+      state: f.store.view(),
+      now: NOW,
+      preparation: false,
+      budgets: {
+        budgets: [
+          {
+            scope: { kind: 'task', id: 'T-1' },
+            state: 'within',
+            limit: { usd: 3 },
+            reportedUsd: 0,
+            estimatedUsd: 0,
+            unknownCalls: 0,
+            unfinishedCalls: 0,
+          },
+          {
+            scope: { kind: 'workspace' },
+            state: 'within',
+            limit: { usd: 50 },
+            reportedUsd: 0,
+            estimatedUsd: 0,
+            unknownCalls: 0,
+            unfinishedCalls: 0,
+          },
+        ],
+      },
+      usageRecords: [],
+    });
+    assert.equal(slow.gateTrend.asOf, slow.asOf);
+    assert.equal(slow.spend!.asOf, slow.asOf);
+    assert.equal(slow.spend!.limitUsd, 50, 'the workspace limit, not a task one');
+    assert.equal(
+      homeSlowView({ state: f.store.view(), now: NOW, preparation: false }).spend,
+      undefined,
+    );
+    const home = homeView({
+      state: f.store.view(),
+      h: f.h,
+      attention: emptyAttention,
+      revision: 1,
+      now: NOW,
+      slow,
+    });
+    assert.equal(home.harness!.gateTrend!.hourly.length, 24);
+    assert.equal(home.harness!.spend!.days.length, HOME_LIMITS.spendDays);
+  } finally {
+    f.cleanup();
+  }
+});
+
+test('Home progress: without preparation releases the product map releases feed the release bars', () => {
+  const f = fixture();
+  try {
+    const board = f.h.createBoard('Доска', '', 'main');
+    f.h.addTask(board.id, input('Задача'));
+    const view = {
+      available: true,
+      releaseId: 'r1',
+      coverageComplete: false,
+      releaseAccepted: false,
+      issues: [],
+      unconfirmedScenarios: [],
+      deferredScenarios: [],
+      releases: [
+        { id: 'r1', title: 'Первый' },
+        { id: 'r2', title: 'Второй' },
+      ],
+      features: [
+        { id: 'F1', status: 'verified' },
+        { id: 'F2', status: 'accepted' },
+        { id: 'F3', status: 'in-progress' },
+        { id: 'F4', status: 'deferred' },
+        { id: 'F5', status: 'not-applicable' },
+      ],
+    } as unknown as ProductView;
+    const coverage = coverageOf(view, at(0), false)!;
+    assert.ok(coverage.available);
+    assert.deepEqual(coverage.releases, [
+      { id: 'r1', title: 'Первый', features: 3, done: 2 },
+      { id: 'r2', title: 'Второй' },
+    ]);
+    const slow = {
+      ...homeSlowView({ state: f.store.view(), now: NOW, preparation: false }),
+      coverage,
+    };
+    const home = homeView({
+      state: f.store.view(),
+      h: f.h,
+      attention: emptyAttention,
+      revision: 1,
+      now: NOW,
+      slow,
+    });
+    const progress = home.progress!;
+    assert.equal(progress.releasesFrom, 'product-map');
+    assert.equal(progress.releasesTotal, 2);
+    assert.deepEqual(
+      progress.releases.map((r) => [r.id, r.unit, r.tasks, r.done, r.readiness, r.measured]),
+      [
+        ['r1', 'features', 3, 2, 'in-progress', undefined],
+        ['r2', 'features', 0, 0, 'unplanned', false],
+      ],
+    );
+    // Без покрытия карты — релизов нет, источник не назван.
+    const bare = homeView({
+      state: f.store.view(),
+      h: f.h,
+      attention: emptyAttention,
+      revision: 1,
+      now: NOW,
+    });
+    assert.deepEqual(bare.progress!.releases, []);
+    assert.equal(bare.progress!.releasesFrom, undefined);
   } finally {
     f.cleanup();
   }

@@ -11,7 +11,7 @@ export function Bar({ done, total, label }: { done: number; total: number; label
         </span>
       </div>
       <div
-        className="bg-secondary h-2 overflow-hidden rounded-full"
+        className="bg-active h-2 overflow-hidden rounded-full"
         role="progressbar"
         aria-valuenow={percent}
         aria-valuemin={0}

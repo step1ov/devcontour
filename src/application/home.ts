@@ -25,6 +25,7 @@ import { leadPresence } from './quick-view.ts';
 import { harnessVersion } from '../harness/index.ts';
 import { configApplyKeys, reconfigureSlotBusy } from '../runner/reconfigure.ts';
 import type { ProductView } from '../core/product-map.ts';
+import { knownCost, type UsageRecord } from '../core/usage.ts';
 
 /**
  * Главная панели (`GET /api/home`): по плитке на раздел — продукт,
@@ -46,6 +47,8 @@ export const HOME_LIMITS = {
   failureKinds: 8,
   /** Интервалов графика нагрузки: сутки по 15 минут. */
   loadBuckets: 96,
+  /** Дней графика расхода. */
+  spendDays: 7,
   title: 160,
   startupError: 300,
   /** Жёсткий предел тела ответа (тест). */
@@ -215,8 +218,17 @@ export interface HomeProgress {
     failed: number;
     criteria: number;
     readiness: 'unplanned' | 'in-progress' | 'failed' | 'done';
+    /**
+     * Единица хода: задачи утверждённой постановки или фичи карты продукта
+     * (без подготовки в панели). `measured: false` — карта считает только
+     * текущий релиз: у остальных известна лишь приёмка.
+     */
+    unit?: 'tasks' | 'features';
+    measured?: false;
   }[];
   releasesTotal: number;
+  /** Откуда релизы: утверждённая постановка или карта продукта (медленный ярус). */
+  releasesFrom?: 'preparation' | 'product-map';
   tasks: { total: number; done: number; remaining: number; failed: number; cancelled: number };
   changeSets: {
     total: number;
@@ -240,6 +252,9 @@ export interface HomeProgress {
         issueCount: number;
         unconfirmed: number;
         deferred: number;
+        /** Релизы карты; фичи посчитаны только у текущего (`releaseId`). */
+        releases?: { id: string; title: string; features?: number; done?: number }[];
+        releasesTotal?: number;
         asOf: string;
         href: string;
       }
@@ -261,6 +276,10 @@ export interface HomeHarness {
   };
   /** Нагрузка агентов за сутки (медленный ярус). */
   load?: HomeLoad;
+  /** Записи проверок по часам за сутки (медленный ярус). */
+  gateTrend?: HomeGateTrend;
+  /** Расход по дням за неделю против предела workspace (медленный ярус). */
+  spend?: HomeSpend;
   failures: { tasks: number; recoveries: number; quiet: number };
   budget?: {
     state: BudgetState;
@@ -309,10 +328,38 @@ export interface HomeLoad {
   current: number;
   asOf: string;
 }
+/**
+ * Записи проверок по часам за сутки `[now − 24 ч, now)`: [прошло, отказ,
+ * взято из кандидата]. 24 интервала, сколько бы записей ни было.
+ */
+export interface HomeGateTrend {
+  from: string;
+  to: string;
+  hourly: [number, number, number][];
+  asOf: string;
+}
+/**
+ * Расход вызовов моделей по дням (полночь по часам сервера), последние
+ * `HOME_LIMITS.spendDays` дней. Сумма — известная оценка (сообщённая
+ * провайдером и по тарифу); вызовы с неизвестной стоимостью посчитаны
+ * отдельно: при них сумма — нижняя граница.
+ */
+export interface HomeSpend {
+  days: { start: string; usd: number; calls: number; unknown: number }[];
+  /** Известная оценка до первого дня окна. */
+  beforeUsd: number;
+  /** Вызовы с неизвестной стоимостью до окна. */
+  beforeUnknown: number;
+  /** Денежный предел workspace; другого предела у суммы по всем вызовам нет. */
+  limitUsd?: number;
+  asOf: string;
+}
 /** Медленный ярус главной: считается не чаще раза в 30 с (`minAgeMs`). */
 export interface HomeSlow {
   asOf: string;
   load: HomeLoad;
+  gateTrend: HomeGateTrend;
+  spend?: HomeSpend;
   coverage?: HomeProgress['coverage'];
   gates: NonNullable<HomeHarness['gates']>;
   budget?: HomeHarness['budget'];
@@ -752,8 +799,9 @@ function progressOf(
     undefined,
   );
   const preparation = prep.enabled;
-  return {
-    releases: releases.slice(0, HOME_LIMITS.releases).map((r) => ({
+  const prepared = releases
+    .slice(0, HOME_LIMITS.releases)
+    .map((r): HomeProgress['releases'][number] => ({
       id: clip(r.id),
       title: clip(titles.get(r.id) ?? r.id),
       tasks: r.tasks,
@@ -761,8 +809,25 @@ function progressOf(
       failed: r.failed,
       criteria: r.criteria,
       readiness: r.readiness,
-    })),
-    releasesTotal: releases.length,
+    }));
+  // Без релизов постановки — релизы карты продукта (медленный ярус).
+  const coverage = ctx.slow?.coverage;
+  const mapped =
+    !prepared.length && coverage?.available && coverage.releases?.length
+      ? mapReleases(coverage.releases, state)
+      : [];
+  return {
+    releases: prepared.length ? prepared : mapped,
+    releasesTotal: prepared.length
+      ? releases.length
+      : mapped.length
+        ? (coverage?.available && coverage.releasesTotal) || mapped.length
+        : 0,
+    ...(prepared.length
+      ? { releasesFrom: 'preparation' as const }
+      : mapped.length
+        ? { releasesFrom: 'product-map' as const }
+        : {}),
     tasks: {
       total: tasks.length,
       done,
@@ -789,6 +854,43 @@ function progressOf(
     ...(ctx.slow?.coverage ? { coverage: ctx.slow.coverage } : {}),
     href: devHref(preparation, 'progress'),
   };
+}
+
+/**
+ * Релизы карты продукта для хода работ: у текущего — фичи в объёме и
+ * доказанные (`verified`, `accepted`), у остальных — только приёмка по
+ * ChangeSet релиза.
+ */
+function mapReleases(
+  releases: NonNullable<Extract<HomeProgress['coverage'], { available: true }>['releases']>,
+  state: Readonly<DevContourState>,
+): HomeProgress['releases'] {
+  const accepted = new Set(
+    state.changeSets.flatMap((c) => (c.acceptance && c.releaseId ? [c.releaseId] : [])),
+  );
+  return releases.map((r) => {
+    const base = { id: r.id, title: r.title, failed: 0, criteria: 0, unit: 'features' as const };
+    if (r.features === undefined)
+      return {
+        ...base,
+        tasks: 0,
+        done: 0,
+        readiness: accepted.has(r.id) ? ('done' as const) : ('unplanned' as const),
+        measured: false as const,
+      };
+    const done = r.done ?? 0;
+    return {
+      ...base,
+      tasks: r.features,
+      done,
+      readiness:
+        accepted.has(r.id) || (r.features > 0 && done === r.features)
+          ? ('done' as const)
+          : done > 0
+            ? ('in-progress' as const)
+            : ('unplanned' as const),
+    };
+  });
 }
 
 /** Число событий типа за последний час (окно — недавний журнал). */
@@ -838,7 +940,14 @@ function harnessOf(
     concurrency: h.config.concurrency,
     active: state.runs.filter((r) => r.status === 'active').length,
     attempts24h: attemptsOf(state.runs, now),
-    ...(ctx.slow ? { gates: ctx.slow.gates, load: ctx.slow.load } : {}),
+    ...(ctx.slow
+      ? {
+          gates: ctx.slow.gates,
+          load: ctx.slow.load,
+          gateTrend: ctx.slow.gateTrend,
+          ...(ctx.slow.spend ? { spend: ctx.slow.spend } : {}),
+        }
+      : {}),
     failures: {
       tasks: state.tasks.filter((t) => t.status === 'failed').length,
       recoveries: state.tasks.filter(
@@ -969,6 +1078,84 @@ export function gatesOf(runs: DevContourState['runs'], now: number) {
   };
 }
 
+/**
+ * Записи проверок по часам за сутки до `now` (медленный ярус): прошедшие,
+ * отказавшие и взятые из кандидата. Окно и часы — те же, что у попыток по
+ * часам (`loadOf`); неприменимый gate — не запись проверки.
+ */
+export function gateTrendOf(
+  runs: DevContourState['runs'],
+  now: number,
+): Omit<HomeGateTrend, 'asOf'> {
+  const from = now - DAY_MS;
+  const hourly: HomeGateTrend['hourly'] = Array.from({ length: 24 }, () => [0, 0, 0]);
+  for (const run of runs) {
+    if (run.finishedAt && Date.parse(run.finishedAt) < from) continue;
+    for (const e of run.evidence) {
+      if (e.kind !== 'test') continue;
+      const t = Date.parse(e.createdAt);
+      if (!inDay(t, now)) continue;
+      const hour = Math.floor((t - from) / HOUR_MS);
+      hourly[hour][e.reusedEvidence ? 2 : e.passed ? 0 : 1]++;
+    }
+  }
+  return { from: new Date(from).toISOString(), to: new Date(now).toISOString(), hourly };
+}
+
+/** Полночь дня `at` по часам сервера, `shift` дней спустя. */
+const midnight = (at: number, shift = 0) => {
+  const d = new Date(at);
+  d.setHours(0, 0, 0, 0);
+  d.setDate(d.getDate() + shift);
+  return d.getTime();
+};
+
+/**
+ * Расход по дням за `HOME_LIMITS.spendDays` дней до `now` (медленный ярус),
+ * один проход по записям вызовов. День вызова — по его началу; запись с
+ * началом позже `now` (часы переведены) — в последнем дне. Сумма — известная
+ * оценка (как `usageTotals().knownCostUsd`), неизвестные — числом вызовов.
+ */
+export function spendOf(
+  records: readonly UsageRecord[],
+  now: number,
+  limitUsd?: number,
+): Omit<HomeSpend, 'asOf'> {
+  const n = HOME_LIMITS.spendDays;
+  const starts = Array.from({ length: n }, (_, i) => midnight(now, i - n + 1));
+  const days = starts.map((start) => ({
+    start: new Date(start).toISOString(),
+    usd: 0,
+    calls: 0,
+    unknown: 0,
+  }));
+  let beforeUsd = 0;
+  let beforeUnknown = 0;
+  for (const r of records) {
+    const t = Date.parse(r.startedAt);
+    const usd = r.costSource !== 'unknown' ? (r.costUsd ?? 0) : 0;
+    const unknown = knownCost(r) ? 0 : 1;
+    if (!Number.isFinite(t) || t < starts[0]) {
+      beforeUsd += usd;
+      beforeUnknown += unknown;
+      continue;
+    }
+    let i = n - 1;
+    while (i > 0 && t < starts[i]) i--;
+    days[i].usd += usd;
+    days[i].calls++;
+    days[i].unknown += unknown;
+  }
+  // Копейки суммы — после сложения: длинная история не копит ошибку округления.
+  for (const d of days) d.usd = Math.round(d.usd * 1e4) / 1e4;
+  return {
+    days,
+    beforeUsd: Math.round(beforeUsd * 1e4) / 1e4,
+    beforeUnknown,
+    ...(limitUsd !== undefined ? { limitUsd } : {}),
+  };
+}
+
 type Budgets = {
   budgets: {
     scope: { kind: 'task' | 'board' | 'workspace'; id?: string };
@@ -1030,6 +1217,24 @@ export function coverageOf(
     issueCount: view.issues.length,
     unconfirmed: view.unconfirmedScenarios.length,
     deferred: view.deferredScenarios.length,
+    ...(view.releases?.length
+      ? {
+          releases: view.releases.slice(0, HOME_LIMITS.releases).map((r) => {
+            if (r.id !== view.releaseId) return { id: clip(r.id), title: clip(r.title) };
+            // В объёме — фичи релиза без отложенных решением и неприменимых.
+            const scoped = (view.features ?? []).filter(
+              (f) => f.status !== 'deferred' && f.status !== 'not-applicable',
+            );
+            return {
+              id: clip(r.id),
+              title: clip(r.title),
+              features: scoped.length,
+              done: scoped.filter((f) => f.status === 'verified' || f.status === 'accepted').length,
+            };
+          }),
+          releasesTotal: view.releases.length,
+        }
+      : {}),
     asOf,
     href,
   };
@@ -1047,15 +1252,22 @@ export function homeSlowView(input: {
   product?: ProductView | { error: string };
   budgets?: Budgets;
   usage?: { calls: number; knownCostUsd: number; unknownCalls: number };
+  /** Записи вызовов моделей для расхода по дням. */
+  usageRecords?: readonly UsageRecord[];
   /** События разрывов цикла не старше часа (`Store.eventsSince`). */
   gapEvents?: readonly AuditEvent[];
 }): HomeSlow {
   const asOf = new Date(input.now).toISOString();
   const coverage = coverageOf(input.product, asOf, input.preparation);
   const budget = budgetOf(input.budgets, asOf);
+  const limitUsd = input.budgets?.budgets.find((b) => b.scope.kind === 'workspace')?.limit.usd;
   return {
     asOf,
     load: { ...loadOf(input.state.runs, input.now), asOf },
+    gateTrend: { ...gateTrendOf(input.state.runs, input.now), asOf },
+    ...(input.usageRecords
+      ? { spend: { ...spendOf(input.usageRecords, input.now, limitUsd), asOf } }
+      : {}),
     ...(coverage ? { coverage } : {}),
     gates: { ...gatesOf(input.state.runs, input.now), asOf },
     ...(budget ? { budget } : {}),

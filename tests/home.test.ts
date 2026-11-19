@@ -512,6 +512,10 @@ test('Home: on a large history the response stays bounded; per-revision cost is 
     const { text } = await get();
     const bytes = Buffer.byteLength(text);
     assert.ok(bytes < HOME_LIMITS.bytes, `${bytes} bytes`);
+    // В пределе — и ряды медленного яруса: проверки по часам и расход по дням.
+    const body = JSON.parse(text) as HomeView;
+    assert.equal(body.harness!.gateTrend!.hourly.length, 24);
+    assert.equal(body.harness!.spend!.days.length, HOME_LIMITS.spendDays);
 
     // Пересчёт на новую ревизию: центр внимания и главная (запрос целиком)
     // и одна главная над готовым центром внимания (homeView).

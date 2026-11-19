@@ -279,6 +279,7 @@ export async function serve(
       product,
       ...(budgets ? { budgets } : {}),
       usage: usageTotals(records),
+      usageRecords: records,
       gapEvents: engine.store.eventsSince(
         ['server.loop-stalled', 'server.clock-jump'],
         new Date(Date.now() - 60 * 60 * 1000).toISOString(),

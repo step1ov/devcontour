@@ -293,6 +293,27 @@ test('Charts: overall progress, agent load and hourly attempts render from route
       },
     ];
     progress.releasesTotal = 2;
+    const gates = Array.from({ length: 24 }, (): [number, number, number] => [0, 0, 0]);
+    gates[10] = [6, 3, 2];
+    gates[20] = [4, 0, 0];
+    harness.gateTrend = {
+      from: new Date(to - 24 * 3_600_000).toISOString(),
+      to: new Date(to).toISOString(),
+      hourly: gates,
+      asOf: home.generatedAt,
+    };
+    harness.spend = {
+      days: Array.from({ length: 7 }, (_, i) => ({
+        start: new Date(Date.parse('2026-11-13T00:00:00') + i * 86_400_000).toISOString(),
+        usd: i === 5 ? 12.5 : i === 6 ? 2.5 : 0,
+        calls: i >= 5 ? 4 : 0,
+        unknown: i === 6 ? 3 : 0,
+      })),
+      beforeUsd: 35,
+      beforeUnknown: 0,
+      limitUsd: 100,
+      asOf: home.generatedAt,
+    };
     await route.fulfill({ json: home });
   });
   await page.goto('/');
@@ -327,6 +348,43 @@ test('Charts: overall progress, agent load and hourly attempts render from route
     '1',
     '0',
   ]);
+  // Текущее значение — точкой у правого края, слоты — подписанной линией.
+  await expect(load.locator('[data-current="1"]')).toBeVisible();
+  await expect(load.getByText('слоты 2', { exact: true })).toBeVisible();
+  const gateChart = page.getByRole('figure', { name: /Проверки по часам/ });
+  await expect(gateChart).toContainText('Прошло 10, отказов 3, взято из кандидата 2');
+  await expect(gateChart.locator('table tbody tr')).toHaveCount(2);
+  await expect(gateChart.locator('table tbody tr').first().locator('td')).toHaveText([
+    '6',
+    '3',
+    '2',
+  ]);
+  // Стек часа: отказ, прошло, взято — три сегмента.
+  await expect(
+    gateChart.locator('svg g').nth(10).locator('rect[fill]:not([fill="transparent"])'),
+  ).toHaveCount(3);
+  const spendChart = page.getByRole('figure', { name: /Расход по дням/ });
+  await expect(spendChart).toContainText('За неделю $15.00, всего $50.00 из предела $100 (50%)');
+  await expect(spendChart).toContainText('стоимость неизвестна у 3 вызовов — суммы занижены');
+  await expect(spendChart).toContainText('предел $100');
+  await expect(spendChart.locator('table tbody tr')).toHaveCount(7);
+  await expect(spendChart.locator('table tbody tr').last().locator('td')).toHaveText([
+    '2.50',
+    '4',
+    '3',
+    '50.00',
+  ]);
+  // Кольца плиток — изображения с долей в доступном имени.
+  await expect(
+    page
+      .getByRole('region', { name: 'Разработка', exact: true })
+      .getByRole('img', { name: /^Задач выполнено: \d+ из \d+$/ }),
+  ).toBeVisible();
+  await expect(
+    page
+      .getByRole('region', { name: 'Исполнение' })
+      .getByRole('img', { name: 'Слотов занято: 0 из 2' }),
+  ).toBeVisible();
   const hourlyChart = page.getByRole('figure', { name: /Попытки по часам/ });
   await expect(hourlyChart).toContainText('Начато 5, со сбоем 2');
   await expect(hourlyChart.locator('table tbody tr')).toHaveCount(1);
@@ -336,4 +394,87 @@ test('Charts: overall progress, agent load and hourly attempts render from route
   await expect(load.locator('svg')).toBeVisible();
   await axeClean(page);
   expect(errors).toEqual([]);
+});
+
+test('Rings and compact tiles: preparation tiles with rings and a one-line not-applicable design; map releases without counts', async ({
+  page,
+}) => {
+  await page.route('**/api/home*', async (route) => {
+    const response = await route.fetch({ url: route.request().url().replace(/\?.*$/, '') });
+    const home = (await response.json()) as HomeView & { etag: string };
+    home.etag = 'rings';
+    home.preparation = true;
+    const s = home.sections;
+    s.product = { ...s.product, state: 'approved', revision: 3 };
+    s.architecture = { ...s.architecture, state: 'in-review', revision: 2 };
+    s.design = {
+      ...s.design,
+      state: 'not-applicable',
+      facts: [],
+      design: {
+        steps: [
+          { key: 'references', state: 'approved' },
+          { key: 'concept', state: 'not-applicable' },
+          { key: 'design', state: 'not-applicable' },
+        ],
+      },
+    };
+    home.progress!.releasesFrom = 'product-map';
+    home.progress!.releases = [
+      {
+        id: 'r1',
+        title: 'Карта',
+        tasks: 4,
+        done: 3,
+        failed: 0,
+        criteria: 0,
+        readiness: 'in-progress',
+        unit: 'features',
+      },
+      {
+        id: 'r2',
+        title: 'Потом',
+        tasks: 0,
+        done: 0,
+        failed: 0,
+        criteria: 0,
+        readiness: 'unplanned',
+        unit: 'features',
+        measured: false,
+      },
+    ];
+    home.progress!.releasesTotal = 2;
+    await route.fulfill({ json: home });
+  });
+  await page.setViewportSize({ width: 1440, height: 900 });
+  await page.goto('/');
+  const product = page.getByRole('region', { name: 'Продукт', exact: true });
+  await expect(product.getByRole('img', { name: 'Релизов готово: 0 из 2' })).toBeVisible();
+  await expect(product.getByText('Утверждено · v3')).toBeVisible();
+  const architecture = page.getByRole('region', { name: 'Архитектура', exact: true });
+  await expect(architecture.getByRole('img', { name: 'Утверждено этапов: 0 из 1' })).toBeVisible();
+  await expect(architecture.getByText('Ждёт вашего решения · v2')).toBeVisible();
+  // Неприменимый дизайн — одна строка, без кольца.
+  const design = page.getByRole('region', { name: 'Дизайн', exact: true });
+  await expect(design).toContainText('Дизайн к продукту не применяется.');
+  await expect(design.getByRole('img')).toHaveCount(0);
+  const box = await design.boundingBox();
+  expect(box!.height).toBeLessThan(60);
+  // Плитки продукта и архитектуры — одной высоты.
+  const [a, b] = await Promise.all([product.boundingBox(), architecture.boundingBox()]);
+  expect(Math.abs(a!.height - b!.height)).toBeLessThan(1);
+  const overall = page.getByRole('region', { name: 'Общий ход работ' });
+  await expect(overall.getByRole('list', { name: 'Релизы карты продукта' })).toBeVisible();
+  await expect(overall.getByRole('progressbar', { name: 'Релиз r1 Карта' })).toHaveAttribute(
+    'aria-valuetext',
+    '3 из 4 фич, в работе',
+  );
+  await expect(overall.getByRole('progressbar', { name: 'Релиз r2 Потом' })).toHaveAttribute(
+    'aria-valuetext',
+    'не начат; фичи этого релиза карта не считает',
+  );
+  await axeClean(page);
+  await page.setViewportSize({ width: 390, height: 844 });
+  expect(await noHorizontalScroll(page)).toBe(true);
+  await axeClean(page);
 });
