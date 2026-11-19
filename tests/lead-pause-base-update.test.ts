@@ -205,7 +205,13 @@ async function leadPauseOverMove(
 }
 
 /** Действие оператора есть в центре внимания и на главной — до и после снятия паузы ведущим. */
-async function operatorActs(h: DevContour, agent: AgentService, name: string) {
+async function operatorActs(
+  h: DevContour,
+  agent: AgentService,
+  name: string,
+  /** Выход, который называет карточка паузы ведущего. */
+  expected: RegExp,
+) {
   for (const phase of ['under the lead pause', 'after the lead lifts it']) {
     if (phase !== 'under the lead pause')
       await agent.run({ operation: 'queue_set', input: { paused: false } });
@@ -217,13 +223,19 @@ async function operatorActs(h: DevContour, agent: AgentService, name: string) {
       `${name}, ${phase}`,
     );
     assert.match(queue.hint ?? '', /Проверьте базу gates и запустите очередь/, `${name}, ${phase}`);
-    // Карточка паузы не обещает проверки, которой цикл не сделает.
+    // Карточка паузы не обещает проверки, которой цикл не сделает, а
+    // называет реальный выход.
     for (const item of attention.items)
       assert.doesNotMatch(
         item.reason,
         /Цикл ведущего проверит базу/,
         `${name}, ${phase}: ${item.sourceKey}`,
       );
+    if (phase === 'under the lead pause') {
+      const pause = attention.items.find((i) => i.sourceKey === 'queue');
+      assert.equal(pause?.actor, 'lead', name);
+      assert.match(pause?.reason ?? '', expected, name);
+    }
   }
 }
 
@@ -240,7 +252,12 @@ test('F93: without a current base-move range the loop cannot check the base — 
     await withRepo(async ({ h, data }) => {
       const agent = await leadPauseOverMove(h, data, 'board', edit);
       assert.equal(baseMovesOf(h.store.read()), undefined, name);
-      await operatorActs(h, agent, name);
+      await operatorActs(
+        h,
+        agent,
+        name,
+        /Цикл ведущего эту базу не проверит: у ожидания нет диапазона переноса/,
+      );
       // Пауза ведущего снята, очередь на ожидании: сам цикл эту базу не проверит.
       assert.equal(h.store.read().pauseReason, 'base-check', name);
       assert.equal(await checkBase(h, { data, state: data }, () => {}), false, name);
@@ -251,7 +268,7 @@ test('F93: without a current base-move range the loop cannot check the base — 
 test('F93: a ChangeSet job does not check the base — with no board job the operator acts', async () => {
   await withRepo(async ({ h, data }) => {
     const agent = await leadPauseOverMove(h, data, 'changeset');
-    await operatorActs(h, agent, 'changeset only');
+    await operatorActs(h, agent, 'changeset only', /зарегистрируйте доску через workflow_start/);
   });
 });
 

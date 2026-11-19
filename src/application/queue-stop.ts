@@ -29,15 +29,16 @@ export function queueStopOf(
   state: Readonly<DevContourState> = h.store.view(),
   events: AuditEvent[] = h.store.events(),
 ) {
-  // Кто проверит перенесённую базу — только при ожидании проверки базы.
+  // Работа ведущего нужна только для подсказки остановленной очереди; кто
+  // проверит перенесённую базу — только при ожидании проверки базы с
+  // диапазоном. Задания читаются один раз.
+  const live = state.paused ? liveJobKinds(h) : undefined;
   const baseWait = state.paused && state.waits?.some((w) => w.kind === 'base-check');
+  const baseRange = baseWait ? Boolean(baseMovesOf(state)) : undefined;
   const view = queueStopView(state, events, {
     approvalMode: h.config.approvalMode,
-    // Работа ведущего нужна только для подсказки остановленной очереди.
-    workflowActive: state.paused && workflowActive(h),
-    ...(baseWait
-      ? { baseRange: Boolean(baseMovesOf(state)), boardActive: boardWorkflowActive(h) }
-      : {}),
+    workflowActive: Boolean(live?.size),
+    ...(baseWait ? { baseRange, ...(baseRange ? { boardActive: live!.has('board') } : {}) } : {}),
   });
   // Вопрос исполнителя очередь не останавливает (`needs-input` не держит
   // выдачу): рядом с её состоянием — сколько задач ждут ответа.
@@ -97,12 +98,14 @@ function boardWorkflowActive(h: DevContour) {
   );
 }
 
-/** Есть ли работа ведущего, которую продвинет цикл `serve` (queued/running). */
-function workflowActive(h: DevContour) {
+/** Виды заданий ведущего, которые продвинет цикл `serve` (queued/running), одним обходом. */
+function liveJobKinds(h: DevContour) {
   const workflow = new LeadWorkflow(h);
-  return [undefined, ...repositories(h.config).map((r) => r.id)].some((owner) =>
-    workflow.list(owner).some((j) => j.status === 'queued' || j.status === 'running'),
-  );
+  const kinds = new Set<string>();
+  for (const owner of [undefined, ...repositories(h.config).map((r) => r.id)])
+    for (const j of workflow.list(owner))
+      if (j.status === 'queued' || j.status === 'running') kinds.add(j.kind);
+  return kinds;
 }
 
 /** Идущая попытка без движения глазами ведущего агента и CLI. */
