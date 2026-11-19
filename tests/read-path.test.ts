@@ -19,9 +19,9 @@ import { etagged } from '../src/application/projection-cache.ts';
  * разбор — сотни миллисекунд. Счётчик — разборы строки документа (и полного
  * чтения `read`, и снимка версии).
  *
- * Известное оставшееся полное чтение — сводка вопросов исполнителя
- * (`InputService.summaryContext`, источник `input` центра внимания): оно
- * считается отдельно (`known`) и не больше одного на расчёт центра.
+ * Сводка вопросов исполнителя (`InputService.summaryContext`, источник
+ * `input` центра внимания) прежде оставалась полным чтением; с F83 она тоже
+ * читает снимок. Её чтения считаются отдельно (`known`) и должны быть нулём.
  */
 const KNOWN_READ = 'InputService.summaryContext';
 function countParses() {
@@ -110,7 +110,7 @@ test('Read path: preparation, overview, lead jobs, queue stop and attention read
     assert.ok(attention.items.some((i) => i.source === 'prep-question'));
     assert.equal(count.reads, 0, 'no Store.read on the polled paths');
     assert.equal(count.parses, 0, 'the version snapshot is parsed once and shared');
-    assert.ok(count.known <= 1, 'the writer-question summary reads once per attention view');
+    assert.equal(count.known, 0, 'the writer-question summary reads the snapshot (F83)');
     // Снимок по-прежнему заморожен: проекции его не правят.
     assert.ok(Object.isFrozen(f.store.view().tasks));
   } finally {
@@ -178,7 +178,7 @@ test('Read path: /api/preparation, /api/overview and /api/attention of one revis
     await text('/api/attention');
     assert.equal(count.reads, 0, 'no Store.read');
     assert.ok(count.parses <= 1, `one parse per revision, got ${count.parses}`);
-    assert.ok(count.known <= 1);
+    assert.equal(count.known, 0);
 
     // Тело подготовки — вид по копии документа с полями движка.
     const parsed = JSON.parse(preparation) as Record<string, unknown>;

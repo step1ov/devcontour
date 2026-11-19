@@ -13,7 +13,12 @@ import {
   type Task,
 } from '../core/model.ts';
 import type { DevContour } from '../core/service.ts';
-import { carriedTaskIds, heldBaseOf, staleBaseStop } from '../core/work-status.ts';
+import {
+  carriedTaskIds,
+  heldBaseOf,
+  mayBeStaleBaseStop,
+  staleBaseStop,
+} from '../core/work-status.ts';
 import { repairDecision, type RepairDecision } from '../core/repair.ts';
 import { findingOutsideScope } from '../core/workflow.ts';
 
@@ -152,8 +157,11 @@ export function pauseStep(
 }
 
 /** Последние сбои такта очереди: вход правила `pauseStep`. */
-export const tickErrors = (h: Pick<DevContour, 'store'>) =>
-  h.store.latestEvents(['scheduler.error'], 50);
+export const tickErrors = (
+  h: Pick<DevContour, 'store'>,
+  /** Состояние решения: не под возможной остановкой «база отстала» журнал не нужен (F83). */
+  s?: Pick<DevContourState, 'paused' | 'pauseReason' | 'pausedAt' | 'pauseFailures' | 'waits'>,
+) => (s && !mayBeStaleBaseStop(s) ? [] : h.store.latestEvents(['scheduler.error'], 50));
 
 /** Задачи текущей ревизии доски без перенесённых из принятой. */
 export function boardTasks(s: DevContourState, boardId: string) {
@@ -336,7 +344,7 @@ export function loopOutlook(h: DevContour, s: DevContourState, job: WorkflowJob)
       reason: repair.reason,
     };
   if (repair) return { step: 'repair', taskId: repair.taskId, reason: repair.reason };
-  const pause = pauseStep(s, job, scope.tasks, tickErrors(h));
+  const pause = pauseStep(s, job, scope.tasks, tickErrors(h, s));
   if (pause.checkBase) return { step: 'check-base' };
   if (pause.lift && s.paused)
     return {
@@ -368,7 +376,7 @@ export function liftsPause(h: DevContour, s: DevContourState, job: WorkflowJob):
   const found = boardTasks(s, job.id);
   return (
     !!found &&
-    pauseStep(s, { ...job, stage }, leadScope(found.tasks, s.runs).tasks, tickErrors(h)).lift
+    pauseStep(s, { ...job, stage }, leadScope(found.tasks, s.runs).tasks, tickErrors(h, s)).lift
   );
 }
 

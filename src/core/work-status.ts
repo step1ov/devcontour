@@ -111,6 +111,21 @@ export const leadLiftsPause = (
 export const STALE_BASE = 'База прогонов отстала от рабочей ветки';
 
 /**
+ * Может ли пауза быть остановкой «база прогонов отстала» (`staleBaseStop`):
+ * пауза без причины, классов отказа и ожиданий. Без неё журнал сбоев такта
+ * не читается — такт и цикл ведущего на идущей очереди не просматривают
+ * журнал каждые несколько сотен миллисекунд (F83).
+ */
+export const mayBeStaleBaseStop = (
+  state: Pick<DevContourState, 'paused' | 'pauseReason' | 'pausedAt' | 'pauseFailures' | 'waits'>,
+) =>
+  !!state.paused &&
+  !state.pauseReason &&
+  !state.pauseFailures?.length &&
+  !state.waits?.length &&
+  !!state.pausedAt;
+
+/**
  * Остановка такта «база прогонов отстала»: пауза без причины, классов отказа
  * и ожиданий, причина которой (последний сбой такта после неё) — отставание
  * базы. Возвращает её причину (`stopReason`). Один источник для такта,
@@ -125,14 +140,7 @@ export function staleBaseStop(
   >,
   events: Pick<AuditEvent, 'id' | 'at' | 'type' | 'data'>[],
 ): string | undefined {
-  if (
-    !state.paused ||
-    state.pauseReason ||
-    state.pauseFailures?.length ||
-    state.waits?.length ||
-    !state.pausedAt
-  )
-    return undefined;
+  if (!mayBeStaleBaseStop(state)) return undefined;
   const stop = queueStopView(state, events);
   return stop.reason === 'runtime' && stop.stopReason?.startsWith(STALE_BASE)
     ? stop.stopReason

@@ -3564,7 +3564,7 @@ export class AttentionService {
         .slice(0, ATTENTION_LIMITS.history)
         .map((r) => this.historyItem(ctx, r, marks, boardByTask));
       return {
-        revision: this.store.revision(),
+        revision: this.store.visibleRevision(),
         generatedAt: new Date(now).toISOString(),
         engineConnected: Boolean(this.h),
         items,
@@ -3651,7 +3651,7 @@ export class AttentionService {
       };
       const byActor = { operator: count('operator'), lead: count('lead') };
       return {
-        revision: this.store.revision(),
+        revision: this.store.visibleRevision(),
         generatedAt: new Date(now).toISOString(),
         engineConnected: Boolean(this.h),
         lead: this.lead(ctx),

@@ -590,8 +590,15 @@ export class Store {
       }
     }
   }
+  /**
+   * Счёт разборов документа этим соединением (диагностика простоя, F83,
+   * `GET /api/metrics`): `reads` — изменяемые копии (`read`), `parses` — все
+   * разборы строки документа (копии и новые версии снимка `view`).
+   */
+  readonly parseStats = { reads: 0, parses: 0 };
   /** Изменяемая копия текущего состояния. */
   read(): DevContourState {
+    this.parseStats.reads++;
     // Компонентное хранение читает несколько баз — одним снимком; внутри
     // `snapshot()` или транзакции записи используется уже открытый.
     return this.atomicRead(() => this.readUnlocked());
@@ -960,6 +967,7 @@ export class Store {
    * которые тип считает обязательными; они восполняются (`normalized`).
    */
   private parseDocument(text: string): { state: DevContourState; normalized: boolean } {
+    this.parseStats.parses++;
     const raw = JSON.parse(text) as DevContourState & { componentLayout?: unknown };
     const state: DevContourState & { componentLayout?: unknown; changeSets?: unknown[] } = this
       .components
@@ -1926,6 +1934,50 @@ export class Store {
    */
   revision(): number {
     return this.version().revision;
+  }
+  /**
+   * Записи этого процесса, после которых видимые данные остались прежними
+   * (`noteQuietWrites`, F83): ожидающая стадия задания ведущего захватывается
+   * и возвращается двумя записями, а задание остаётся тем же.
+   */
+  private quiet = 0;
+  /** Сколько раз выдана видимая ревизия (`visibleRevision`). */
+  private issued = 0;
+  /**
+   * Отметка перед первой из записей, которые могут оказаться тихими: её
+   * передают в `noteQuietWrites`.
+   */
+  quietMark(): number {
+    return this.issued;
+  }
+  /**
+   * Отметить `count` своих зафиксированных записей, сделанных после `mark`
+   * (`quietMark`), которые в сумме ничего видимого не изменили (запись
+   * вернула прежнее значение). Учитываются, только если с отметки видимая
+   * ревизия никому не выдавалась: иначе номер, выданный посередине (ревизия
+   * после первой записи), после вычитания достался бы другим данным.
+   * Возвращает, учтены ли записи.
+   */
+  noteQuietWrites(count: number, mark: number): boolean {
+    if (count <= 0 || mark !== this.issued) return false;
+    this.quiet += count;
+    return true;
+  }
+  /**
+   * Ревизия для кэшей проекций панели (центр внимания, сводка, главная) и
+   * номера их ответов: `revision` без тихих записей этого процесса (F83).
+   * Не убывает и не повторяется для разных видимых данных: вычитаются только
+   * записи, сделанные после последней выдачи номера, поэтому прежний номер
+   * возвращается, только если с его выдачи были одни тихие записи. Растёт
+   * при любой записи другого процесса и при любой своей, которая могла
+   * изменить видимое. Гарантия — для зафиксированных данных: внутри
+   * транзакции записи номер не выдаётся (её откат вернул бы номер другим
+   * данным); в снимке (`snapshot`) — ревизия этого снимка.
+   */
+  visibleRevision(): number {
+    if (this.transaction) throw new Error('Store.visibleRevision вне транзакции записи');
+    this.issued++;
+    return this.revision() - this.quiet;
   }
   version(): { revision: number; lease: number } {
     const row = this.db.prepare('SELECT n, lease FROM main.revision WHERE id=1').get() as {
