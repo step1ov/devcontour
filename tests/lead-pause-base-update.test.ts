@@ -99,7 +99,9 @@ test('F89: base-update поверх паузы ведущего — пауза �
     // Пакет ведущего: шаг — своя пауза с причиной.
     const next = devcontourHandoff(h, {}).host.next;
     assert.equal(next?.code, 'pause-operator', JSON.stringify(next));
-    assert.deepEqual(next?.params, { by: 'lead', reason });
+    // Задания доски нет: базу проверит только зарегистрированная доска (F93).
+    assert.deepEqual(next?.params, { by: 'lead', reason, base: 'no-board' });
+    assert.match(next?.detail ?? '', /register the board with workflow_start/);
     assert.match(next?.detail ?? '', /paused by the lead/);
     assert.doesNotMatch(next?.detail ?? '', /user's decision/);
     // Центр внимания: карточка паузы — ведущего, а не оператора.
@@ -305,7 +307,7 @@ test('F89: base-update поверх паузы человека — пауза �
     assert.match(moved.next, /под паузой\. Паузу человека снимает пользователь/);
     const next = devcontourHandoff(h, {}).host.next;
     assert.equal(next?.code, 'pause-operator');
-    assert.deepEqual(next?.params, {});
+    assert.deepEqual(next?.params, { base: 'no-board' });
   });
 });
 
@@ -405,13 +407,15 @@ test('F93: session_handoff host.next names the real way out of a base check — 
       // проверки, которой цикл не сделает.
       const before = devcontourHandoff(h, {}).host.next!;
       assert.equal(before.code, 'pause-operator', name);
+      const gap = unchecked ? 'unchecked' : name === 'changeset only' ? 'no-board' : undefined;
       assert.deepEqual(
         before.params,
-        { by: 'lead', reason: 'Guides', ...(unchecked ? { base: 'unchecked' } : {}) },
+        { by: 'lead', reason: 'Guides', ...(gap ? { base: gap } : {}) },
         name,
       );
-      if (unchecked) assert.doesNotMatch(before.detail, /the board workflow checks the base/, name);
+      if (gap) assert.doesNotMatch(before.detail, /the board workflow checks the base/, name);
       else assert.match(before.detail, /the board workflow checks the base/, name);
+      if (gap === 'no-board') assert.match(before.detail, /register the board with workflow_start/);
       await agent.run({ operation: 'queue_set', input: { paused: false } });
       assert.equal(h.store.read().pauseReason, 'base-check', name);
       const after = devcontourHandoff(h, {}).host.next!;
@@ -429,5 +433,29 @@ test('F93: session_handoff host.next names the real way out of a base check — 
         assert.equal(after.action, 'workflow_start', name);
         assert.equal(after.code, 'board-start', name);
       }
+    });
+});
+
+test('F93: host.next for a base wait the loop cannot check — with another board waiting for a plan decision, and with a failed check', async () => {
+  for (const name of ['other board plan', 'failed check'] as const)
+    await withRepo(async ({ h, data }) => {
+      const agent = await leadPauseOverMove(h, data, 'board', (s) => {
+        delete s.baseMoves;
+        if (name === 'failed check')
+          for (const w of s.waits ?? []) w.detail = 'Проверка базы не пройдена: main/unit';
+      });
+      // Черновик другой доски: решение о плане ждёт, а живое задание первой
+      // доски не должно выглядеть ожиданием проверки базы.
+      if (name === 'other board plan') h.addTask(h.createBoard('Draft board').id, input('Draft'));
+      await agent.run({ operation: 'queue_set', input: { paused: false } });
+      assert.equal(h.store.read().pauseReason, 'base-check', name);
+      const next = devcontourHandoff(h, {}).host.next!;
+      assert.equal(next.action, 'operator', `${name}: ${JSON.stringify(next)}`);
+      assert.equal(next.code, 'base-unchecked', name);
+      if (name === 'failed check') {
+        assert.deepEqual(next.params, { failed: true });
+        assert.match(next.detail, /fix the base and run devcontour base-update --by host/);
+      } else assert.deepEqual(next.params, {});
+      assert.equal(await checkBase(h, { data, state: data }, () => {}), false, name);
     });
 });
