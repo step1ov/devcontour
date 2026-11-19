@@ -9,6 +9,7 @@ import { executionOf } from '../harness/execution.ts';
 import { LeadWorkflow } from '../core/lead-workflow.ts';
 import { DomainError, unverifiedFinding, type Contract } from '../core/model.ts';
 import { contractDigest, digest, latestRedaction, type DevContour } from '../core/service.ts';
+import { specDigest } from '../core/task-digest.ts';
 import { consolidationPlan, reviewConsolidation, StaleConsolidation } from './consolidation.ts';
 import { repositories, repository } from '../core/repositories.ts';
 import {
@@ -200,6 +201,18 @@ export type ContractChange = {
   contractId?: string;
   held: string[];
   rebound: string[];
+  /**
+   * Digest постановки (`specDigest`) каждой перепривязанной задачи
+   * непосредственно перед перепривязкой (F85): перенос ответа маршрута
+   * сверяет его с постановкой времени вопроса.
+   */
+  reboundSpecs?: Record<string, string>;
+  /**
+   * Утверждённый digest постановки перепривязанных задач при завершении
+   * операции (F85): позже изменённая постановка переносу ответа маршрута
+   * основанием не служит.
+   */
+  approvedSpecs?: Record<string, string>;
   /**
    * Неразобранные черновики находок агентов среди перепривязанных (F81):
    * они остаются черновиками с новой привязкой и на ревью плана операции не
@@ -737,6 +750,13 @@ export class ContractChanges {
       this.log(current, stepsOf(current)[current.step], 'done');
       current.step++;
       if (current.step >= stepsOf(current).length) {
+        // Утверждённые постановки перепривязанных задач при завершении (F85).
+        const tasks = this.h.store.read().tasks;
+        const approved = current.rebound.flatMap((id) => {
+          const digest = tasks.find((t) => t.id === id)?.approvedDigest;
+          return digest ? [[id, digest] as const] : [];
+        });
+        if (approved.length) current.approvedSpecs = Object.fromEntries(approved);
         current.status = 'completed';
         current.finishedAt = new Date().toISOString();
         current.token = undefined;
@@ -1385,6 +1405,7 @@ export class ContractChanges {
           (t) => op.held.includes(t.id) && t.contracts.some((c) => from.includes(c)),
         );
         this.advanceStep(op, (current) => {
+          const before = new Map(this.h.store.read().tasks.map((t) => [t.id, specDigest(t)]));
           const rebound = this.h.rebind(
             direct.map((t) => t.id),
             from,
@@ -1392,6 +1413,10 @@ export class ContractChanges {
           );
           const state = this.h.store.read();
           current.rebound = [...new Set([...current.rebound, ...rebound])];
+          current.reboundSpecs = {
+            ...current.reboundSpecs,
+            ...Object.fromEntries(rebound.map((id) => [id, before.get(id)!])),
+          };
           current.boards = [
             ...new Set(
               current.rebound

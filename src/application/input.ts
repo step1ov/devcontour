@@ -410,6 +410,20 @@ const EARLIER_EXCERPT = 500;
 
 /** Локальные записи аренды ревью ответа (`local_workflow`), ключ — ID запроса. */
 const REVIEW_LEASE = 'input-review-lease';
+/**
+ * Раунды ревью ответа, маршрут contract-change которых признан при самом
+ * ревью (F85): ключ — `<запрос>:<раунд>`, постановка и закреплённые
+ * контракты задачи, которую ревью читало. Только эти раунды дают основание
+ * переносу ответа в правленую постановку (`routeCarry`).
+ */
+const ROUTE_ROUNDS = 'input-route-round';
+interface RouteRound {
+  requestId: string;
+  round: number;
+  specDigest: string;
+  pinned: string[];
+  contracts: string[];
+}
 type InputReviewLease = { token: string; startedAt: string; leaseUntil: number };
 
 /**
@@ -756,16 +770,26 @@ export class InputService {
    * Перенос ответа маршрута contract-change в правленую постановку (F85):
    * ревью плана операции потребовало правки постановки задачи вопроса, и
    * исходная остановка уже не держится (`moved`), хотя ответ — тот же
-   * ответ, которому маршрут назвал только поправку контракта. Условия:
-   * блокирующий вопрос с ответом-уточнением; раунд ревью назвал маршрут для
-   * этого последнего ответа (снимок раунда несёт его); операция маршрута
-   * завершена и перепривязала эту задачу после вопроса; после вопроса
-   * другой попытки не было, и задача снова на исходной остановке. Тогда
-   * выход — не решение оператора (замена критического вопроса), а перенос
-   * его же ответа ведущим или проходом сервера: ответ снова проходит ревью
-   * на правленой постановке, и только одобренный раунд по текущей
-   * постановке переносится (`input_apply`: замена той же задачей и перенос
-   * одной записью). Новый ответ маршрут прежнего не наследует. Только чтение.
+   * ответ, которому маршрут назвал только поправку контракта. Тогда выход —
+   * не решение оператора (замена критического вопроса), а перенос его же
+   * ответа ведущим или проходом сервера: ответ снова проходит ревью на
+   * правленой постановке, и только одобренный раунд по текущей постановке
+   * переносится (`input_apply`: замена той же задачей и перенос одной
+   * записью). Основание — снимки, а не журнал правок (правка, отмена
+   * утверждения или импорт Git sync меняют digest постановки любым путём):
+   *
+   * - маршрут раунда признан при самом ревью (`ROUTE_ROUNDS`) на постановке
+   *   времени вопроса, и снимок раунда несёт последний ответ;
+   * - операция маршрута завершена, её редакция закреплена за задачей, и она
+   *   перепривязала задачу после вопроса с той же постановкой, что была при
+   *   вопросе (`reboundSpecs`: правка до операции — другое решение);
+   * - постановка сейчас — та, что утверждена при завершении операции
+   *   (`approvedSpecs`): позже её не меняли ни правкой, ни возвратом в
+   *   черновик, ни синхронизацией;
+   * - другой попытки после вопроса не было, задача на исходной остановке, а
+   *   последний раунд по текущей постановке не отклонён.
+   *
+   * Новый ответ маршрут прежнего не наследует. Только чтение.
    */
   routeCarry(view: ExecutionView, request: InputRequest) {
     if (request.kind !== 'question' || !request.blocking || request.lifecycle !== 'answered')
@@ -780,7 +804,7 @@ export class InputService {
     if (this.originOf(view, request) !== 'moved') return false;
     const state = executionOf(this.h).store.stateOf(view);
     const task = state.tasks.find((t) => t.id === request.workId);
-    if (!task) return false;
+    if (!task?.approvedDigest || specDigest(task) !== task.approvedDigest) return false;
     const rounds = inputReviewRounds(view, request.id);
     // Отклонение на правленой постановке — обычное отклонение: ответ
     // исправляет оператор, а выход из сдвинутой остановки снова его.
@@ -791,50 +815,23 @@ export class InputService {
       last.digest === inputReviewDigest(this.h, task, request.id, answer.digest)
     )
       return false;
-    const operations = this.operations();
+    const origin = request.originBasis.orderDigest;
     return rounds.some((round) => {
-      // Проверенный маршрут (`routeOf`): каждый названный контракт закреплён
-      // за задачей или заменён в ней более поздней редакцией той же цепочки.
-      const route = this.routeOf(request, task, round, false, state.contracts);
-      const op = route?.operation;
-      if (op?.status !== 'completed' || !op.contractId) return false;
-      // Редакция, которую провела операция, закреплена за задачей сейчас, и
-      // задачу перепривязала именно она, после вопроса.
-      if (!task.contracts.includes(op.contractId) || !op.rebound?.includes(task.id)) return false;
-      const at = reboundAt(op);
-      if (at < request.createdAt) return false;
-      // Позже её задачу не перепривязывала и не держит другая операция.
-      if (
-        operations.some(
-          (other) =>
-            other.id !== op.id &&
-            other.startedAt > op.startedAt &&
-            other.status !== 'abandoned' &&
-            (!!other.rebound?.includes(task.id) ||
-              (!!other.held?.includes(task.id) && other.status !== 'completed')),
-        )
-      )
-        return false;
-      return this.editedOnlyAfter(task.id, request.createdAt, at);
-    });
-  }
-
-  /**
-   * Постановку задачи правили только после перепривязки операцией (`at`),
-   * а перепривязки вручную позже не было: правка до операции — другое
-   * решение, чем правка, которой потребовало её ревью плана (F85). Чтение
-   * журнала с момента вопроса.
-   */
-  private editedOnlyAfter(taskId: string, since: string, at: string) {
-    const touches = (data: unknown) =>
-      Array.isArray(data)
-        ? data.includes(taskId)
-        : !!data && typeof data === 'object' && (data as { id?: unknown }).id === taskId;
-    return !this.h.store
-      .eventsSince(['task.edited', 'task.rebound'], since)
-      .some((e) =>
-        e.type === 'task.edited' ? e.at < at && touches(e.data) : e.at > at && touches(e.data),
+      const valid = this.h.store.localRecord<RouteRound>(
+        ROUTE_ROUNDS,
+        undefined,
+        `${request.id}:${round.round}`,
       );
+      if (!valid || valid.specDigest !== origin || !round.contextDigest) return false;
+      if (!this.carries(request, round.contextDigest).ok) return false;
+      const op = this.routeOperation(round, valid.contracts, state.contracts);
+      if (op?.status !== 'completed' || !op.contractId) return false;
+      if (!task.contracts.includes(op.contractId) || !op.rebound?.includes(task.id)) return false;
+      if (reboundAt(op) < request.createdAt) return false;
+      return (
+        op.reboundSpecs?.[task.id] === origin && op.approvedSpecs?.[task.id] === task.approvedDigest
+      );
+    });
   }
 
   /**
@@ -2016,6 +2013,21 @@ export class InputService {
             : AbortSignal.timeout(this.h.config.runTimeoutMs),
         },
       );
+      // Маршрут, признанный на постановке, которую ревью читало (F85): позже
+      // задача может закрепить и другие контракты, основание — этот снимок.
+      const routed = record.approved
+        ? undefined
+        : this.routeOf(request, task, record, true, this.h.store.read().contracts);
+      if (routed)
+        this.h.store.atomic(() =>
+          this.h.store.saveLocal(ROUTE_ROUNDS, undefined, `${request.id}:${record.round}`, {
+            requestId: request.id,
+            round: record.round,
+            specDigest: specDigest(task),
+            pinned: [...task.contracts],
+            contracts: routed.ids,
+          } satisfies RouteRound),
+        );
       const active = this.activeInGraph(task.id);
       // Маршрут раунда (F83) — по записи, тем же правилом, что у сводки.
       const after = this.engine.read((view) =>

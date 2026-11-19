@@ -17,6 +17,7 @@ import { LeadWorkflow } from '../src/core/lead-workflow.ts';
 import { executionOf } from '../src/harness/execution.ts';
 import { repositories } from '../src/core/repositories.ts';
 import { specDigest } from '../src/core/task-digest.ts';
+import { recordsFromState, stateFromRecords } from '../src/core/sync-state.ts';
 import type { ContractChangeTrace } from '../src/application/input-rebound.ts';
 import { ContractChanges, type ContractChange } from '../src/runner/contract-change.ts';
 import { reviewContract } from '../src/runner/agent-control.ts';
@@ -182,8 +183,11 @@ function operation(
   status: ContractChange['status'],
   id = 'CC-route',
   file = source,
-  /** Момент шага rebind операции (без него — её конец). */
-  rebindAt?: string,
+  /**
+   * След перепривязки (F85): момент шага rebind и постановка задачи перед
+   * ним; у завершённой — утверждённая постановка при завершении.
+   */
+  provenance?: { rebindAt: string; before: string },
 ) {
   const all = repositories(f.h.config);
   const owner = all.some((r) => r.id === 'main') ? 'main' : all[0].id;
@@ -197,7 +201,14 @@ function operation(
     rebound: contractId ? [taskId] : [],
     held: [taskId],
     boards: [],
-    history: rebindAt ? [{ at: rebindAt, step: 'rebind', event: 'done' }] : [],
+    history: provenance ? [{ at: provenance.rebindAt, step: 'rebind', event: 'done' }] : [],
+    ...(provenance && contractId ? { reboundSpecs: { [taskId]: provenance.before } } : {}),
+    ...(provenance && status === 'completed'
+      ? (() => {
+          const approved = f.store.read().tasks.find((t) => t.id === taskId)?.approvedDigest;
+          return approved ? { approvedSpecs: { [taskId]: approved } } : {};
+        })()
+      : {}),
     step: 0,
     startedAt: new Date().toISOString(),
     ...(['completed', 'abandoned', 'stale'].includes(status)
@@ -689,7 +700,10 @@ test('F83: only a validated route exempts earlier server-pass reviews from the l
 });
 
 /** Правка постановки перепривязанной задачи в черновике (её требует ревью плана операции). */
-function respecify(f: InputFixture, taskId: string) {
+const specOf = (f: InputFixture, taskId: string) =>
+  specDigest(f.store.read().tasks.find((t) => t.id === taskId)!);
+
+function respecify(f: InputFixture, taskId: string, extra: { contracts?: string[] } = {}) {
   const t = f.store.read().tasks.find((x) => x.id === taskId)!;
   f.h.editTask(
     taskId,
@@ -698,7 +712,7 @@ function respecify(f: InputFixture, taskId: string) {
       description: `${t.description} The amended contract wording is named in the spec.`,
       role: t.role,
       acceptance: [...t.acceptance, 'The amended wording is covered.'],
-      contracts: t.contracts,
+      contracts: extra.contracts ?? t.contracts,
     },
     specDigest(t),
   );
@@ -728,11 +742,12 @@ test('F85: a spec edit forced by the route operation does not make the critical 
   try {
     await review(f, requestId);
     assert.equal(f.service.show({ requestId }).state, 'contract-change-required');
+    const before = specOf(f, taskId);
     const v2 = rebind(f, taskId, v1.id, pins);
     const rebindAt = new Date().toISOString();
     respecify(f, taskId);
     f.h.approve(boardId, [taskId]);
-    operation(f, taskId, v2.id, 'completed', 'CC-route', source, rebindAt);
+    operation(f, taskId, v2.id, 'completed', 'CC-route', source, { rebindAt, before });
 
     // До нового ревью: ход ведущего (ревью того же ответа), не оператора.
     const saved = f.service.show({ requestId });
@@ -784,11 +799,12 @@ test('F85: with a running server the pass reviews and carries the same answer in
     };
     await ticks(3);
     assert.equal(f.service.show({ requestId }).state, 'contract-change-required');
+    const before = specOf(f, taskId);
     const v2 = rebind(f, taskId, v1.id, pins);
     const rebindAt = new Date().toISOString();
     respecify(f, taskId);
     f.h.approve(boardId, [taskId]);
-    operation(f, taskId, v2.id, 'completed', 'CC-route', source, rebindAt);
+    operation(f, taskId, v2.id, 'completed', 'CC-route', source, { rebindAt, before });
     await ticks(3);
     assert.equal(prompts.length, 2, 'проход проверил тот же ответ на правленой постановке');
     const applied = f.store
@@ -814,6 +830,9 @@ test('F85: the carry needs the validated route and its own completed operation; 
     'later-operation',
     'edit-before',
     'unpinned-contract',
+    'reopen-after',
+    'sync-before',
+    'unpinned-added-later',
   ] as const;
   for (const name of cases) {
     let other = '';
@@ -832,7 +851,7 @@ test('F85: the carry needs the validated route and its own completed operation; 
                     }
                   : routeWhileBound(p)(prompt),
             }
-          : name === 'unpinned-contract'
+          : name === 'unpinned-contract' || name === 'unpinned-added-later'
             ? {
                 // Раунд называет закреплённый A и существующий, но не
                 // закреплённый B: обычное отклонение, не маршрут.
@@ -858,18 +877,40 @@ test('F85: the carry needs the validated route and its own completed operation; 
             : {}),
     });
     try {
-      if (name === 'unpinned-contract')
+      if (name === 'unpinned-contract' || name === 'unpinned-added-later')
         other = f.h.contract('Other format', 'Other.', undefined, undefined, 'docs/other.md').id;
       if (name !== 'no-route') await review(f, requestId);
+      if (name === 'sync-before') {
+        // Постановку черновика изменил импорт Git sync (копия-соседка): события
+        // правки в журнале нет, а постановка при перепривязке уже не та, что
+        // при вопросе. Импорт меняет только черновик — задачу сперва вернули.
+        f.h.reopen(taskId, 'respecified on another clone');
+        const state = f.store.read();
+        const peer = structuredClone(state);
+        const t = peer.tasks.find((x) => x.id === taskId)!;
+        t.description = `${t.description} Changed by a peer clone.`;
+        const imported = stateFromRecords(f.h, state, recordsFromState(f.h, peer), new Map());
+        f.store.change('git.synchronized', (s) => {
+          s.tasks = imported.tasks;
+        });
+        assert.match(
+          f.store.read().tasks.find((x) => x.id === taskId)!.description,
+          /Changed by a peer clone/,
+        );
+      }
       if (name === 'edit-before') {
         // Постановку правили до операции: это не правка, которой потребовало
         // её ревью плана.
         f.h.reopen(taskId, 'respecify before the contract change');
         respecify(f, taskId);
       }
+      const before = specOf(f, taskId);
       const v2 = rebind(f, taskId, v1.id, pins);
       const rebindAt = new Date().toISOString();
-      if (name !== 'edit-before') respecify(f, taskId);
+      // Правка после перепривязки добавляет B: маршрут раунда признан при
+      // ревью без него и признанным позже не становится.
+      if (name === 'unpinned-added-later') respecify(f, taskId, { contracts: [v2.id, other] });
+      else if (name !== 'edit-before' && name !== 'sync-before') respecify(f, taskId);
       f.h.approve(boardId, [taskId]);
       operation(
         f,
@@ -878,7 +919,7 @@ test('F85: the carry needs the validated route and its own completed operation; 
         name === 'running' ? 'running' : 'completed',
         'CC-route',
         source,
-        rebindAt,
+        { rebindAt, before },
       );
       if (name === 'manual-rebind') {
         // После операции задачу вручную перепривязали к A-v3: основание
@@ -889,9 +930,36 @@ test('F85: the carry needs the validated route and its own completed operation; 
         pins.next = v3.id;
       }
       if (name === 'later-operation') {
-        // Позже задачу перепривязала операция другого контракта.
+        // Позже задачу перепривязала другая операция того же контракта.
         await new Promise((r) => setTimeout(r, 5));
-        operation(f, taskId, v2.id, 'completed', 'CC-later', 'docs/contracts/other.md');
+        const later = specOf(f, taskId);
+        const v3 = f.h.contract('Artifact format', 'Version three.', undefined, undefined, source);
+        assert.deepEqual(f.h.rebind([taskId], [v2.id], v3.id), [taskId]);
+        const at = new Date().toISOString();
+        f.h.approve(boardId, [taskId]);
+        operation(f, taskId, v3.id, 'completed', 'CC-later', source, {
+          rebindAt: at,
+          before: later,
+        });
+        pins.next = v3.id;
+      }
+      if (name === 'reopen-after') {
+        // После операции задачу вернули в черновик, правили и утвердили
+        // заново: это уже не постановка, утверждённая операцией.
+        f.h.reopen(taskId, 'an independent respecification');
+        const t = f.store.read().tasks.find((x) => x.id === taskId)!;
+        f.h.editTask(
+          taskId,
+          {
+            title: t.title,
+            description: `${t.description} An independent change.`,
+            role: t.role,
+            acceptance: t.acceptance,
+            contracts: t.contracts,
+          },
+          specDigest(t),
+        );
+        f.h.approve(boardId, [taskId]);
       }
       if (name === 'new-answer') {
         const current = f.service.show({ requestId });
