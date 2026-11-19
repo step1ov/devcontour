@@ -8,7 +8,7 @@ test('Баннер называет причину остановки из /api/
   // Демо общее для всех спецификаций: очередь может пойти или встать между
   // чтением состояния и опросом панели. Сравнение повторяется, пока оба
   // источника не увидят одно состояние.
-  await page.goto('/');
+  await page.goto('/?tab=overview');
   const banner = page.getByRole('status', { name: 'Очередь остановлена' });
   await expect(async () => {
     const { queue } = (await (await request.get('/api/state')).json()) as {
@@ -47,7 +47,7 @@ test('Баннер виден на каждом экране, пока очер�
     const state = (await response.json()) as Record<string, unknown>;
     await route.fulfill({ response, json: { ...state, queue } });
   });
-  await page.goto('/');
+  await page.goto('/?tab=overview');
   const banner = page.getByRole('status', { name: 'Очередь остановлена' });
   await expect(banner).toContainText('Проверка базы не пройдена: test, lint');
   await expect(banner).toContainText('Что сделать: ' + stopped.action);

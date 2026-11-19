@@ -55,10 +55,19 @@ function journal(c: ProductChange) {
   c.design ??= [];
   return c;
 }
-function change(s: DevContourState, id?: string) {
+/**
+ * Изменение с журналом без записи: замороженный снимок (`Store.view`) не
+ * дополняется на месте — недостающие списки даёт копия, остальное общее.
+ */
+function journalOf(c: ProductChange): ProductChange {
+  if (!Object.isFrozen(c)) return journal(c);
+  if (c.activity && c.questions && c.decisions && c.references && c.concept && c.design) return c;
+  return journal({ ...c });
+}
+function change(s: Readonly<DevContourState>, id?: string) {
   const c = s.preparation?.changes.find((c) => c.id === (id ?? s.preparation?.activeChangeId));
   if (!c) throw new DomainError('Выберите изменение продукта', 409);
-  return journal(c);
+  return journalOf(c);
 }
 /**
  * Действующая редакция этапа — последняя утверждённая. Черновик, редакция на
@@ -297,7 +306,7 @@ export function assertStageUpstream(
     throw new DomainError('Дизайн относится к прежнему концепту');
 }
 export function developmentBinding(
-  s: DevContourState,
+  s: Readonly<DevContourState>,
   id?: string,
 ): PreparationBinding | undefined {
   if (!s.preparation) return;
@@ -1005,12 +1014,22 @@ export class Preparation {
   // The agent writes the content and can re-read it from docs/changes; sending
   // it back on every call pushed realistic briefs past the response budget.
   status(id?: string, options: { content?: boolean } = {}) {
+    return Preparation.statusOf(this.store.read(), id, options);
+  }
+  /**
+   * Вид подготовки над уже прочитанным состоянием, без чтения хранилища:
+   * частый опрос панели передаёт замороженный снимок версии (`Store.view`),
+   * а не разбирает документ заново. Состояние не меняется.
+   */
+  static statusOf(s: Readonly<DevContourState>, id?: string, options: { content?: boolean } = {}) {
     const withContent = options.content ?? true;
-    const s = this.store.read(),
-      p = s.preparation;
+    const p = s.preparation;
     if (!p) return { enabled: false as const };
-    const c = p.changes.find((c) => c.id === (id ?? p.activeChangeId));
-    if (id && !c) throw new DomainError('Изменение не найдено', 404);
+    const found = p.changes.find((c) => c.id === (id ?? p.activeChangeId));
+    if (id && !found) throw new DomainError('Изменение не найдено', 404);
+    // Чтение по изменяемой копии дополняло журнал изменения на месте
+    // (`developmentBinding`); вид по снимку — тот же: недостающие списки пусты.
+    const c = found && journalOf(found);
     const strip = <T extends { content: unknown }>(r: T | undefined) =>
       r && (withContent ? r : { ...r, content: undefined });
     const product = c?.product.at(-1),

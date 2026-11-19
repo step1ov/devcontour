@@ -102,7 +102,7 @@ export function quickView(input: {
 }) {
   const { change, state, root, h } = input;
   const { facts, factsError, plan } = input.prerequisites;
-  const view = new Preparation(input.store).status(change.id, { content: false });
+  const view = Preparation.statusOf(state, change.id, { content: false });
   const { tasks, findings } = changeTasks(state, change);
   const steps = quickSteps({
     change,

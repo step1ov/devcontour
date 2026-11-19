@@ -218,8 +218,7 @@ export class LeadWorkflow {
    * где восстановление уже прекращено навсегда. Fencing-поля наружу не идут —
    * интерфейсу они не нужны и не должны быть доступны.
    */
-  view() {
-    const state = this.h.store.read();
+  view(state: Readonly<DevContourState> = this.h.store.view()) {
     const stale = this.staleBoards(state);
     return [undefined, ...repositories(this.h.config).map((r) => r.id)].flatMap((owner) =>
       this.list(owner).map((job) => ({

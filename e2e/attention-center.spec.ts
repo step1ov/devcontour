@@ -217,7 +217,7 @@ test('D05-B: keyboard only; focus stays on a card that moves and goes to the nex
   const second = await askingTask(request, 'Клавиатура: вторая');
   const keyA = `input:${first.requestId}`;
   const keyB = `input:${second.requestId}`;
-  await page.goto('/');
+  await page.goto('/?tab=overview');
   // Навигация — с клавиатуры: фокус на заголовке экрана.
   await page
     .getByRole('navigation', { name: 'Workspace' })
@@ -552,7 +552,7 @@ test('D05-E: a lead technical blocker is not an operator choice, and reading is 
   expect(after).toEqual(before);
 
   // Обзор не выдаёт карточку ведущего за решение автора, но считает её.
-  await page.goto('/');
+  await page.goto('/?tab=overview');
   await expect(
     page.getByRole('heading', { name: 'Нужно ваше решение', exact: true }),
   ).toBeVisible();
@@ -700,7 +700,7 @@ test('D05-C: 390 px, long unbroken texts and accessibility of the queue, history
   await axe();
 
   // Голова очереди в обзоре — те же карточки, компактно.
-  await page.goto('/');
+  await page.goto('/?tab=overview');
   await expect(page.getByRole('list', { name: 'Решения для вас' })).toBeVisible();
   expect(await page.evaluate(() => document.documentElement.scrollWidth <= window.innerWidth)).toBe(
     true,
@@ -739,7 +739,7 @@ test('D05-D: one toast per new occurrence, none for heartbeats, updates or lead 
     (await (await request.get('/api/attention')).json()) as { items: { title: string }[] }
   ).items.map((i) => i.title);
   expect(existing.length).toBeGreaterThan(0);
-  await page.goto('/');
+  await page.goto('/?tab=overview');
   await expect(
     page.getByRole('heading', { name: 'Нужно ваше решение', exact: true }),
   ).toBeVisible();
@@ -893,7 +893,7 @@ test('B1/M4: a poll that changes the card under an open form never retargets it;
     (await page.evaluate(() => (window as unknown as { __toasts: string[] }).__toasts)).filter(
       (t) => t.includes(title),
     );
-  await page.goto('/');
+  await page.goto('/?tab=overview');
   await expect(
     page.getByRole('heading', { name: 'Нужно ваше решение', exact: true }),
   ).toBeVisible();
@@ -1333,7 +1333,7 @@ test('Overview: «Уже решено» with typed text points to the attention 
       json: { error: 'Карточка уже решена исходной сущностью', code: 'attention-resolved' },
     }),
   );
-  await page.goto('/');
+  await page.goto('/?tab=overview');
   const card = cardOf(page, 'changeset:CHG-O1');
   await card.getByRole('button', { name: 'Вернуть на доработку' }).click();
   const form = card.locator('form');

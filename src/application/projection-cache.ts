@@ -17,6 +17,12 @@ import { randomUUID } from 'node:crypto';
  *   без записи) и не дольше `maxAgeMs`: всё, что зависит от времени и не
  *   названо сроком, пересчитывается не реже этого.
  *
+ * Дорогая медленная проекция (читает Git, обходит всю историю) может
+ * задать `minAgeMs`: значение моложе этого возраста отдаётся и после смены
+ * `stamp` (новой ревизии данных) — ответ отстаёт от записи не дольше
+ * `minAgeMs` и называет момент расчёта сам. Смена `deps` и срок `until`
+ * пересчитывают его и раньше.
+ *
  * Областей не больше `size`: вытесняется давно не читанная. Значение может
  * быть обещанием — тогда одновременные запросы ждут одно вычисление, а отказ
  * убирает запись.
@@ -26,9 +32,11 @@ export class ProjectionCache<T> {
   computations = 0;
   private readonly entries = new Map<
     string,
-    { stamp: string; deps: readonly unknown[]; until: number; value: T }
+    { stamp: string; deps: readonly unknown[]; at: number; until: number; value: T }
   >();
-  constructor(readonly options: { maxAgeMs: number; size?: number; now?: () => number }) {}
+  constructor(
+    readonly options: { maxAgeMs: number; minAgeMs?: number; size?: number; now?: () => number },
+  ) {}
   private now() {
     return (this.options.now ?? Date.now)();
   }
@@ -44,7 +52,7 @@ export class ProjectionCache<T> {
     this.entries.delete(scope);
     if (
       entry &&
-      entry.stamp === stamp &&
+      (entry.stamp === stamp || now < entry.at + (this.options.minAgeMs ?? 0)) &&
       now < entry.until &&
       entry.deps.length === deps.length &&
       entry.deps.every((d, i) => d === deps[i])
@@ -57,6 +65,7 @@ export class ProjectionCache<T> {
     const next = {
       stamp,
       deps,
+      at: now,
       until: Math.min(until ?? Infinity, now + this.options.maxAgeMs),
       value,
     };

@@ -90,3 +90,19 @@ export function forgetAttentionKey() {
   delete rest.attentionKey;
   window.history.replaceState(rest, '');
 }
+
+/** Параметры адреса, которые ведут в оболочку (этап, вид, доска, задача). */
+const SHELL_KEYS = ['change', 'stage', 'view', 'tab', 'board', 'task', 'attention', 'who'];
+
+/**
+ * Адрес главной панели: корень без параметров оболочки и якоря либо явно
+ * `view=home`. Любой другой адрес открывает оболочку, как раньше: ссылки на
+ * этапы, доски и задачи ведут прямо к ним.
+ */
+export function isHome(location: Pick<Location, 'pathname' | 'search' | 'hash'>) {
+  const params = new URLSearchParams(location.search);
+  if (params.get('view') === 'home') return true;
+  if (location.pathname !== '/') return false;
+  if (location.hash.length > 1) return false;
+  return !SHELL_KEYS.some((key) => params.has(key));
+}

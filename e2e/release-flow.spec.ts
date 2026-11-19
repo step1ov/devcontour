@@ -194,7 +194,7 @@ test('Quick start, a discussion note and the attention center together on a real
     app = await startWorkspace(root, { port: 0, workspaceMode: 'embedded' });
 
     // 1. Поручение из формы быстрого изменения.
-    await page.goto(app.url);
+    await page.goto(app.url + '/?stage=product');
     const form = page.getByRole('form', { name: 'Быстрое изменение' });
     await expect(form.getByLabel('Репозиторий (абсолютный путь)')).toHaveValue(root);
     await form.getByLabel('Что изменить').fill('add() должен складывать отрицательные числа');

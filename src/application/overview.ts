@@ -214,8 +214,14 @@ export function previewFailureTitle(failure: Preview['failure']) {
       : 'Preview не выложен';
 }
 
-export function authorOverview(h: DevContour): AuthorOverview {
-  const s = h.store.read();
+/**
+ * Обзор автора над уже прочитанным состоянием: опрос панели передаёт
+ * замороженный снимок версии (`Store.view`), без разбора документа.
+ */
+export function authorOverview(
+  h: DevContour,
+  s: Readonly<DevContourState> = h.store.view(),
+): AuthorOverview {
   const tasks = s.tasks.filter((t: Task) => t.status !== 'cancelled');
   const counts = {
     tasks: tasks.length,

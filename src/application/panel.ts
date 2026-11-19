@@ -385,7 +385,7 @@ export function inputPolicyView(h: DevContour, state: Readonly<DevContourState>,
  * сверяются с загрузкой дёшево; digest считается только при изменённых
  * байтах — переформатирование без смысловой правки расхождением не считается.
  */
-function configDrift(h: DevContour, root: string) {
+export function configDrift(h: DevContour, root: string) {
   const changed = h.configProvenance();
   if (!changed) return null;
   try {
@@ -685,7 +685,7 @@ function buildSummary(
     queue: queueStopOf(h, state, recent),
     journalError: short(h.store.projectionError, DIAGNOSTIC),
     workflows: new LeadWorkflow(h)
-      .view()
+      .view(state)
       .map((w) => clip({ ...w, history: (w.history ?? []).slice(-5) })),
     dataRoot: resolve(root),
     ready,

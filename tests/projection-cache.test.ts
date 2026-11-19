@@ -42,6 +42,31 @@ test('Кэш проекции: та же версия — без пересчё�
   assert.equal(small.computations, 4, 'b вытеснена');
 });
 
+test('Кэш проекции: minAgeMs — молодое значение переживает новую ревизию, но не смену deps и не срок', () => {
+  let now = 0;
+  const cache = new ProjectionCache<string>({ maxAgeMs: 100, minAgeMs: 30, now: () => now });
+  const deps = [{}];
+  let n = 0;
+  const get = (stamp: string, d: unknown[] = deps, until?: number) =>
+    cache.get('a', stamp, d, () => ({ value: `${stamp}:${++n}`, until }));
+  assert.equal(get('1'), '1:1');
+  now = 29;
+  assert.equal(get('2'), '1:1', 'новая ревизия моложе minAgeMs — прежнее значение');
+  now = 30;
+  assert.equal(get('2'), '2:2', 'возраст minAgeMs — пересчёт');
+  now = 40;
+  assert.equal(get('3', [{}]), '3:3', 'смена deps — пересчёт сразу');
+  const fresh = [{}];
+  assert.equal(get('4', fresh, 45), '4:4');
+  now = 45;
+  assert.equal(get('5', fresh), '5:5', 'срок until — пересчёт и моложе minAgeMs');
+  // Без minAgeMs новая ревизия пересчитывается всегда.
+  const plain = new ProjectionCache<number>({ maxAgeMs: 100, now: () => now });
+  plain.get('a', '1', [], () => ({ value: 1 }));
+  plain.get('a', '2', [], () => ({ value: 2 }));
+  assert.equal(plain.computations, 2);
+});
+
 test('Кэш проекции: одновременные запросы ждут одно вычисление, отказ не остаётся в кэше', async () => {
   const cache = new ProjectionCache<Promise<number>>({ maxAgeMs: 60_000 });
   let n = 0;
