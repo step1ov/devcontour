@@ -2,6 +2,7 @@ import { test } from 'node:test';
 import assert from 'node:assert/strict';
 import { execFileSync } from 'node:child_process';
 import { writeFile } from 'node:fs/promises';
+import { readFileSync } from 'node:fs';
 import { join } from 'node:path';
 import { checksWarnings } from '../src/runner/agent-control.ts';
 import {
@@ -54,6 +55,97 @@ test('A contract change runs as one command: review, rebind, plan review, base a
     assert.equal(s.store.read().paused, true, 'пауза оператора не снята');
     // Повтор команды по той же редакции ничего не меняет.
     assert.equal((await s.changes().start(s.proposal, 'codex')).status, 'unchanged');
+  } finally {
+    await s.remove();
+  }
+});
+
+test('F81: untriaged finding drafts are rebound but stay drafts outside the plan review; the operation completes', async () => {
+  const s = await stage();
+  try {
+    s.h.pause(true);
+    const findings = s.h.createBoard('Findings');
+    const mark = (id: string, triaged: boolean) =>
+      s.store.change('fixture.finding', (st) => {
+        const t = st.tasks.find((x) => x.id === id)!;
+        t.finding = {
+          kind: 'bug',
+          title: 'Price parsed as text',
+          path: 'schema.json',
+          line: 1,
+          observation: 'The schema keeps the price as a string value.',
+          consequence: 'Totals are wrong.',
+          reproduction: 'Parse the sample response.',
+          fingerprint: 'f81-' + id,
+          sourceTaskId: s.api.id,
+          sourceRunId: 'R-f81',
+          sourceSha: 'a'.repeat(40),
+          verification: 'proposed',
+        };
+        if (triaged) t.triagedAt = new Date().toISOString();
+      });
+    const untriaged = s.h.addTask(findings.id, {
+      ...input('Untriaged finding'),
+      role: 'backend',
+      contracts: [s.c1.id],
+    });
+    const triaged = s.h.addTask(findings.id, {
+      ...input('Triaged finding'),
+      role: 'backend',
+      contracts: [s.c1.id],
+    });
+    mark(untriaged.id, false);
+    mark(triaged.id, true);
+    // A reviewer that rejects any untriaged finding in its scope, as the
+    // real plan reviewer does: the old flow failed the operation here.
+    const plans: string[] = [];
+    const strict = (name: 'codex' | 'claude'): AgentAdapter => ({
+      name,
+      execute(r: AgentRequest) {
+        const kind = /Independently review this ([a-z /]+)\./.exec(r.prompt)?.[1] ?? '?';
+        const approving =
+          kind === 'task plan'
+            ? ((
+                JSON.parse(readFileSync(join(r.artifactDir, 'proposal.json'), 'utf8')) as {
+                  approving?: string[];
+                }
+              ).approving ?? [])
+            : [];
+        plans.push(...approving);
+        const rejected = approving.includes(untriaged.id);
+        return Promise.resolve({
+          data: {
+            approved: !rejected,
+            summary: rejected ? 'Untriaged finding in scope' : 'Fixture',
+            findings: [],
+            discoveries: [],
+          },
+          log: 'Fixture only; no provider called',
+          command: ['fixture'],
+        });
+      },
+    });
+    const runtimes = { codex: strict('codex'), claude: strict('claude') };
+    const changes = new ContractChanges(s.h, s.root, runtimes);
+    const started = await changes.start(s.proposal, 'codex');
+    const done = await new ContractChanges(s.h, s.root, runtimes).advance(
+      (started as { operation: ContractChange }).operation.id,
+    );
+    assert.equal(done.status, 'completed', done.error);
+    const c2 = s.store.read().contracts.at(-1)!;
+    // Rebound to the new redaction, still an untriaged draft.
+    const kept = s.task(untriaged.id);
+    assert.deepEqual(kept.contracts, [c2.id]);
+    assert.equal(kept.status, 'draft');
+    assert.equal(kept.triagedAt, undefined);
+    assert.ok(done.rebound.includes(untriaged.id));
+    assert.deepEqual(done.findingDrafts, [untriaged.id]);
+    const event = done.history.find((e) => e.event === 'findings-kept');
+    assert.ok(event?.detail?.includes(untriaged.id), 'the history names the kept draft');
+    // The triaged finding went to review and was approved.
+    assert.equal(s.task(triaged.id).status, 'ready');
+    assert.ok(plans.includes(triaged.id), 'plan review approved the triaged finding');
+    assert.ok(!plans.includes(untriaged.id), 'the untriaged finding was never in the review scope');
   } finally {
     await s.remove();
   }

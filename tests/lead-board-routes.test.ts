@@ -16,7 +16,7 @@ import { LeadWorkflow, WAITING_BOARDS } from '../src/core/lead-workflow.ts';
 import { Workspace } from '../src/core/workspace.ts';
 import { recordsFromState, stateFromRecords } from '../src/core/sync-state.ts';
 import { LeadRunner } from '../src/runner/lead-workflow.ts';
-import { cancelImpact, stopperWarning } from '../src/runner/lead-outlook.ts';
+import { cancelImpact, stopperWarning, unapprovedTasks } from '../src/runner/lead-outlook.ts';
 import { AgentService } from '../src/application/agent.ts';
 import {
   devcontourHandoff,
@@ -151,6 +151,84 @@ test('F73: черновик находки получает роль владе�
       devcontourHandoff(f.h).host.next?.plan?.misrouted?.map((m) => m.id),
       [nobody.id],
     );
+  } finally {
+    f.cleanup();
+  }
+});
+
+test('F80: правка одной роли и перенос не разбирают находку — она вне области ревью; иная правка — разбор', () => {
+  const f = scoped();
+  try {
+    const b = f.h.createBoard('Admin work', '', 'main');
+    f.h.addTask(b.id, { ...input('Admin task'), role: 'admin' });
+    f.h.approve(b.id);
+    f.h.pause(false);
+    const run = f.h.claim('writer')!;
+    const [held, other] = f.h.discoveries(run.id, run.token, 'a'.repeat(40), [
+      finding('packages/engine/src/budget.ts'),
+      finding('packages/engine/src/limits.ts'),
+    ]);
+    const task = (id: string) => f.store.read().tasks.find((t) => t.id === id)!;
+    const plan = () => {
+      const next = devcontourHandoff(f.h).host.next;
+      assert.equal(next?.decision, 'plan');
+      return next;
+    };
+    assert.deepEqual(
+      plan().plan?.misrouted?.map((m) => m.id),
+      [held, other],
+    );
+    // Роль-владелец пути — только роль: находка ждёт решения владельца.
+    const t = task(held);
+    const roleOnly = {
+      repositoryId: t.repositoryId,
+      role: 'engine',
+      title: t.title,
+      description: t.description,
+      acceptance: t.acceptance,
+    };
+    f.h.editTask(held, roleOnly, specDigest(t));
+    let after = task(held);
+    assert.equal(after.role, 'engine');
+    assert.equal(after.triagedAt, undefined, 'правка одной роли — не разбор');
+    const next = plan();
+    assert.ok(next.plan?.unverified.includes(held), 'по-прежнему непроверенная');
+    assert.ok(!next.plan?.review.includes(held), 'и не предложена к ревью');
+    assert.deepEqual(
+      next.plan?.misrouted?.map((m) => m.id),
+      [other],
+      'флаг не той роли снят',
+    );
+    assert.match(next.detail, /an edit that changes only the role keeps the finding unverified/);
+    // Перенос на другую доску разбор тоже не отмечает.
+    const target = f.h.createBoard('Engine', '', 'main');
+    f.h.moveTask(held, target.id, 'Belongs to the engine board');
+    assert.equal(task(held).triagedAt, undefined, 'перенос — не разбор');
+    const s = f.store.read();
+    assert.deepEqual(
+      unapprovedTasks(f.h, s, [task(held)]).unverified,
+      [held],
+      'на новой доске — непроверенная (вне области ревью)',
+    );
+    // Роль вместе с приёмкой — разбор (Поломка: «только роль» по одному
+    // полю role, без сравнения остальной постановки).
+    const o = task(other);
+    f.h.editTask(
+      other,
+      {
+        repositoryId: o.repositoryId,
+        role: 'engine',
+        title: o.title,
+        description: o.description,
+        acceptance: ['Regression test for limits.ts fails before the fix and passes after it.'],
+      },
+      specDigest(o),
+    );
+    assert.ok(task(other).triagedAt, 'роль и приёмка — разбор');
+    // Правка без перемен по-прежнему явный разбор.
+    after = task(held);
+    f.h.editTask(held, { ...roleOnly }, specDigest(after));
+    assert.ok(task(held).triagedAt, 'правка без перемен — разбор, как прежде');
   } finally {
     f.cleanup();
   }

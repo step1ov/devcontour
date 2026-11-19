@@ -1049,6 +1049,7 @@ export class Store {
     const point = 'nested_' + ++this.savepoint;
     const pending = this.projectionPending;
     const written = this.written;
+    const idleNeutral = { ...this.idleNeutral };
     if (!outer) this.watch();
     this.db.exec(outer ? `SAVEPOINT ${point}` : 'BEGIN IMMEDIATE');
     this.transaction = true;
@@ -1075,8 +1076,7 @@ export class Store {
       // Счётчики для проверки задержки (F74) — до COMMIT, под локом записи:
       // прочитанные после него захватили бы чужую запись, сделанную, пока
       // этот процесс стоял между COMMIT и отметкой.
-      seenAtCommit =
-        !outer && this.leaseWatch && this.hasRevision ? this.counters() : undefined;
+      seenAtCommit = !outer && this.leaseWatch && this.hasRevision ? this.counters() : undefined;
       this.db.exec(outer ? `RELEASE ${point}` : 'COMMIT');
       if (key && this.written) this.committed = { key, ...this.written };
       // На месте: замыкание `frozen()`, полученное в транзакции, заполняет тот же объект.
@@ -1090,6 +1090,8 @@ export class Store {
       this.committed = undefined;
       this.projectionPending = pending;
       this.written = written;
+      // Откаченные записи счётчики базы не подняли: и учёт нейтральных — к началу.
+      this.idleNeutral = idleNeutral;
       this.transaction = outer;
       if (!outer) this.startKey = undefined;
       throw error;
@@ -1313,8 +1315,10 @@ export class Store {
     // что они продлены. Продление одной роли controller — только её строка:
     // документ и кэши с ним не меняются, а роль читается из строки при
     // каждом чтении. Строки аренды попыток — тоже счётчик сроков.
-    if (documentChanged) this.bump(type === 'heartbeat' ? 'lease' : 'data');
-    else if (type !== 'heartbeat' || leasesChanged) this.bump('lease');
+    // Продление под видом heartbeat выдачу не меняет (F79): для шлюза
+    // простоя — нейтральная запись этого процесса.
+    if (documentChanged) this.bump(type === 'heartbeat' ? 'lease' : 'data', type === 'heartbeat');
+    else if (type !== 'heartbeat' || leasesChanged) this.bump('lease', type === 'heartbeat');
     if (type !== 'heartbeat') {
       const at = new Date().toISOString();
       const inserted = this.db
@@ -1491,7 +1495,8 @@ export class Store {
   /**
    * Локальная запись владельца. `revision: 'lease'` — продление срока
    * локальной аренды: видимые данные не меняются, растёт счётчик сроков, как
-   * у heartbeat.
+   * у heartbeat. `idleNeutral` — запись, которая не меняет выдачу очереди
+   * (`idleVersion`, F79): по умолчанию — продление срока.
    */
   saveLocal(
     namespace: string,
@@ -1499,6 +1504,7 @@ export class Store {
     key: string,
     value: unknown,
     revision: 'data' | 'lease' = 'data',
+    idleNeutral = revision === 'lease',
   ) {
     if (!this.transaction) throw new Error('Local workflow writes require an atomic transaction');
     const schema = this.syncSchema(owner);
@@ -1508,7 +1514,7 @@ export class Store {
     this.db
       .prepare(`INSERT OR REPLACE INTO ${schema}.local_workflow VALUES(?,?,?,?)`)
       .run(namespace, owner ?? '@workspace', key, JSON.stringify(value));
-    this.bump(revision);
+    this.bump(revision, idleNeutral);
   }
   /**
    * Обсуждения задач — локальная таблица владельца задачи: не документ
@@ -1842,10 +1848,33 @@ export class Store {
       .run(namespace, owner ?? '@workspace', key);
     if (removed.changes) this.bump('data');
   }
-  private bump(kind: 'data' | 'lease') {
+  private bump(kind: 'data' | 'lease', idleNeutral = false) {
     this.db
       .prepare(`UPDATE main.revision SET ${kind === 'data' ? 'n=n+1' : 'lease=lease+1'} WHERE id=1`)
       .run();
+    if (idleNeutral) this.idleNeutral[kind === 'data' ? 'revision' : 'lease']++;
+  }
+  /**
+   * Подъёмы счётчиков записями этого процесса, которые выдачу очереди не
+   * меняют (F79): продления сроков (heartbeat, локальная аренда) и записи,
+   * которых выдача не читает (задания ведущего). Откат транзакции снимает
+   * и её учёт; внутри транзакции учтены и её незафиксированные записи — как
+   * у `version()`.
+   */
+  private idleNeutral = { revision: 0, lease: 0 };
+  /**
+   * Версия данных для шлюза простоя выдачи (`harness/idle-claims.ts`, F79):
+   * `version()` без нейтральных записей этого процесса. Растёт при любой
+   * записи другого процесса и при любой своей записи, которая может
+   * изменить выдачу; продление своих сроков и такт задания ведущего её не
+   * меняют.
+   */
+  idleVersion(): { revision: number; lease: number } {
+    const v = this.version();
+    return {
+      revision: v.revision - this.idleNeutral.revision,
+      lease: v.lease - this.idleNeutral.lease,
+    };
   }
   /**
    * Ревизия данных: растёт при каждой записи состояния и каждой локальной

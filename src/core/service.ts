@@ -1708,6 +1708,7 @@ export class DevContour {
       // правка — тоже правка черновика (принятие обращения о gates).
       const unbound = (x: Task) => specDigest({ ...x, preparation: undefined }) + scopeDigest(x);
       const before = unbound(t);
+      const role = t.role;
       // Правка с preparation перепривязывает к названному изменению; без неё
       // задача остаётся в своём изменении (его действующие digests).
       Object.assign(t, parsed, {
@@ -1720,8 +1721,11 @@ export class DevContour {
       });
       if (unbound(t) !== before) t.specEditedAt = now();
       // Правка черновика находки — разбор ведущим: подсказка передачи
-      // контекста больше не держит её как непроверенную.
-      if (t.finding) t.triagedAt ??= now();
+      // контекста больше не держит её как непроверенную. Правка одной роли
+      // (находка не той роли ждёт решения владельца) — не разбор (F80):
+      // черновик остаётся непроверенным и не попадает в область ревью.
+      const roleOnly = t.role !== role && unbound({ ...t, role }) === before;
+      if (t.finding && !roleOnly) t.triagedAt ??= now();
       // Корпус договора, которого задача больше не касается, не переносится.
       if (t.checkVersion && !t.contracts.includes(t.checkVersion.suite.replace(/^KS-/, '')))
         t.checkVersion = undefined;

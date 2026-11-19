@@ -7,7 +7,7 @@ import { z } from 'zod';
 import { fencedRefMove } from 'devcontour-harness';
 import { executionOf } from '../harness/execution.ts';
 import { LeadWorkflow } from '../core/lead-workflow.ts';
-import { DomainError, type Contract } from '../core/model.ts';
+import { DomainError, unverifiedFinding, type Contract } from '../core/model.ts';
 import { contractDigest, digest, latestRedaction, type DevContour } from '../core/service.ts';
 import { consolidationPlan, reviewConsolidation, StaleConsolidation } from './consolidation.ts';
 import { repositories, repository } from '../core/repositories.ts';
@@ -175,6 +175,14 @@ export type ContractChange = {
   contractId?: string;
   held: string[];
   rebound: string[];
+  /**
+   * Неразобранные черновики находок агентов среди перепривязанных (F81):
+   * они остаются черновиками с новой привязкой и на ревью плана операции не
+   * идут — ревьюер справедливо отверг бы непроверенную находку, и операция
+   * упала бы на шаге plan. Их разбирает ведущий (`edit-task`, затем
+   * `review-plan --tasks` или отмена).
+   */
+  findingDrafts?: string[];
   boards: string[];
   /** Принятые задачи прежней редакции: их меняет корректировка, а не операция. */
   corrections: string[];
@@ -1194,6 +1202,7 @@ export class ContractChanges {
         const includeBoards = (op.include ?? [])
           .map((id) => state.boards.find((b) => b.revisions.at(-1)!.taskIds.includes(id))?.id)
           .filter((id): id is string => Boolean(id));
+        const kept = new Set<string>();
         for (const boardId of [...new Set([...op.boards, ...includeBoards])]) {
           const s = this.h.store.read();
           const drafts = op.rebound.filter(
@@ -1205,9 +1214,19 @@ export class ContractChanges {
           const included = (op.include ?? []).filter(
             (id) => s.tasks.find((t) => t.id === id)?.status === 'draft',
           );
-          const onBoard = [...new Set([...drafts, ...included])].filter((id) =>
+          const candidates = [...new Set([...drafts, ...included])].filter((id) =>
             revision?.taskIds.includes(id),
           );
+          // Неразобранная находка — не готовый к утверждению черновик (F81):
+          // перепривязка её сохраняет, ревью плана её не видит в области.
+          const onBoard = candidates.filter((id) => {
+            const t = s.tasks.find((x) => x.id === id);
+            if (t && unverifiedFinding(t)) {
+              kept.add(id);
+              return false;
+            }
+            return true;
+          });
           if (!onBoard.length) continue;
           const result = await reviewPlan(
             this.h,
@@ -1223,7 +1242,16 @@ export class ContractChanges {
             throw new DomainError('Ревью плана ждёт оператора: ' + boardId);
           this.heartbeat(op);
         }
-        this.advanceStep(op);
+        this.advanceStep(op, (current) => {
+          if (!kept.size) return;
+          current.findingDrafts = [...new Set([...(current.findingDrafts ?? []), ...kept])];
+          this.log(
+            current,
+            'plan',
+            'findings-kept',
+            `Неразобранные находки остаются черновиками с новой привязкой, вне ревью плана: ${[...kept].join(', ')}. Разберите их (edit-task, затем review-plan --tasks) или отмените (cancel --by host)`,
+          );
+        });
         return {};
       }
       case 'base': {
