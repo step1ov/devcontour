@@ -6,7 +6,17 @@ import { LeadWorkflow, type WorkflowJob } from '../core/lead-workflow.ts';
 import { boardPhase, type BoardPhase } from '../core/work-status.ts';
 import { readyTasks } from '../core/graph.ts';
 import { repositories } from '../core/repositories.ts';
-import type { AttentionItem } from '../core/attention-model.ts';
+import {
+  attentionSections,
+  type AttentionItem,
+  type AttentionSection,
+} from '../core/attention-model.ts';
+import {
+  maskUrlCredentials,
+  questionSummary,
+  recommendedOf,
+  type QuestionSummarySection,
+} from '../core/owner-questions.ts';
 import type { AttentionView } from './attention.ts';
 import { inputHolds } from './input.ts';
 import { queueStopOf, quietAttempts } from './queue-stop.ts';
@@ -42,41 +52,16 @@ export const HOME_LIMITS = {
   bytes: 64 * 1024,
 } as const;
 
-export const homeSections = ['product', 'architecture', 'design', 'development'] as const;
-export type HomeSection = (typeof homeSections)[number];
-
-/** Раздел этапа подготовки: этапы дизайна — один раздел. */
-const sectionOfStage: Record<string, HomeSection> = {
-  product: 'product',
-  architecture: 'architecture',
-  references: 'design',
-  concept: 'design',
-  design: 'design',
-  development: 'development',
-};
-const prepSources = new Set<AttentionItem['source']>([
-  'prep-question',
-  'prep-answer-pending',
-  'prep-stage',
-  'prep-rework',
-]);
+export const homeSections = attentionSections;
+export type HomeSection = AttentionSection;
 
 /**
- * Раздел карточки центра внимания. Единственная точка классификации: когда
- * карточка несёт свой раздел (`section`), берётся он. До того — временное
- * правило: карточки подготовки — по этапу своей ссылки, остальные
- * (вопросы исполнителей и все источники движка) — разработка.
+ * Раздел карточки центра внимания — её собственный (`section`): вопросы и
+ * ответы подготовки — раздел вопроса, этапы — по этапу, быстрый маршрут —
+ * продукт, источники движка и вопросы исполнителей — разработка. Главная
+ * своих правил классификации не держит.
  */
-export function sectionOf(card: AttentionItem): HomeSection {
-  const own = (card as AttentionItem & { section?: unknown }).section;
-  if (typeof own === 'string' && (homeSections as readonly string[]).includes(own))
-    return own as HomeSection;
-  if (prepSources.has(card.source)) {
-    const stage = new URL(card.subject.href, 'http://home.invalid').searchParams.get('stage');
-    return sectionOfStage[stage ?? ''] ?? 'product';
-  }
-  return 'development';
-}
+export const sectionOf = (card: AttentionItem): HomeSection => card.section;
 
 /** Вид вопроса раздела по источнику карточки; не вопрос — undefined. */
 function questionKind(card: AttentionItem): HomeQuestion['kind'] | undefined {
@@ -107,8 +92,10 @@ export interface HomeQuestion {
 export interface SectionQuestions {
   open: number;
   unread: number;
-  /** Ответы оператора, которые ведущий ещё не превратил в решение. */
+  /** Ответы оператора, которые ведущий ещё не превратил в решение (сводка вопросов). */
   answeredPendingLead: number;
+  /** Черновики, которые держат вопросы владельцу раздела (сводка вопросов). */
+  blockedTasks: number;
   items: HomeQuestion[];
   more: boolean;
 }
@@ -207,9 +194,13 @@ export interface HomeView {
   attention: {
     active: number;
     unread: number;
-    /** Карточки по разделам (`sectionOf`): сумма равна `active`. */
+    /**
+     * Карточки по разделам — `counts.bySection` центра внимания: оператора,
+     * ведущего и непрочитанные карточки оператора; сумма operator и lead
+     * равна `active`, в том числе при усечённом списке.
+     */
     bySection: Record<HomeSection, { operator: number; lead: number; unread: number }>;
-    /** Центр внимания перечислил не все карточки: разделы считают перечисленные. */
+    /** Центр внимания перечислил не все карточки: списки вопросов разделов неполны. */
     truncated?: number;
   };
 }
@@ -353,21 +344,40 @@ export interface HomeContext {
   process?: { journalError?: string; configDrift?: string };
   /** Отметка обращения ведущего (`leadActivityMark`). */
   leadMark?: string | null;
+  /** Маска текстов центра внимания (`AttentionService.redactor`). */
+  redact?: (text: string) => string;
+}
+
+/** Вопросы владельцу этого снимка: счётчики сводки и вопрос по id карточки. */
+interface OwnerQuestions {
+  summary: Record<HomeSection, QuestionSummarySection>;
+  recommended: (card: AttentionItem) => string | undefined;
 }
 
 const clip = (text: string, max: number = HOME_LIMITS.title) =>
   text.length > max ? text.slice(0, max - 1) + '…' : text;
 
-/** Вопросы раздела: число, непрочитанные, первые `HOME_LIMITS.questions`. */
-function questionsOf(cards: AttentionItem[]): SectionQuestions {
+/**
+ * Вопросы раздела: число, непрочитанные, первые `HOME_LIMITS.questions`.
+ * Ответы без решения ведущего, удержанные черновики и рекомендованный вариант
+ * вопроса владельцу — по той же сводке, что `GET /api/questions/summary`.
+ */
+function questionsOf(
+  cards: AttentionItem[],
+  owner: OwnerQuestions,
+  section: HomeSection,
+): SectionQuestions {
   const asked = cards.flatMap((card) => {
     const kind = questionKind(card);
     return kind ? [{ card, kind }] : [];
   });
   const items = asked.slice(0, HOME_LIMITS.questions).map(({ card, kind }): HomeQuestion => {
-    const recommended = card.actions
-      .flatMap((a) => (a.kind === 'domain' ? (a.choices ?? []) : []))
-      .find((c) => c.recommended)?.label;
+    const recommended =
+      kind === 'prep-question'
+        ? owner.recommended(card)
+        : card.actions
+            .flatMap((a) => (a.kind === 'domain' ? (a.choices ?? []) : []))
+            .find((c) => c.recommended)?.label;
     return {
       id: card.id,
       kind,
@@ -382,9 +392,29 @@ function questionsOf(cards: AttentionItem[]): SectionQuestions {
   return {
     open: asked.length,
     unread: asked.filter(({ card }) => card.state.unread).length,
-    answeredPendingLead: cards.filter((c) => c.source === 'prep-answer-pending').length,
+    answeredPendingLead: owner.summary[section].answeredPendingLead,
+    blockedTasks: owner.summary[section].blockedTasks,
     items,
     more: asked.length > items.length,
+  };
+}
+
+/** Вопросы владельцу снимка: сводка без записей и рекомендации по вопросу карточки. */
+function ownerQuestions(
+  state: Readonly<DevContourState>,
+  redact: (text: string) => string,
+): OwnerQuestions {
+  const questions = new Map(
+    (state.preparation?.changes ?? []).flatMap((c) =>
+      (c.questions ?? []).map((q) => [`${c.id}:${q.id}`, q] as const),
+    ),
+  );
+  return {
+    summary: questionSummary(state, hrefs.preparation, redact, 0),
+    recommended: (card) => {
+      const q = questions.get(`${card.subject.id}:${card.occurrenceId}`);
+      return q ? recommendedOf(q, redact) : undefined;
+    },
   };
 }
 
@@ -419,6 +449,7 @@ function preparationSections(
   fresh: { architecture: boolean; references: boolean; concept: boolean; design: boolean },
   bySection: Record<HomeSection, AttentionItem[]>,
   contracts: number | undefined,
+  owner: OwnerQuestions,
 ) {
   const product = change?.product.at(-1)?.content;
   const architecture = change?.architecture.at(-1)?.content;
@@ -457,7 +488,7 @@ function preparationSections(
             { label: 'Исключения', value: product.exclusions.length },
           ]
         : [],
-      questions: questionsOf(bySection.product),
+      questions: questionsOf(bySection.product, owner, 'product'),
       href: stageHref(change, 'product'),
     },
     architecture: {
@@ -474,7 +505,7 @@ function preparationSections(
         // Контракты движка — тоже архитектура (до setup их нет).
         ...(contracts !== undefined ? [{ label: 'Контракты', value: contracts }] : []),
       ].slice(0, HOME_LIMITS.facts),
-      questions: questionsOf(bySection.architecture),
+      questions: questionsOf(bySection.architecture, owner, 'architecture'),
       href: stageHref(change, 'architecture'),
     },
     design: {
@@ -490,7 +521,7 @@ function preparationSections(
             ]
           : []),
       ],
-      questions: questionsOf(bySection.design),
+      questions: questionsOf(bySection.design, owner, 'design'),
       href: stageHref(change, pending?.key ?? 'design'),
       design: { steps },
     },
@@ -503,6 +534,7 @@ function development(
   ctx: HomeContext,
   prep: ReturnType<typeof Preparation.statusOf>,
   cards: AttentionItem[],
+  owner: OwnerQuestions,
 ): DevelopmentSection {
   const { state, h, attention } = ctx;
   const byId = new Map(state.tasks.map((t) => [t.id, t]));
@@ -667,7 +699,7 @@ function development(
           }
         : {}),
     },
-    questions: questionsOf(cards),
+    questions: questionsOf(cards, owner, 'development'),
     // Разработка внутри оболочки подготовки — с view=boards; без подготовки —
     // своя оболочка панели. Доска — первая показанная.
     // До подключения движка досок нет: ссылка — этап «Разработка» подготовки.
@@ -1059,16 +1091,7 @@ export function homeView(ctx: HomeContext): HomeView {
     homeSections.map((s) => [s, [] as AttentionItem[]]),
   ) as Record<HomeSection, AttentionItem[]>;
   for (const card of attention.items) bySection[sectionOf(card)].push(card);
-  const counts = Object.fromEntries(
-    homeSections.map((s) => [
-      s,
-      {
-        operator: bySection[s].filter((c) => c.actor === 'operator').length,
-        lead: bySection[s].filter((c) => c.actor === 'lead').length,
-        unread: bySection[s].filter((c) => c.state.unread).length,
-      },
-    ]),
-  ) as HomeView['attention']['bySection'];
+  const owner = ownerQuestions(state, ctx.redact ?? maskUrlCredentials);
   const fresh =
     prep.enabled && prep.current
       ? prep.current.binding.fresh
@@ -1079,6 +1102,7 @@ export function homeView(ctx: HomeContext): HomeView {
     fresh,
     bySection,
     h ? state.contracts.length : undefined,
+    owner,
   );
   // Без подготовки в панели этапов нет: продукт — карта продукта, архитектура —
   // контракты движка, дизайн — обзор.
@@ -1089,7 +1113,7 @@ export function homeView(ctx: HomeContext): HomeView {
   }
   const sections = {
     ...prepared,
-    development: development(ctx, prep, bySection.development),
+    development: development(ctx, prep, bySection.development, owner),
   };
   // Центр внимания перечислил не все карточки: вопросы разделов неполны, и
   // каждый раздел зовёт в центр внимания («ещё»).
@@ -1121,7 +1145,7 @@ export function homeView(ctx: HomeContext): HomeView {
     attention: {
       active: attention.counts.active,
       unread: attention.counts.unread,
-      bySection: counts,
+      bySection: attention.counts.bySection,
       ...(attention.truncated ? { truncated: attention.truncated.count } : {}),
     },
   };

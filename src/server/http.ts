@@ -227,6 +227,13 @@ export async function serve(
     maxAgeMs: 10 * SLOW_TIER_MS,
     minAgeMs: SLOW_TIER_MS,
   });
+  // Сводка вопросов владельцу: одна на видимую ревизию (F83) и конфигурацию
+  // (маска секретов), как главная, которая считает те же счётчики.
+  const questionSummaries = new ProjectionCache<{
+    revision: number;
+    generatedAt: string;
+    sections: ReturnType<typeof questionSummary>;
+  }>({ maxAgeMs: PROJECTION_MAX_AGE_MS });
   const preparations = new ProjectionCache<string>({ maxAgeMs: QUICK_FACTS_MAX_AGE_MS });
   const products = new ProjectionCache<string>({
     maxAgeMs: SLOW_TIER_MS,
@@ -550,7 +557,7 @@ export async function serve(
           const slow = slowEngine
             ? homeSlows.get(
                 'home',
-                String(store.revision()),
+                String(store.visibleRevision()),
                 [slowEngine, configKey(slowEngine)],
                 () => ({ value: homeSlowOf(slowEngine, store) }),
               )
@@ -588,6 +595,7 @@ export async function serve(
                         : {}),
                       ...(slow ? { slow } : {}),
                       leadMark: mark,
+                      redact: attentionOf(store).redactor(),
                     }),
                   );
                 let { view } = await attention;
@@ -619,17 +627,26 @@ export async function serve(
         // До setup и после него; только чтение.
         if (req.method === 'GET' && path === '/api/questions/summary' && preparationStore) {
           const store = preparationStore;
-          // Замороженный общий снимок: опрос главной не разбирает документ заново.
-          const shared = store.readShared();
-          json(res, 200, {
-            revision: shared.revision,
-            generatedAt: new Date().toISOString(),
-            sections: questionSummary(
-              shared.state,
-              hrefs.preparation,
-              attentionOf(store).redactor(),
-            ),
-          });
+          // Замороженный снимок версии (`Store.view`): опрос главной не
+          // разбирает документ заново. Ревизия — видимая (F83), как у главной:
+          // тихие записи процесса сводку не пересчитывают.
+          const summary = questionSummaries.get(
+            'questions',
+            String(store.visibleRevision()),
+            [store, h, configKey(h)],
+            () => ({
+              value: store.snapshot(() => ({
+                revision: store.visibleRevision(),
+                generatedAt: new Date().toISOString(),
+                sections: questionSummary(
+                  store.view(),
+                  hrefs.preparation,
+                  attentionOf(store).redactor(),
+                ),
+              })),
+            }),
+          );
+          json(res, 200, summary);
           return;
         }
         // Отметки «прочитано» и «увидел» — локальные записи оператора, не решение.
@@ -1263,7 +1280,16 @@ export async function serve(
     server,
     url: origin,
     /** Кэши проекций опроса панели: счётчики вычислений для диагностики и тестов. */
-    projections: { summaries, overviews, attentions, preparations, products, homes, homeSlows },
+    projections: {
+      summaries,
+      overviews,
+      attentions,
+      preparations,
+      products,
+      homes,
+      homeSlows,
+      questionSummaries,
+    },
     close: async () => {
       stopping = true;
       // Ведущий цикл прерывается первым — до отметки остановки: его стадия не

@@ -19,13 +19,22 @@ import { DevContour } from '../src/core/service.ts';
 import { loadConfig } from '../src/runner/config.ts';
 import { Preparation } from '../src/core/preparation.ts';
 import { LeadWorkflow } from '../src/core/lead-workflow.ts';
-import { attentionSources, type AttentionItem } from '../src/core/attention-model.ts';
+import {
+  attentionSections,
+  attentionSources,
+  type AttentionItem,
+} from '../src/core/attention-model.ts';
 import { AttentionService, type AttentionView } from '../src/application/attention.ts';
 import { HOME_LIMITS, homeView, sectionOf, type HomeView } from '../src/application/home.ts';
 import { serve } from '../src/server/http.ts';
 import { Scheduler } from '../src/runner/scheduler.ts';
 
 type Home = HomeView & { etag: string };
+const zeroSections = () =>
+  Object.fromEntries(
+    attentionSections.map((s) => [s, { operator: 0, lead: 0, unread: 0 }]),
+  ) as AttentionView['counts']['bySection'];
+
 const QUESTION_SOURCES = new Set(['prep-question', 'input', 'stand-in', 'discussion-needs-answer']);
 
 /** Разборы строки документа и полные чтения `Store.read` (см. read-path.test.ts). */
@@ -100,6 +109,7 @@ const card = (over: Partial<AttentionItem>): AttentionItem => ({
   source: 'queue',
   category: 'technical',
   actor: 'operator',
+  section: 'development',
   title: 'Карточка',
   reason: '',
   impact: { tasks: 0, waiting: 0, boards: [], taskIds: [] },
@@ -111,38 +121,10 @@ const card = (over: Partial<AttentionItem>): AttentionItem => ({
   ...over,
 });
 
-test('Home: every attention source maps to one section; a card section of its own wins', () => {
-  const stage = (s: string) => `/?change=C-1&stage=${s}#questions-${s}`;
-  const expected: Record<string, string> = {};
-  for (const source of attentionSources) expected[source] = 'development';
-  for (const source of attentionSources) {
-    if (!source.startsWith('prep-')) {
-      assert.equal(sectionOf(card({ source })), 'development', source);
-      continue;
-    }
-    for (const [s, section] of [
-      ['product', 'product'],
-      ['architecture', 'architecture'],
-      ['references', 'design'],
-      ['concept', 'design'],
-      ['design', 'design'],
-    ])
-      assert.equal(
-        sectionOf(card({ source, subject: { kind: 'change', id: 'C-1', href: stage(s) } })),
-        section,
-        `${source} ${s}`,
-      );
-    // Ссылка без этапа (изменение целиком) — продукт.
-    assert.equal(
-      sectionOf(card({ source, subject: { kind: 'change', id: 'C-1', href: '/?change=C-1' } })),
-      'product',
-    );
-  }
-  // Раздел карточки (поле центра внимания) — единственный источник правды.
-  const tagged = { ...card({ source: 'input' }), section: 'product' } as AttentionItem;
-  assert.equal(sectionOf(tagged), 'product');
-  const unknown = { ...card({ source: 'input' }), section: 'elsewhere' } as AttentionItem;
-  assert.equal(sectionOf(unknown), 'development');
+test('Home: the section of a card is its own section from the attention center', () => {
+  for (const source of attentionSources)
+    for (const section of attentionSections)
+      assert.equal(sectionOf(card({ source, section })), section, `${source} ${section}`);
 });
 
 test('Home: counts equal the attention counts; questions per section with recommended options', async () => {
@@ -164,8 +146,10 @@ test('Home: counts equal the attention counts; questions per section with recomm
     );
     assert.equal(
       sections.reduce((n, s) => n + s.unread, 0),
-      attention.items.filter((i) => i.state.unread).length,
+      attention.items.filter((i) => i.actor === 'operator' && i.state.unread).length,
     );
+    // Разделы — `counts.bySection` центра внимания, не свой подсчёт.
+    assert.deepEqual(home.attention.bySection, attention.counts.bySection);
     assert.deepEqual(home.sections.development.waitsOn.operator, attention.counts.byActor.operator);
     assert.deepEqual(home.sections.development.waitsOn.lead, attention.counts.byActor.lead);
     const asked = attention.items.filter(
@@ -215,6 +199,61 @@ test('Home: counts equal the attention counts; questions per section with recomm
   }
 });
 
+test('Home: section questions agree with /api/questions/summary — answers waiting for the lead, held drafts, recommended option, revision', async () => {
+  const f = engineWithPreparation(0);
+  const board = f.h.createBoard('Отложенное', '', 'main');
+  const draft = f.h.addTask(board.id, input('Черновик под вопросом'));
+  f.p.execute('preparation_question', {
+    changeId: f.changeId,
+    add: [
+      {
+        text: 'Какая палитра у тёмной темы?',
+        section: 'design',
+        choices: [{ label: 'Тёплая' }, { label: 'Холодная', consequence: 'Пересчёт токенов' }],
+        recommended: 1,
+        blocks: { taskIds: [draft.id] },
+      },
+      { text: 'Нужен ли экспорт истории?', section: 'product', options: ['да', 'нет'] },
+      { text: 'Какой линтер ставить?', section: 'development' },
+    ],
+  });
+  const product = f.store
+    .view()
+    .preparation!.changes[0].questions.find((q) => q.section === 'product')!;
+  f.p.answer({ changeId: f.changeId, questionId: product.id, text: 'да' });
+  const app = await serve(f.h, new Scheduler(f.h, f.root), { port: 0 });
+  try {
+    const { body: home } = await getter(app.url)();
+    const summary = (await (await fetch(app.url + '/api/questions/summary')).json()) as {
+      revision: number;
+      sections: Record<
+        string,
+        {
+          open: number;
+          answeredPendingLead: number;
+          blockedTasks: number;
+          items: { id: string; recommended?: string }[];
+        }
+      >;
+    };
+    assert.equal(summary.revision, home.revision);
+    for (const section of attentionSections) {
+      const own = home.sections[section].questions;
+      assert.equal(own.answeredPendingLead, summary.sections[section].answeredPendingLead, section);
+      assert.equal(own.blockedTasks, summary.sections[section].blockedTasks, section);
+    }
+    assert.equal(home.sections.product.questions.answeredPendingLead, 1);
+    assert.equal(home.sections.design.questions.blockedTasks, 1);
+    assert.equal(home.sections.design.questions.open, summary.sections.design.open);
+    assert.equal(home.sections.design.questions.items[0].recommended, 'Холодная');
+    assert.equal(summary.sections.design.items[0].recommended, 'Холодная');
+    assert.equal(home.sections.development.questions.open >= 1, true);
+  } finally {
+    await app.close();
+    f.cleanup();
+  }
+});
+
 test('Home: recommended option and stand-in/discussion kinds come from the card', () => {
   const view: AttentionView = {
     revision: 1,
@@ -225,6 +264,7 @@ test('Home: recommended option and stand-in/discussion kinds come from the card'
       active: 3,
       unread: 3,
       byActor: { operator: { active: 3, unread: 3 }, lead: { active: 0, unread: 0 } },
+      bySection: zeroSections(),
     },
     items: [
       card({
@@ -618,6 +658,7 @@ test('Home: a failed job of an accepted board is settled; a truncated attention 
         active: 201,
         unread: 0,
         byActor: { operator: { active: 201, unread: 0 }, lead: { active: 0, unread: 0 } },
+        bySection: zeroSections(),
       },
       items: [],
       truncated: { count: 201 },

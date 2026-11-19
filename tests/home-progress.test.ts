@@ -6,6 +6,7 @@ import type { AuditEvent, DevContourState } from '../src/core/model.ts';
 import type { ProductView } from '../src/core/product-map.ts';
 import { Preparation } from '../src/core/preparation.ts';
 import { AttentionService, type AttentionView } from '../src/application/attention.ts';
+import { attentionSections } from '../src/core/attention-model.ts';
 import {
   HOME_LIMITS,
   attemptsOf,
@@ -51,6 +52,11 @@ const evidence = (gate: string, passed: boolean, extra: Record<string, unknown> 
     ...extra,
   }) as unknown as Run['evidence'][0];
 
+const zeroSections = () =>
+  Object.fromEntries(
+    attentionSections.map((s) => [s, { operator: 0, lead: 0, unread: 0 }]),
+  ) as AttentionView['counts']['bySection'];
+
 const emptyAttention: AttentionView = {
   revision: 1,
   generatedAt: at(0),
@@ -60,6 +66,7 @@ const emptyAttention: AttentionView = {
     active: 0,
     unread: 0,
     byActor: { operator: { active: 0, unread: 0 }, lead: { active: 0, unread: 0 } },
+    bySection: zeroSections(),
   },
   items: [],
 };

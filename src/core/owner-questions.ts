@@ -62,6 +62,25 @@ export function choicesOf(
   return q.choices ?? q.options.map((label) => ({ label }));
 }
 
+const clip = (text: string, n: number) => {
+  const one = text.replace(/\s+/g, ' ').trim();
+  return one.length > n ? one.slice(0, n - 1) + '…' : one;
+};
+
+/**
+ * Подпись варианта, который рекомендует ведущий (`recommended`), после маски
+ * и усечения: одна формула для сводки вопросов и главной панели.
+ */
+export function recommendedOf(
+  q: Pick<PreparationQuestion, 'choices' | 'options' | 'recommended'>,
+  redact: (text: string) => string = maskUrlCredentials,
+): string | undefined {
+  const choice = q.recommended === undefined ? undefined : choicesOf(q)[q.recommended];
+  return choice ? clip(redact(choice.label), RECOMMENDED_CHARS) : undefined;
+}
+/** Предел подписи рекомендованного варианта. */
+const RECOMMENDED_CHARS = 300;
+
 /** Этап и раздел из полей вопроса: раздел без этапа — его вкладка; оба — согласованы. */
 export function placeQuestion(
   stage: QuestionStage | undefined,
@@ -160,11 +179,6 @@ export interface QuestionSummarySection {
   more: boolean;
 }
 
-const clip = (text: string, n: number) => {
-  const one = text.replace(/\s+/g, ' ').trim();
-  return one.length > n ? one.slice(0, n - 1) + '…' : one;
-};
-
 /**
  * Сводка вопросов владельцу по разделам: открытые, отвеченные без решения
  * ведущего, удержанные черновики и до пяти записей (открытые раньше, старые
@@ -198,7 +212,7 @@ export function questionSummary(
       const section = sectionOf(q);
       if (open) sections[section].open++;
       else sections[section].answeredPendingLead++;
-      const choices = choicesOf(q);
+      const recommended = recommendedOf(q, redact);
       const blocks = (q.blocks?.taskIds ?? []).filter((id) => holds.get(id)?.questionId === q.id);
       rows.push({
         section,
@@ -209,9 +223,7 @@ export function questionSummary(
         title: clip(redact(q.text), 160),
         since: open ? q.createdAt : q.answer!.at,
         href: href(c.id, q.stage, `questions-${q.stage}`),
-        ...(q.recommended !== undefined && choices[q.recommended]
-          ? { recommended: clip(redact(choices[q.recommended].label), 300) }
-          : {}),
+        ...(recommended ? { recommended } : {}),
         blocks,
         ...(q.links ? { links: q.links } : {}),
       });
