@@ -531,7 +531,7 @@ async function review(
     h.store,
     kind,
     harnessSubject,
-    engine.reviews(kind, harnessSubject).at(-1)?.findings,
+    engine.reviews(kind, harnessSubject).at(-1),
   );
   const record = await technicalReview(
     engine,

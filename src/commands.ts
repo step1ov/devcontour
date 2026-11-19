@@ -1366,7 +1366,7 @@ async function main() {
             reason: option('--reason', ''),
           },
           kind === 'plan' || kind === 'contract'
-            ? reviewExecutionOf(h).engine.reviews(kind, subject).at(-1)?.findings
+            ? reviewExecutionOf(h).engine.reviews(kind, subject).at(-1)
             : undefined,
         );
       } else if (operation === 'changeset-budget-reset') {

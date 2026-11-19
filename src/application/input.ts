@@ -2081,7 +2081,7 @@ export class InputService {
         this.h.store,
         'plan',
         reviewSubjectId,
-        engine.reviews('plan', reviewSubjectId).at(-1)?.findings,
+        engine.reviews('plan', reviewSubjectId).at(-1),
       );
       const record = await technicalReview(
         engine,

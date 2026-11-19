@@ -5,23 +5,20 @@
 import { after, test } from 'node:test';
 import assert from 'node:assert/strict';
 import { controlled, inputDemos, inputFixture, untilQuestion } from './input-fixture.ts';
-import { inputReviewRounds, inputReviewSubject } from '../src/harness/input-host.ts';
+import { inputReviewSubject } from '../src/harness/input-host.ts';
 import { executionOf } from '../src/harness/execution.ts';
-import {
-  clearReviewDecisions,
-  pendingReviewDecisions,
-  recordReviewDecision,
-} from '../src/core/review-decisions.ts';
+import { pendingReviewDecisions, recordReviewDecision } from '../src/core/review-decisions.ts';
 import { reviewContract } from '../src/runner/agent-control.ts';
 import { closePrevious, fixture } from './helpers.ts';
 import type { AgentAdapter } from '../src/runner/adapters.ts';
 
 after(() => inputDemos.close());
 
-test('three rounds with the same blocking finding stop the fourth before the reviewer; the owner decision lets the next round run', async () => {
+test('three rounds with the same blocking finding stop the fourth before the reviewer; the owner decision survives a protocol-invalid round and is consumed by the next valid one', async () => {
   const prompts: string[] = [];
   const verdict = { approve: false };
-  const f = await inputFixture(controlled({ verdict, prompts }));
+  const runtimes = controlled({ verdict, prompts });
+  const f = await inputFixture(runtimes);
   try {
     const { boardId, taskId } = f.askingTask('Asking task');
     await untilQuestion(f, boardId);
@@ -40,13 +37,11 @@ test('three rounds with the same blocking finding stop the fourth before the rev
     const { contextDigest } = await f.service.context({ requestId });
     const review = () => f.service.review({ requestId, contextDigest, authorRuntime: 'codex' });
     const reviews = () => prompts.filter((p) => p.startsWith('review:')).length;
+    const subject = inputReviewSubject(requestId);
+    const last = () => executionOf(f.h).engine.reviews('plan', subject).at(-1);
     for (let i = 0; i < 3; i++) assert.equal((await review()).approved, false);
     assert.equal(reviews(), 3);
-    const subject = inputReviewSubject(requestId);
-    const [finding] = executionOf(f.h)
-      .engine.read((v) => inputReviewRounds(v, requestId))
-      .at(-1)!
-      .findings.filter((x) => x.status === 'open');
+    const [finding] = last()!.findings.filter((x) => x.status === 'open');
     assert.ok(finding, 'the finding stays open');
     // Четвёртый раунд — отказ до вызова reviewer с командой владельца.
     await assert.rejects(review(), (error: Error & { code?: string }) => {
@@ -57,42 +52,7 @@ test('three rounds with the same blocking finding stop the fourth before the rev
       return true;
     });
     assert.equal(reviews(), 3, 'no paid round without the decision');
-    const lastFindings = () =>
-      executionOf(f.h)
-        .engine.read((v) => inputReviewRounds(v, requestId))
-        .at(-1)!.findings;
-    // Чужая или неизвестная находка — отказ записи, а не отравленный раунд.
-    assert.throws(
-      () =>
-        recordReviewDecision(
-          f.store,
-          {
-            kind: 'plan',
-            subject,
-            findings: ['b'.repeat(64)],
-            decision: 'continue',
-            reason: 'wrong id',
-          },
-          lastFindings(),
-        ),
-      /не найдена/,
-    );
-    assert.throws(
-      () =>
-        recordReviewDecision(
-          f.store,
-          {
-            kind: 'plan',
-            subject: 'input-IR-unknown',
-            findings: [finding.id],
-            decision: 'continue',
-            reason: 'wrong subject',
-          },
-          undefined,
-        ),
-      /раундов нет/,
-    );
-    // Решение владельца: принять ограничением; следующий раунд проходит.
+    // Чужая или неизвестная находка, неизвестный предмет — отказ записи.
     const decision = {
       kind: 'plan' as const,
       subject,
@@ -100,55 +60,44 @@ test('three rounds with the same blocking finding stop the fourth before the rev
       decision: 'accepted-limitation' as const,
       reason: 'The owner accepts the acceptance wording as is.',
     };
-    recordReviewDecision(f.store, decision, lastFindings());
-    assert.equal(pendingReviewDecisions(f.store, 'plan', subject, lastFindings()).length, 1);
-    // Раунд, не применивший решение (ответ вне протокола), его не снимает;
-    // решение с другим содержанием (правка во время раунда) — тоже.
-    const [used] = pendingReviewDecisions(f.store, 'plan', subject, lastFindings());
-    clearReviewDecisions(f.store, 'plan', subject, [used], { round: 9, findings: lastFindings() });
-    assert.equal(pendingReviewDecisions(f.store, 'plan', subject, lastFindings()).length, 1);
-    const decidedRound = {
-      round: 9,
-      findings: lastFindings().map((x) =>
-        x.id === finding.id
-          ? {
-              ...x,
-              disposition: {
-                decision: used.decision,
-                by: 'operator' as const,
-                reason: used.reason,
-                round: 9,
-                rounds: 3,
-              },
-            }
-          : x,
-      ),
-    };
-    clearReviewDecisions(
-      f.store,
-      'plan',
-      subject,
-      [{ ...used, reason: 'older reason' }],
-      decidedRound,
+    assert.throws(
+      () => recordReviewDecision(f.store, { ...decision, findings: ['b'.repeat(64)] }, last()),
+      /не найдена/,
     );
-    assert.equal(pendingReviewDecisions(f.store, 'plan', subject, lastFindings()).length, 1);
+    assert.throws(
+      () => recordReviewDecision(f.store, { ...decision, subject: 'input-IR-unknown' }, undefined),
+      /раундов нет/,
+    );
+    recordReviewDecision(f.store, decision, last());
+    assert.equal(pendingReviewDecisions(f.store, 'plan', subject, last()).length, 1);
+    // Ответ reviewer вне протокола: раунд записан, решение не применено и
+    // ждёт следующего раунда — владелец не решает заново.
+    // Reviewer ответа — demo-адаптер фикстуры: подменяем его ответ ревью.
+    const demo = runtimes.demo;
+    const valid: typeof demo.execute = (r) => demo.execute(r);
+    runtimes.demo = {
+      ...runtimes.demo,
+      execute: (r) =>
+        r.review
+          ? Promise.resolve({ data: { bogus: true }, log: 'Fixture only', command: ['fixture'] })
+          : valid(r),
+    };
+    assert.equal((await review()).approved, false);
+    assert.equal(reviews(), 3, 'the malformed fixture records no prompt');
+    assert.equal(last()!.round, 4);
+    assert.equal(last()!.findings.find((x) => x.id === finding.id)!.status, 'open');
+    assert.equal(pendingReviewDecisions(f.store, 'plan', subject, last()).length, 1);
+    // Следующий валидный раунд применяет решение и снимает его.
+    runtimes.demo = demo;
     verdict.approve = true;
     assert.equal((await review()).approved, true);
-    assert.equal(reviews(), 4);
-    const last = executionOf(f.h)
-      .engine.read((v) => inputReviewRounds(v, requestId))
-      .at(-1)!;
-    const decided = last.findings.find((x) => x.id === finding.id)!;
+    const decided = last()!.findings.find((x) => x.id === finding.id)!;
     assert.equal(decided.status, 'withdrawn');
     assert.equal(decided.disposition?.decision, 'accepted-limitation');
     assert.equal(decided.disposition?.by, 'operator');
-    // Записанный раунд снимает решение.
-    assert.deepEqual(pendingReviewDecisions(f.store, 'plan', subject, decidedRound.findings), []);
-    assert.equal(
-      f.store.localEntries('review-decisions').length,
-      0,
-      'the stored decision is removed, not only filtered',
-    );
+    assert.equal(f.store.localEntries('review-decisions').length, 0);
+    // Снятое решение не повторяется: на новом раунде его нет.
+    assert.deepEqual(pendingReviewDecisions(f.store, 'plan', subject, last()), []);
   } finally {
     await f.cleanup();
   }
@@ -198,8 +147,7 @@ test('contract review: the same escalation stops the agent-control round; the ow
       },
     );
     assert.equal(calls, 3, 'no paid round without the decision');
-    const engine = executionOf(f.h).engine;
-    const last = engine.reviews('contract', subject).at(-1)!.findings;
+    const last = executionOf(f.h).engine.reviews('contract', subject).at(-1);
     recordReviewDecision(
       f.store,
       {
