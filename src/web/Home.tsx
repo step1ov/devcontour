@@ -1,12 +1,6 @@
 import { useCallback, useEffect, useId, useRef, useState, type ReactNode } from 'react';
-import type {
-  DevelopmentSection,
-  HomeHarness,
-  HomeProgress,
-  HomeView,
-  PreparationSection,
-  SectionQuestions,
-} from '../application/home.ts';
+import type { DevelopmentSection, HomeHarness, HomeProgress } from '../application/home.ts';
+import type { HomeView, PreparationSection, SectionQuestions } from '../application/home.ts';
 import { boardPhaseLabels } from '../core/work-status.ts';
 import { Alert, AlertDescription } from '@/ui/alert.tsx';
 import { Badge } from '@/ui/badge.tsx';
