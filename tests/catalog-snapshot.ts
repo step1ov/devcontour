@@ -243,5 +243,10 @@
 // перезакрепления контекста), session_handoff — устаревшие задания в
 // host.changesets (stale.command, stale.operation) и код шага
 // changeset-restart; прочие операции байтово прежние.
-export const CATALOG_DIGEST = '06ddb9b8e971cb799c4037bb1068429f35b714a094703bd986509bdea0ebc5c7';
+// Намеренное изменение (F86): новые пишущие операции workflow_close (закрыть
+// упавшее задание мёртвой доски) после workflow_retry и board_park (отложить
+// доску или снять отметку) после board_create; описание session_handoff
+// называет params.closable, отложенные доски без шага и host.parked;
+// прочие операции байтово прежние.
+export const CATALOG_DIGEST = 'fd98f4a2ace50abcee4847648e8c752346bff5f02ac0bfba7c91c7808bc1cb59';
 export const SNAPSHOT_VERSION = '0.4.0-alpha.7';

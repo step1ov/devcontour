@@ -49,6 +49,7 @@ import { mkdir, writeFile, readFile, realpath, rename } from 'node:fs/promises';
 import { join, resolve, dirname, sep, basename, posix } from 'node:path';
 import { DATABASE_BUSY_ADVICE, Store, isDatabaseBusy } from './core/store.ts';
 import { DevContour } from './core/service.ts';
+import { assertNotParked, closeDeadJob, setPark } from './core/board-hold.ts';
 import { z } from 'zod';
 import { configSchema } from './core/model.ts';
 import { loadConfig, scopedConfig } from './runner/config.ts';
@@ -660,6 +661,8 @@ async function main() {
     'edit-task',
     'move-task',
     'edit-board',
+    'board-park',
+    'workflow-close',
     'task-feature',
     'task-story',
     'scenario-proof',
@@ -1372,7 +1375,9 @@ async function main() {
           await readAgentJson(resolve(option('--file', 'contract.json'))),
           authorRuntime(),
         );
-      else if (operation === 'review-plan')
+      else if (operation === 'review-plan') {
+        // Отложенная доска (F86): ревью выпустило бы её задачи.
+        assertNotParked(h, option('--board', ''), 'review-plan');
         result = await reviewPlan(
           h,
           root,
@@ -1382,7 +1387,7 @@ async function main() {
           undefined,
           args.includes('--tasks') ? option('--tasks', '').split(',').filter(Boolean) : undefined,
         );
-      else if (operation === 'accept')
+      } else if (operation === 'accept')
         result = await acceptBoard(h, option('--board', ''), authorRuntime(), false, undefined, {
           root,
         });
@@ -1586,6 +1591,36 @@ async function main() {
             ...(impact ? { jobStop: impact } : {}),
           };
         });
+      } else if (operation === 'board-park') {
+        // Отметка «доска отложена» (F86): `--unpark` снимает её.
+        const by = actorOf() === 'host' ? 'lead' : 'operator';
+        if (args.includes('--unpark')) {
+          if (args.includes('--reason') || args.includes('--until'))
+            throw new Error('--unpark снимает отметку: без --reason и --until');
+          result = setPark(h, option('--board', ''), { parked: false }, by);
+        } else {
+          if (!args.includes('--reason') || !option('--reason', '').trim())
+            throw new Error('Укажите --reason: почему доска отложена (или --unpark)');
+          result = setPark(
+            h,
+            option('--board', ''),
+            {
+              parked: true,
+              reason: option('--reason', ''),
+              ...(args.includes('--until') ? { until: option('--until', '') } : {}),
+            },
+            by,
+          );
+        }
+      } else if (operation === 'workflow-close') {
+        if (!args.includes('--reason') || !option('--reason', '').trim())
+          throw new Error('Укажите --reason: почему задание мёртвой доски закрывается');
+        result = closeDeadJob(
+          h,
+          option('--board', ''),
+          option('--reason', ''),
+          actorOf() === 'host' ? 'lead' : 'operator',
+        );
       } else if (operation === 'move-task') {
         if (!args.includes('--reason') || !option('--reason', '').trim())
           throw new Error('Укажите --reason: почему задача переходит на другую доску');

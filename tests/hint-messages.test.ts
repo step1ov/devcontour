@@ -210,6 +210,22 @@ const samples: { [C in HintCode]: (HintSubject & Extract<HintOf, { code: C }>)[]
       job,
       loop: { step: 'stop' as const, taskId: 't-1', reason: 'cancelled' },
     })),
+    // Мёртвая доска, остановки — решения ведущего: закрытие задания (F86).
+    {
+      code: 'job-cancelled-task' as const,
+      params: {
+        taskId: 't-1',
+        by: 'host' as const,
+        budget: false,
+        live: false,
+        allCancelled: true as const,
+        closable: true as const,
+        error: 'boom',
+      },
+      boardId: 'board-1',
+      job,
+      loop: { step: 'stop' as const, taskId: 't-1', reason: 'cancelled' },
+    },
   ],
   'job-retry': [
     {
@@ -235,6 +251,12 @@ const samples: { [C in HintCode]: (HintSubject & Extract<HintOf, { code: C }>)[]
       job: { ...job, repositoryId: undefined },
     },
     { code: 'job-exhausted', params: { error: 'boom' }, boardId: 'board-1', job },
+    {
+      code: 'job-exhausted',
+      params: { error: 'boom', closable: true },
+      boardId: 'board-1',
+      job,
+    },
   ],
   'job-settled': [
     { code: 'job-settled', params: {}, boardId: 'board-1', job: { ...job, status: 'stale' } },
@@ -661,8 +683,11 @@ test('Подсказки шага: новая конфигурация setup п�
  * принят как выбор, которому нужна поправка закреплённого контракта.
  * Намеренное изменение (F84): новый код `changeset-restart` — перезапуск
  * устаревшего задания ChangeSet.
+ * Намеренное изменение (F86): добавлены образцы `job-cancelled-task` и
+ * `job-exhausted` с `closable` (закрытие задания мёртвой доски,
+ * workflow_close); прежние образцы байтово прежние.
  */
-const ENGLISH_SAMPLES_SHA256 = '1e696eaadf62ceb81cb520678bcada0098cd41c5c4239c5a19597ad9546084f3';
+const ENGLISH_SAMPLES_SHA256 = '53b2d096975a858ad412a218ccd00cc886504d32df104eba92f2b8f2b81fde7e';
 
 test('Подсказки шага: английские тексты образцов закреплены', () => {
   assert.equal(
