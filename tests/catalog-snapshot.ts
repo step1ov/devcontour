@@ -233,7 +233,7 @@
 // предела ответа md — раздел DevContour ссылается на host.next.detail и
 // commands того же ответа вместо повтора их текста; прочие операции
 // байтово прежние.
-// Намеренное изменение (F83): состояние вопроса contract-change-required в
+// Намеренное изменение (F82): состояние вопроса contract-change-required в
 // фильтре input_list; описания input_list, input_review и session_handoff
 // называют маршрут contract-change (правило находки contract-change:<id>,
 // route и contracts результата ревью, код шага contract-change-required);

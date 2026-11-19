@@ -210,7 +210,7 @@ export class InputResumer {
       .requests.find((r) => r.requestId === requestId);
     if (!summary?.resume || summary.resume.trigger !== 'operator') return;
     const state = summary.state;
-    // Ревью маршрута contract-change по прежнему основанию предел не тратят (F83).
+    // Ревью маршрута contract-change по прежнему основанию предел не тратят (F82).
     const prior = resumeRecordFor(
       this.h,
       request,

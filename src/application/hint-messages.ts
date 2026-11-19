@@ -150,7 +150,7 @@ export interface HintParamMap {
   'apply-rejected': { operator: boolean; operatorAnswers?: boolean; proposed?: boolean } & Stops;
   /**
    * Ревью приняло ответ как выбор, которому нужна только поправка закреплённых
-   * контрактов (F83): ход ведущего — contract-change. `contracts` — ID,
+   * контрактов (F82): ход ведущего — contract-change. `contracts` — ID,
    * `files` — их файлы; `operation` — операция после раунда; `waiting` —
    * задача перепривязана и ждёт завершения операции и утверждения;
    * `operator` — approvalMode operator (ответ применяет оператор);

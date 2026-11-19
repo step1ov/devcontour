@@ -1,4 +1,4 @@
-// Маршрут contract-change отклонённого ответа (F83): ответ на вопрос о
+// Маршрут contract-change отклонённого ответа (F82): ответ на вопрос о
 // контракте — последовательный выбор, единственный конфликт которого —
 // явная поправка закреплённого контракта. Ревью называет маршрут правилом
 // находки `contract-change:<ID>`; вопрос переходит в состояние
@@ -236,7 +236,7 @@ const handoffStep = (f: InputFixture) => {
 const answers = (f: InputFixture, requestId: string) =>
   executionOf(f.h).engine.inputRequest(requestId).answers.length;
 
-test('F83: a review that names the contract route makes the question the lead’s contract-change step; the operator card closes and the same answer goes through after the rebinding', async () => {
+test('F82: a review that names the contract route makes the question the lead’s contract-change step; the operator card closes and the same answer goes through after the rebinding', async () => {
   const { f, prompts, pins, boardId, taskId, v1, requestId } = await answered();
   try {
     const { result } = await review(f, requestId);
@@ -307,7 +307,7 @@ test('F83: a review that names the contract route makes the question the lead’
   }
 });
 
-test('F83: with a running server the pass stops at the contract route without another review, and after the completed operation reviews and applies the same answer itself', async () => {
+test('F82: with a running server the pass stops at the contract route without another review, and after the completed operation reviews and applies the same answer itself', async () => {
   const { f, runtimes, prompts, pins, boardId, taskId, v1, requestId } = await answered({
     paused: false,
   });
@@ -371,7 +371,7 @@ test('F83: with a running server the pass stops at the contract route without an
   }
 });
 
-test('F83: an abandoned or stale contract-change returns the question to the operator as a rejected answer with the reason', async () => {
+test('F82: an abandoned or stale contract-change returns the question to the operator as a rejected answer with the reason', async () => {
   for (const status of ['abandoned', 'stale'] as const) {
     const { f, requestId, taskId } = await answered();
     try {
@@ -395,7 +395,7 @@ test('F83: an abandoned or stale contract-change returns the question to the ope
   }
 });
 
-test('F83: the route is deterministic — a contract not on the task, a mixed finding or a question without contract stays an ordinary rejection', async () => {
+test('F82: the route is deterministic — a contract not on the task, a mixed finding or a question without contract stays an ordinary rejection', async () => {
   const cases: { name: string; affects?: string[]; decide: (pins: Pins) => Decide }[] = [
     {
       name: 'чужой контракт',
@@ -458,7 +458,7 @@ test('F83: the route is deterministic — a contract not on the task, a mixed fi
   }
 });
 
-test('F83: in approvalMode operator the route is the lead’s too — no apply over the review; after the rebinding the lead reviews and the operator applies the same answer', async () => {
+test('F82: in approvalMode operator the route is the lead’s too — no apply over the review; after the rebinding the lead reviews and the operator applies the same answer', async () => {
   const { f, pins, boardId, taskId, v1, requestId } = await answered({
     approvalMode: 'operator',
   });
@@ -504,7 +504,7 @@ test('F83: in approvalMode operator the route is the lead’s too — no apply o
   }
 });
 
-test('F83: a new answer does not inherit the route of the previous one; an operation of another contract is not the route operation', async () => {
+test('F82: a new answer does not inherit the route of the previous one; an operation of another contract is not the route operation', async () => {
   const { f, pins, boardId, taskId, v1, requestId } = await answered();
   try {
     await review(f, requestId);
@@ -533,7 +533,7 @@ test('F83: a new answer does not inherit the route of the previous one; an opera
   }
 });
 
-test('F83: after an abandoned operation in approvalMode operator the answer still cannot be applied to the old revision', async () => {
+test('F82: after an abandoned operation in approvalMode operator the answer still cannot be applied to the old revision', async () => {
   const { f, taskId, requestId } = await answered({ approvalMode: 'operator' });
   try {
     await review(f, requestId);
@@ -559,7 +559,7 @@ test('F83: after an abandoned operation in approvalMode operator the answer stil
   }
 });
 
-test('F83: a route that names a contract not pinned to the task stays a rejection after the task changes too', async () => {
+test('F82: a route that names a contract not pinned to the task stays a rejection after the task changes too', async () => {
   const { f, pins, taskId, v1, requestId } = await answered({
     decide: () => () => ({
       approve: false,
@@ -579,7 +579,7 @@ test('F83: a route that names a contract not pinned to the task stays a rejectio
   }
 });
 
-test('F83: the apply transaction itself refuses an operator apply over the route, even with the rejected round confirmed', async () => {
+test('F82: the apply transaction itself refuses an operator apply over the route, even with the rejected round confirmed', async () => {
   const { f, taskId, requestId } = await answered({ approvalMode: 'operator' });
   try {
     const { context } = await review(f, requestId);
@@ -608,7 +608,7 @@ test('F83: the apply transaction itself refuses an operator apply over the route
   }
 });
 
-test('F83: an operation abandoned after the rebinding returns the question to the operator with the reason, not to a silent re-review', async () => {
+test('F82: an operation abandoned after the rebinding returns the question to the operator with the reason, not to a silent re-review', async () => {
   const { f, pins, taskId, v1, requestId } = await answered();
   try {
     await review(f, requestId);
@@ -625,7 +625,7 @@ test('F83: an operation abandoned after the rebinding returns the question to th
   }
 });
 
-test('F83: after the rebinding only an earlier redaction counts as the routed contract — a later unpinned one does not become a route', async () => {
+test('F82: after the rebinding only an earlier redaction counts as the routed contract — a later unpinned one does not become a route', async () => {
   let v3 = '';
   const { f, taskId, v1, requestId } = await answered({
     decide: () => () => ({
@@ -648,7 +648,7 @@ test('F83: after the rebinding only an earlier redaction counts as the routed co
   }
 });
 
-test('F83: only a validated route exempts earlier server-pass reviews from the limit; an ordinary rejection keeps it', async () => {
+test('F82: only a validated route exempts earlier server-pass reviews from the limit; an ordinary rejection keeps it', async () => {
   for (const valid of [true, false]) {
     const { f, pins, boardId, taskId, v1, requestId } = await answered({
       paused: false,

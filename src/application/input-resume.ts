@@ -154,7 +154,7 @@ export function resumeRecord(h: DevContour, requestId: string) {
 
 /**
  * Запись прохода по текущему ответу запроса. `rebased` — ревью снова нужно
- * потому, что маршрут contract-change сменил основание (F83,
+ * потому, что маршрут contract-change сменил основание (F82,
  * `InputService.routeRebased`): ревью, отклонённые маршрутом по прежнему
  * основанию, тогда предела ревью не тратят — ревью того же ответа на новой
  * редакции не повтор.
@@ -212,7 +212,7 @@ export function resumeOf(
   now = Date.now(),
   /** Исходная остановка не держится: кто решает выход (F39). */
   moved?: 'operator' | 'lead',
-  /** Маршрут contract-change сменил основание ревью (F83, `resumeRecordFor`). */
+  /** Маршрут contract-change сменил основание ревью (F82, `resumeRecordFor`). */
   rebased = false,
 ): ResumeView | undefined {
   if (h.config.approvalMode !== 'agent') return undefined;
