@@ -11,6 +11,7 @@
 //   ссылки на задачу и попытку транзакции) без токенов владения и ключ
 //   `harnessEvents` — нейтральные события транзакции по порядку.
 // - Курсор нейтральных событий: `seq = id события журнала × 1024 + индекс`.
+import { isDeepStrictEqual } from 'node:util';
 import {
   API_VERSION,
   HarnessError,
@@ -91,6 +92,28 @@ interface Frame {
   legacy?: Record<string, unknown>;
   works: Set<string>;
   attempts: Set<string>;
+  /** Глубина вложенных частей, идущих сейчас: 0 — внешняя транзакция. */
+  depth: number;
+  /**
+   * Транзакция что-то записала: документ, локальную запись, роль или срок
+   * аренды. Не откатывается вместе с вложенной частью — `pristine()` после
+   * отката её части остаётся `false`.
+   */
+  wrote: boolean;
+  /** Записаны записи модели движка — у транзакции `heartbeat` поднимает ревизию данных. */
+  modelWrote: boolean;
+  /**
+   * Транзакция открыта внутри уже идущей транзакции Store (`Store.atomic`
+   * вызывающего): та могла записать до неё и откатиться после — видимые
+   * данные не обязательно зафиксированы при текущей ревизии.
+   */
+  enclosed: boolean;
+  /**
+   * Ревизия данных Store в начале внешней транзакции. Запись данных мимо
+   * вида движка (прямо через Store в той же транзакции) поднимает ревизию
+   * до фиксации — `pristine()` видит её по расхождению.
+   */
+  revision?: number;
 }
 
 /**
@@ -142,7 +165,10 @@ export class DevContourExecutionStore implements ExecutionStore {
     const run = (frame: Frame) =>
       fn({
         // Продуктовые поля хост меняет прямо в документе: копия для записи.
+        // Правка хоста — не запись модели движка: продление сроков поставки
+        // под видом heartbeat остаётся продлением (ревизия данных прежняя).
         get state() {
+          frame.wrote = true;
           return frame.draft.edit();
         },
         journal: (data) => (frame.legacy = data),
@@ -168,6 +194,10 @@ export class DevContourExecutionStore implements ExecutionStore {
     const legacy = frame.legacy;
     const works = new Set(frame.works);
     const attempts = new Set(frame.attempts);
+    // `wrote` откат вложенной части не снимает (pristine остаётся false), а
+    // запись модели, откаченная с ней, ревизию heartbeat не поднимает.
+    const modelWrote = frame.modelWrote;
+    frame.depth++;
     try {
       return this.store.atomic(() => this.settled(run()));
     } catch (error) {
@@ -176,7 +206,10 @@ export class DevContourExecutionStore implements ExecutionStore {
       frame.legacy = legacy;
       frame.works = works;
       frame.attempts = attempts;
+      frame.modelWrote = modelWrote;
       throw error;
+    } finally {
+      frame.depth--;
     }
   }
 
@@ -190,6 +223,8 @@ export class DevContourExecutionStore implements ExecutionStore {
     let out!: T;
     let data: unknown = null;
     let drafts: RunEventDraft[] = [];
+    let written: Frame | undefined;
+    const enclosed = this.store.inTransaction;
     this.store.atomic(() => {
       const before = this.store.lastEventId();
       this.store.lazyUpdate(kind, (draft) => {
@@ -200,8 +235,14 @@ export class DevContourExecutionStore implements ExecutionStore {
           drafts: [],
           works: new Set(),
           attempts: new Set(),
+          depth: 0,
+          wrote: false,
+          modelWrote: false,
+          enclosed,
+          revision: enclosed ? undefined : this.store.revision(),
         };
         this.frame = frame;
+        written = frame;
         try {
           out = this.settled(run(frame));
         } finally {
@@ -222,6 +263,12 @@ export class DevContourExecutionStore implements ExecutionStore {
           // Получение и освобождение роли controller — сроки владения, не данные.
           drafts.every((d) => d.type.startsWith('controller.')) ? 'lease' : 'data',
         );
+      // Изменение документа под видом `heartbeat` Store считает продлением
+      // сроков (счётчик `lease`). Запись модели в такой транзакции, кроме
+      // продления срока совместной проверки (`jointHeartbeat`), — изменение
+      // данных: `dataVersion` меняется, иначе кэш движка по версии
+      // (`pristine`) остался бы прежним при других данных.
+      if (kind === 'heartbeat' && written?.modelWrote) this.store.markDataChanged();
     });
     return out;
   }
@@ -252,7 +299,9 @@ export class DevContourExecutionStore implements ExecutionStore {
   private reading?: ExecutionView;
 
   read<T>(fn: (view: ExecutionView) => T): T {
-    if (this.frame) return fn(this.view(this.frame));
+    // Чтение внутри транзакции — вид той же транзакции без записи (и без
+    // `pristine`: вид чтения его не даёт).
+    if (this.frame) return fn(this.view(this.frame, false));
     if (this.reading) return this.settled(fn(this.reading));
     return this.store.snapshot(() => {
       // Чтение без копии: общий замороженный снимок версии данных.
@@ -268,6 +317,10 @@ export class DevContourExecutionStore implements ExecutionStore {
         drafts: [],
         works: new Set(),
         attempts: new Set(),
+        depth: 0,
+        wrote: false,
+        modelWrote: false,
+        enclosed: false,
       };
       const view = this.view(frame, false);
       this.reading = view;
@@ -333,8 +386,12 @@ export class DevContourExecutionStore implements ExecutionStore {
     };
     const edit = () => {
       inTx();
+      frame.wrote = frame.modelWrote = true;
       return frame.draft.edit();
     };
+    // Вложенная часть получает свой вид на том же кадре: `pristine` — только
+    // у вида внешней транзакции и только пока вложенная часть не идёт.
+    const depth = frame.depth;
     const tasksOf = () => state().tasks;
     const local = <N extends LocalNamespace>(namespace: N, owner: string, key: string) => {
       if (namespace === 'reproductions')
@@ -412,8 +469,23 @@ export class DevContourExecutionStore implements ExecutionStore {
             leaseUntil: r.leaseUntil,
           })),
       dataVersion: () => store.revision(),
+      pristine: () =>
+        writable &&
+        this.frame === frame &&
+        depth === 0 &&
+        frame.depth === 0 &&
+        !frame.enclosed &&
+        !frame.wrote &&
+        frame.revision === store.revision() &&
+        frame.drafts.length === 0 &&
+        // Попытка со сроком в документе (её ведёт версия до D53, или её
+        // ещё не перенесла первая запись этой версии): прежняя версия
+        // продлевает срок в документе под видом heartbeat, не меняя ревизию
+        // данных. Пока такая попытка активна, кэш по версии не берётся.
+        state().runs.every((r) => r.status !== 'active' || !!store.attemptLeaseRow(r.id)),
       renewLease: (kind, id, token, owner, engineVersion, until, now) => {
         inTx();
+        frame.wrote = true;
         if (kind !== 'attempt') throw new Error('Неизвестный вид аренды: ' + String(kind));
         return store.renewAttemptLease(id, token, owner, engineVersion ?? '', until, now);
       },
@@ -461,18 +533,31 @@ export class DevContourExecutionStore implements ExecutionStore {
         putAttempt(edit(), attempt);
         frame.attempts.add(attempt.id);
       },
-      putVerification: (verification: JointVerificationState) =>
-        putVerification(edit(), verification, this.jointTarget),
+      putVerification: (verification: JointVerificationState) => {
+        // Продление срока совместной проверки (jointHeartbeat) — срок
+        // владения, как строка аренды попытки: под видом heartbeat ревизию
+        // данных не поднимает. Любое другое изменение — запись модели.
+        const current = verificationsOf(state()).find((v) => v.id === verification.id);
+        const renewal =
+          !!current &&
+          isDeepStrictEqual({ ...current, leaseUntil: 0 }, { ...verification, leaseUntil: 0 });
+        inTx();
+        frame.wrote = true;
+        if (!renewal) frame.modelWrote = true;
+        putVerification(frame.draft.edit(), verification, this.jointTarget);
+      },
       setControl: (control) => setControl(edit(), control),
       // Роль controller — своя строка хранилища: её продление документ не копирует.
       setController: (lease) => {
         inTx();
+        frame.wrote = true;
         const holder: { leader?: DevContourState['leader'] } = {};
         setController(holder as DevContourState, lease);
         frame.draft.leader = holder.leader;
       },
       putLocal: (namespace: LocalNamespace, owner: string, key: string, value: unknown) => {
         inTx();
+        frame.wrote = true;
         const parsed = localSchemas[namespace].parse(value);
         if (namespace === 'reproductions') {
           if (owner !== WORKSPACE_OWNER || key !== (parsed as { workId: string }).workId)
@@ -497,6 +582,7 @@ export class DevContourExecutionStore implements ExecutionStore {
       },
       emit: (event: RunEventDraft) => {
         inTx();
+        frame.wrote = true;
         // Нагрузка закрыта схемой: событие вне договора не записывается.
         runEventSchema.parse({
           apiVersion: API_VERSION,
