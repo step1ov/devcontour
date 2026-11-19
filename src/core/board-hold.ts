@@ -30,16 +30,28 @@ export interface BoardPark {
   revision: number;
   /** Последнее событие журнала при записи: утверждение после него снимает отметку. */
   eventId: number;
+  /**
+   * Утверждения задач ревизии при записи (`approvedAt`, `approvedDigest`):
+   * новое утверждение — в том числе пришедшее через Git sync, где события
+   * `board.approved` нет, — снимает отметку.
+   */
+  approvals: Record<string, { at?: string; digest?: string }>;
+  /** Остановка последнего задания доски при записи; `null` — заданий не было. */
+  job: string | null;
+  /** Отметка опиралась на закрытие упавшего задания (`workflow_close`). */
+  closed?: true;
 }
 
 /**
  * Упавшее задание мёртвой доски закрыто: его остановка больше не шаг.
  * Закрытие относится к одному эпизоду остановки: тому же заданию с теми же
  * попытками, окончанием и ошибкой и тем же задачам ревизии (`tasks` —
- * digest статуса, актёра отмены, попыток, класса отказа и прогонов каждой).
- * Повтор задания, повтор задачи после закрытия (`task.retry` после
- * `eventId`) или любая другая перемена этих полей возвращает обычные шаги
- * навсегда: новое закрытие — новое решение.
+ * digest статуса, актёра отмены, попыток, утверждения, класса отказа и
+ * прогонов каждой). Повтор задания, любое событие задач ревизии после
+ * закрытия по номеру журнала (`task.retry`, `task.reopened`,
+ * `task.cancelled`, `board.approved` после `eventId`) или другая перемена
+ * этих полей возвращает обычные шаги навсегда: возврат состояния к прежнему
+ * виду эпизод не восстанавливает, новое закрытие — новое решение.
  */
 export interface JobClosure {
   boardId: string;
@@ -86,17 +98,49 @@ export function parkedHold(h: DevContour, s: DevContourState, boardId: string) {
   // отметки — решение выпустить работу: отметка перестаёт действовать
   // навсегда, даже когда задачи потом снова отменены или в черновике.
   if (revision.number !== park.revision) return undefined;
-  const released = s.tasks.some((t) => revision.taskIds.includes(t.id) && releasable(t));
-  if (released) return undefined;
+  const tasks = s.tasks.filter((t) => revision.taskIds.includes(t.id));
+  if (tasks.some(releasable)) return undefined;
+  // Утверждение по состоянию: локальное меняет `approvedAt` (возврат в
+  // черновик его не стирает), пришедшее через sync — `approvedDigest`.
+  for (const t of tasks) {
+    const was = park.approvals[t.id];
+    if (t.approvedAt !== was?.at) return undefined;
+    if (t.approvedDigest && t.approvedDigest !== was?.digest) return undefined;
+  }
+  // Утверждение по журналу (последовательность, а не время): возврат в
+  // черновик после него утверждения не отменяет.
+  const ids = new Set(revision.taskIds);
+  const later = h.store.eventsAfterOfTypes(park.eventId, ['board.approved', 'task.reopened']);
   if (
-    h.store
-      .eventsSince(['board.approved'], park.at)
-      .some((e) => e.id > park.eventId && (e.data as { boardId?: string })?.boardId === boardId)
+    later.some((e) => {
+      const d = e.data as { boardId?: string; taskId?: string; wasApproved?: boolean } | null;
+      return e.type === 'board.approved'
+        ? d?.boardId === boardId
+        : !!d?.taskId && ids.has(d.taskId) && !!d.wasApproved && !park.approvals[d.taskId]?.digest;
+    })
   )
     return undefined;
-  if (boardJobs(h, s, boardId).some((j) => j.startedAt >= park.at)) return undefined;
+  // Задание доски после отметки: новое, повтор или новая остановка — решение
+  // о работе, и отметка его не прячет; закрытие, на которое она опиралась,
+  // тоже должно действовать.
+  const last = boardJobs(h, s, boardId).at(-1);
+  if (jobStop(last) !== park.job) return undefined;
+  if (park.closed && (!last || !closureOf(h, s, boardId, last))) return undefined;
   return park;
 }
+
+/** Остановка задания для сравнения: ключ, статус, попытки, окончание и ошибка. */
+const jobStop = (job: WorkflowJob | undefined) =>
+  job
+    ? JSON.stringify([
+        job.key,
+        job.status,
+        job.attempts,
+        job.stage,
+        job.finishedAt ?? null,
+        job.error ?? null,
+      ])
+    : null;
 
 /** Все действующие отметки «отложена» (для пакета передачи). */
 export function parkedBoards(h: DevContour, now = Date.now()) {
@@ -198,6 +242,19 @@ export function setPark(
       at: new Date().toISOString(),
       revision: revision.number,
       eventId: h.store.lastEventId(),
+      approvals: Object.fromEntries(
+        s.tasks
+          .filter((t) => revision.taskIds.includes(t.id))
+          .map((t) => [
+            t.id,
+            {
+              ...(t.approvedAt ? { at: t.approvedAt } : {}),
+              ...(t.approvedDigest ? { digest: t.approvedDigest } : {}),
+            },
+          ]),
+      ),
+      job: jobStop(last),
+      ...(last?.status === 'failed' ? { closed: true as const } : {}),
     };
     h.store.saveLocal(PARK, undefined, boardId, park);
     return { boardId, parked: true as const, park };
@@ -242,6 +299,8 @@ function tasksEpisode(s: DevContourState, taskIds: readonly string[]) {
             status: t.status,
             cancelledBy: t.cancelledBy ?? null,
             attempt: t.attempt,
+            approvedAt: t.approvedAt ?? null,
+            approvedDigest: t.approvedDigest ?? null,
             failureKind: t.failureKind ?? null,
             budget: !!t.budgetBlock,
             runs: s.runs.filter((r) => r.taskId === id).length,
@@ -269,10 +328,21 @@ export function closureOf(h: DevContour, s: DevContourState, boardId: string, jo
   const taskIds = s.boards.find((b) => b.id === boardId)?.revisions.at(-1)?.taskIds ?? [];
   if (closure.tasks !== tasksEpisode(s, taskIds)) return undefined;
   const ids = new Set(taskIds);
+  // Любая перемена задач ревизии после закрытия по журналу (номер события,
+  // а не время): повтор, возврат в черновик, новая отмена, утверждение.
+  // Состояние могло вернуться к прежнему виду — эпизод уже другой.
   if (
     h.store
-      .eventsSince(['task.retry'], closure.at)
-      .some((e) => e.id > closure.eventId && ids.has((e.data as { taskId?: string })?.taskId ?? ''))
+      .eventsAfterOfTypes(closure.eventId, [
+        'task.retry',
+        'task.reopened',
+        'task.cancelled',
+        'board.approved',
+      ])
+      .some((e) => {
+        const d = e.data as { taskId?: string; boardId?: string } | null;
+        return e.type === 'board.approved' ? d?.boardId === boardId : ids.has(d?.taskId ?? '');
+      })
   )
     return undefined;
   return closure;
