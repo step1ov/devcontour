@@ -256,6 +256,39 @@ test('The operator answers the writer question in the panel; the answer reaches 
   expect(await boardAccepted(request, board.id)).toBe('accepted');
 });
 
+test('The lead decides a technical question with a reason; the task card names the lead and the reason', async ({
+  page,
+  request,
+}) => {
+  test.slow();
+  const { board, task } = await askingTask(request, 'Технический вопрос ведущему');
+  await queue(request, false);
+  const { requests } = (await agent(request, 'input_list', { taskId: task })) as {
+    requests: { requestId: string; version: number; actor: string }[];
+  };
+  const [question] = requests;
+  // Технический вопрос demo в режиме agent решает ведущий — с причиной.
+  expect(question.actor).toBe('lead');
+  const reason = 'Проверки читают JSON; другой формат только добавит работы.';
+  await agent(request, 'input_answer', {
+    requestId: question.requestId,
+    text: 'Оставьте JSON.',
+    optionId: 'json',
+    reason,
+    expectedVersion: question.version,
+  });
+  await page.goto(`/?tab=list&board=${board}&task=${task}`);
+  const card = page
+    .getByRole('complementary', { name: 'Детали задачи' })
+    .getByRole('region', { name: 'Вопрос исполнителя' });
+  await expect(card).toContainText('технический вопрос');
+  const answer = card.locator('[data-input-answer]');
+  await expect(answer).toContainText('ведущий агент, технический вопрос, вариант json');
+  await expect(card.locator('[data-input-answer-reason]')).toHaveText(
+    `Причина ведущего: ${reason}`,
+  );
+});
+
 test('A cancelled question leaves a retryable task: the retry button returns after «Снять вопрос»', async ({
   page,
   request,

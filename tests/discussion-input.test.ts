@@ -53,7 +53,12 @@ test('D03-K: the lead answers through discussion_post; the message id is the mes
       taskId,
       kind: 'answer',
       text: 'Use JSON as now.',
-      input: { requestId, expectedVersion: version, optionId: 'json' },
+      input: {
+        requestId,
+        expectedVersion: version,
+        optionId: 'json',
+        reason: 'Fixture: the checks read JSON today.',
+      },
       idempotencyKey: 'answer-key-0001',
       expectedVersion: 0,
     };
@@ -77,6 +82,13 @@ test('D03-K: the lead answers through discussion_post; the message id is the mes
     const shown = page.messages.find((m) => m.id === first.message.id)!;
     assert.equal(shown.text, 'Use JSON as now.');
     assert.equal(shown.kind, 'answer');
+    // Причина ведущего — из той же версии ответа запроса, в записи её нет.
+    assert.equal((answer as { reason?: string }).reason, 'Fixture: the checks read JSON today.');
+    assert.equal(
+      (shown.input as { reason?: string }).reason,
+      'Fixture: the checks read JSON today.',
+    );
+    assert.equal('reason' in (rawRow(f, taskId, first.message.id).input as object), false);
     // Повтор по ключу — то же сообщение и тот же ответ.
     const again = agent.execute({ operation: 'discussion_post', input: post }) as {
       message: { id: string };
@@ -181,7 +193,11 @@ test('D03-C: a late answer after cancel is kept as discussion history; the reque
         taskId,
         kind: 'answer',
         text: 'Late: use JSON.',
-        input: { requestId, expectedVersion: version + 1 },
+        input: {
+          requestId,
+          expectedVersion: version + 1,
+          reason: 'Fixture: the checks read JSON today.',
+        },
         idempotencyKey: 'late-key-0001',
         expectedVersion: 0,
       },
@@ -215,7 +231,11 @@ test('The lead answer rule holds through discussion_post: a critical question is
             taskId,
             kind: 'answer',
             text: 'Change the API.',
-            input: { requestId, expectedVersion: version },
+            input: {
+              requestId,
+              expectedVersion: version,
+              reason: 'Fixture: the checks read JSON today.',
+            },
             idempotencyKey: 'lead-critical-01',
             expectedVersion: before,
           },
@@ -250,7 +270,11 @@ test('D03-K: the snapshot manifest lists the answer message and selected message
         taskId,
         kind: 'answer',
         text: 'Use JSON as now.',
-        input: { requestId, expectedVersion: version },
+        input: {
+          requestId,
+          expectedVersion: version,
+          reason: 'Fixture: the checks read JSON today.',
+        },
         idempotencyKey: 'answer-key-0002',
         expectedVersion: 0,
       },
@@ -321,7 +345,11 @@ test('CLI input-context --messages passes the selected discussion messages to th
         taskId,
         kind: 'answer',
         text: 'Use JSON as now.',
-        input: { requestId, expectedVersion: version },
+        input: {
+          requestId,
+          expectedVersion: version,
+          reason: 'Fixture: the checks read JSON today.',
+        },
         idempotencyKey: 'cli-answer-key-02',
         expectedVersion: 0,
       },

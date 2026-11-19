@@ -34,7 +34,12 @@ test('F21: ответ ведущего изменением требований
       );
     // Уточнение ведущего решением за владельца не считается.
     const clarified = f.service.answer(
-      { requestId: r.requestId, text: 'Use JSON as now.', expectedVersion: r.version },
+      {
+        requestId: r.requestId,
+        text: 'Use JSON as now.',
+        expectedVersion: r.version,
+        reason: 'Fixture: the checks read JSON today.',
+      },
       'lead',
     );
     assert.equal(d.standIns(10).length, 0);
@@ -44,6 +49,7 @@ test('F21: ответ ведущего изменением требований
         text: 'Change the acceptance: produce YAML.',
         kind: 'requirement-change',
         expectedVersion: clarified.version,
+        reason: 'Fixture: the checks read JSON today.',
       },
       'lead',
     );
@@ -84,6 +90,7 @@ test('F21: ответ ведущего изменением требований
         text: 'Change the acceptance: produce YAML.',
         kind: 'requirement-change',
         expectedVersion: changed.version,
+        reason: 'Fixture: the checks read JSON today.',
       },
       'lead',
     );
@@ -95,6 +102,7 @@ test('F21: ответ ведущего изменением требований
         text: 'Change the acceptance: produce TOML.',
         kind: 'requirement-change',
         expectedVersion: again.version,
+        reason: 'Fixture: the checks read JSON today.',
       },
       'lead',
     );
@@ -110,6 +118,7 @@ test('F21: ответ ведущего изменением требований
         text: 'Produce CSV instead.',
         kind: 'requirement-change',
         expectedVersion: current.version,
+        reason: 'Fixture: the checks read JSON today.',
       },
       'operator',
     );
@@ -199,6 +208,7 @@ test('F21: сбой записи решения откатывает ответ 
       text: 'Change the acceptance: produce YAML.',
       kind: 'requirement-change' as const,
       expectedVersion: r.version,
+      reason: 'Fixture: the checks read JSON today.',
     };
     // Сбой записи — ответа нет: одна транзакция.
     await withRecord(

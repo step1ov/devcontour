@@ -761,13 +761,26 @@ export const demoAdapter: AgentAdapter = {
           inputRequest: {
             question: `Demo fixture: какой формат артефакта задачи ${r.task.id} выбрать?`,
             options: [
-              { id: 'json', label: 'JSON', consequence: 'Артефакт читают проверки как сейчас' },
-              { id: 'yaml', label: 'YAML', consequence: 'Проверки придётся менять' },
+              {
+                id: 'json',
+                label: 'JSON',
+                consequence: 'Артефакт читают проверки как сейчас',
+                forUser: askProduct ? 'Пользователь получает файл JSON, как сейчас' : null,
+              },
+              {
+                id: 'yaml',
+                label: 'YAML',
+                consequence: 'Проверки придётся менять',
+                forUser: askProduct ? 'Пользователь получает файл в другом формате — YAML' : null,
+              },
             ],
             recommended: 'json',
             severity: 8,
             rationale: 'Формат артефакта виден проверкам задачи',
             affects: askContract ? ['contract', 'acceptance'] : askProduct ? ['product'] : [],
+            // Вопрос о продукте меняет то, что получает пользователь; формат
+            // артефакта для проверок — выбор внутри реализации.
+            impact: askProduct ? 'user-visible' : 'technical',
           },
           assumptions: [],
         },

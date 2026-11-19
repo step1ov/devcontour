@@ -6,12 +6,17 @@
 // остаются у DevContour. Значение, которое договор harness не принимает,
 // — явный отказ с указанием поля, а не молчаливая подмена.
 import {
+  DEFAULT_INPUT_POLICY,
   HarnessError,
   digestOf,
   executionPolicySchema,
+  forOperator,
+  leadAnswerBasis,
   policyIssues,
   selectReviewer,
   type ExecutionPolicy,
+  type InputPolicy,
+  type InputRequest,
 } from 'devcontour-harness';
 import type { Config, Repository } from '../core/model.ts';
 import { repositories } from '../core/repositories.ts';
@@ -23,6 +28,38 @@ type Binding = {
   toolProfile?: string;
 };
 type Gate = Repository['gates'][number];
+
+/**
+ * Правило ответов ведущего на блокирующие вопросы исполнителя
+ * (`inputPolicy.leadAnswers` политики harness). В `approvalMode: agent`
+ * владелец доверил ведущему технические решения: технический вопрос
+ * (`impact: technical`, без минимумов, серьёзность до 9) ведущий решает сам с
+ * записанной причиной. Вопрос, меняющий результат для пользователя (или без
+ * `impact`), и критический — только владельцу в панели. В режиме `operator`
+ * правила нет: на все блокирующие вопросы отвечает владелец. Поле не входит
+ * ни в `executionDigest`, ни в утверждаемую часть политики.
+ */
+export const LEAD_ANSWERS = { maxSeverity: 9, technical: true } as const satisfies NonNullable<
+  InputPolicy['leadAnswers']
+>;
+export const leadAnswersOf = (config: Pick<Config, 'approvalMode'>) =>
+  config.approvalMode === 'agent' ? { ...LEAD_ANSWERS } : undefined;
+
+/**
+ * Решает ли ведущий запрос сам (ответ, снятие, замена). Неблокирующий запрос
+ * (follow-up, вопрос ниже порога) — прежнее правило: без минимумов в режиме
+ * `agent`. Блокирующий вопрос — правило движка (`leadAnswerBasis`) с
+ * `LEAD_ANSWERS`: только технический.
+ */
+export function leadDecides(
+  config: Pick<Config, 'approvalMode'>,
+  request: Pick<InputRequest, 'kind' | 'blocking' | 'effectiveSeverity' | 'floors' | 'question'>,
+) {
+  const leadAnswers = leadAnswersOf(config);
+  if (!leadAnswers) return false;
+  if (!forOperator(request)) return request.floors.length === 0;
+  return leadAnswerBasis(request, { leadAnswers }) === 'technical';
+}
 
 /** Runtime DevContour `demo` — управляемый runtime `fixture` harness. */
 export const harnessRuntime = (runtime: string) => (runtime === 'demo' ? 'fixture' : runtime);
@@ -247,11 +284,12 @@ export function policyFromConfig(
     ...(config.gateTimeoutFloorMs ? { gateTimeoutFloorMs: config.gateTimeoutFloorMs } : {}),
     // Перенос evidence кандидата — только заданный: без поля digest прежний.
     ...(config.integrationReuse ? { integrationReuse: config.integrationReuse } : {}),
-    ...(config.inputPolicy
+    ...(config.inputPolicy || leadAnswersOf(config)
       ? {
           inputPolicy: {
-            threshold: config.inputPolicy.threshold,
-            criticalPaths: config.inputPolicy.criticalPaths ?? [],
+            threshold: config.inputPolicy?.threshold ?? DEFAULT_INPUT_POLICY.threshold,
+            criticalPaths: config.inputPolicy?.criticalPaths ?? [],
+            ...(leadAnswersOf(config) ? { leadAnswers: leadAnswersOf(config) } : {}),
           },
         }
       : {}),

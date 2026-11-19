@@ -628,22 +628,35 @@ const inputSource: AttentionSourceRule = {
           const operator = r.actor === 'operator';
           const title = taskTitle(ctx, r.taskId);
           let question = '';
-          let options: { id: string; label: string; consequence: string | null }[] = [];
+          let options: {
+            id: string;
+            label: string;
+            consequence: string | null;
+            forUser?: string | null;
+          }[] = [];
           let recommended: string | null = null;
           let affects: readonly string[] = [];
+          let impact: string | null = null;
           try {
             const asked = engine.inputRequest(r.requestId).question;
             question = asked.question;
             options = asked.options;
             recommended = asked.recommended;
             affects = asked.affects;
+            impact = asked.impact ?? null;
           } catch {
             /* Запрос не найден: карточка остаётся по сводке. */
           }
           // Оператор отвечает на ожидающий вопрос и исправляет ответ, который
           // отклонило ревью (как в карточке задачи).
+          // В режиме agent сохранённый ответ ведущего на вопрос владельца
+          // (записан до правила ответов ведущего) тоже ждёт ответа владельца.
           const answer =
-            operator && (r.state === 'awaiting-answer' || r.state === 'review-rejected');
+            operator &&
+            (r.state === 'awaiting-answer' ||
+              r.state === 'review-rejected' ||
+              (!operatorMode &&
+                ['answer-saved', 'context-review', 'ready-to-apply', 'stale'].includes(r.state)));
           // Отклонённое ревью (D03 `review-rejected`): в режиме operator ответ
           // применяют только подтверждением показанного раунда — то же правило
           // `InputService.apply`, что у панели; его находки — в карточке.
@@ -691,6 +704,11 @@ const inputSource: AttentionSourceRule = {
             source: 'input',
             category: operator ? 'question' : 'technical',
             actor: operator ? 'operator' : 'lead',
+            // Вопрос владельцу о том, что получает пользователь, — раздел
+            // «Продукт»; остальные вопросы исполнителя — «Разработка».
+            ...(operator && (impact === 'user-visible' || affects.includes('product'))
+              ? { section: 'product' as const }
+              : {}),
             title: !r.blocking
               ? `Решение исполнителя по задаче «${title}» ждёт ведущего`
               : answer
@@ -725,6 +743,9 @@ const inputSource: AttentionSourceRule = {
                       : '') +
                     '. '
                   : '') +
+                (impact === 'user-visible' && answer
+                  ? 'Решение меняет результат для пользователя. '
+                  : '') +
                 (question ? `${question} — ` : '') +
                 `Дальше: ${inputNextText({ ...r, operatorMode })}.`,
             ),
@@ -757,7 +778,11 @@ const inputSource: AttentionSourceRule = {
                             choices: options.map((o) => ({
                               id: o.id,
                               label: o.label,
-                              ...(o.consequence ? { hint: o.consequence } : {}),
+                              // Что изменится для пользователя — простыми
+                              // словами исполнителя; иначе техническое последствие.
+                              ...(o.forUser || o.consequence
+                                ? { hint: o.forUser || o.consequence! }
+                                : {}),
                               ...(o.id === recommended ? { recommended: true } : {}),
                             })),
                           }

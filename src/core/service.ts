@@ -40,7 +40,7 @@ import {
 } from 'devcontour-harness';
 import { closeEpisodeIfBasisChanged, episodeBasisOf, storyGuard } from '../harness/host.ts';
 import { referenceKey, type StoryBinding } from './intent.ts';
-import { approvalPolicyDigest } from '../harness/policy.ts';
+import { approvalPolicyDigest, leadDecides } from '../harness/policy.ts';
 import { rebindInputContext } from '../harness/input-host.ts';
 import { planIngest } from './plan.ts';
 import { boardOwner, completion, receiptHolds, receiptRecordBytes } from './sync-state.ts';
@@ -2804,16 +2804,14 @@ export class DevContour {
         if (t.status === 'done')
           throw new DomainError('Принятый результат нельзя отменить; создайте корректировку');
         // Отмена задачи закрывает её открытые вопросы исполнителя. Вопрос,
-        // который ведущий не вправе решить сам (критический или режим
-        // оператора), снимает только оператор — и задачей тоже: иначе отмена
-        // и повтор обошли бы правило ответа.
+        // который ведущий не вправе решить сам (критический, меняющий
+        // результат для пользователя или режим оператора), снимает только
+        // оператор — и задачей тоже: иначе отмена и повтор обошли бы правило
+        // ответа.
         if (by !== 'operator') {
           const work = ht.tx.work(id);
           const held = work
-            ? requestsOf(ht.tx, work).find(
-                (r) =>
-                  blocksWork(r) && (r.floors.length > 0 || this.config.approvalMode === 'operator'),
-              )
+            ? requestsOf(ht.tx, work).find((r) => blocksWork(r) && !leadDecides(this.config, r))
             : undefined;
           if (held) {
             const error = new DomainError(

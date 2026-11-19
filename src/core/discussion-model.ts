@@ -106,6 +106,11 @@ export const discussionMessage = z.strictObject({
         requestId: inputRequestId,
         revision: z.number().int().positive(),
         answerDigest: z.string().regex(/^[a-f0-9]{64}$/),
+        /**
+         * Причина ведущего из той же версии ответа в запросе harness: в записи
+         * её нет, `read()` подставляет её вместе с текстом.
+         */
+        reason: z.string().max(1000).optional(),
       }),
       z.strictObject({
         requestId: inputRequestId,
@@ -171,6 +176,8 @@ export const discussionInputs = {
         expectedVersion: z.number().int().positive(),
         optionId: z.string().max(40).optional(),
         kind: z.enum(['clarification', 'requirement-change']).optional(),
+        /** Почему ведущий выбрал ответ: обязательна на технический блокирующий вопрос. */
+        reason: z.string().trim().min(1).max(1000).optional(),
       })
       .optional(),
     replyTo: messageId.optional(),
