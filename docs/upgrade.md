@@ -2047,8 +2047,6 @@ same-vendor-allowed`) само выбирает этому автору ревь
 
 ### 0.4.0-alpha.50
 
-Не выпущена.
-
 - **Движок devcontour-harness 0.1.0-alpha.53.** Зависимость закреплена на
   точной версии из npm (прежде — 0.1.0-alpha.50). `stateVersion`,
   `policyVersion`, `handoffVersion` и `reportVersion` прежние; записи
