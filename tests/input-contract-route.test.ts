@@ -18,6 +18,7 @@ import { executionOf } from '../src/harness/execution.ts';
 import { repositories } from '../src/core/repositories.ts';
 import type { ContractChangeTrace } from '../src/application/input-rebound.ts';
 import type { ContractChange } from '../src/runner/contract-change.ts';
+import { RESUME, RESUME_REVIEWS, resumeRecord } from '../src/application/input-resume.ts';
 
 after(() => inputDemos.close());
 
@@ -70,44 +71,55 @@ function reviewer(decide: Decide, prompts: string[], affects: string[]) {
   };
 }
 
-/** Маршрут к контракту `id`, пока задача привязана к нему; после перепривязки — одобрение. */
+/** ID редакций договора задачи: `v1` — при вопросе, `next` — после перепривязки. */
+type Pins = { v1: string; next?: string };
+
+/**
+ * Маршрут к контракту v1, пока задача привязана ровно к нему; одобрение —
+ * только на основании ровно с новой редакцией `next`; иное основание —
+ * обычное отклонение (ошибка фикстуры видна, а не спрятана одобрением).
+ */
 const routeWhileBound =
-  (id: () => string): Decide =>
+  (pins: Pins): Decide =>
   (prompt) =>
-    prompt.includes(`"contracts":["${id()}"]`)
+    prompt.includes(`"contracts":["${pins.v1}"]`)
       ? {
           approve: false,
           findings: [
             {
               severity: 'blocking',
               message: 'The chosen option amends the pinned contract',
-              rule: `contract-change:${id()}`,
+              rule: `contract-change:${pins.v1}`,
             },
           ],
         }
-      : { approve: true, findings: [] };
+      : pins.next && prompt.includes(`"contracts":["${pins.next}"]`)
+        ? { approve: true, findings: [] }
+        : {
+            approve: false,
+            findings: [{ severity: 'blocking', message: 'Fixture: unexpected review basis' }],
+          };
 
 /** Задача с контрактом v1, остановленная вопросом о контракте; ответ оператора сохранён. */
 async function answered(
   options: {
-    decide?: (v1: () => string) => Decide;
+    decide?: (pins: Pins) => Decide;
     approvalMode?: 'agent' | 'operator';
     affects?: string[];
     paused?: boolean;
   } = {},
 ) {
   const prompts: string[] = [];
-  let v1Id = '';
-  const v1Of = () => v1Id;
+  const pins: Pins = { v1: '' };
   const affects = options.affects ?? ['contract', 'acceptance'];
-  const runtimes = reviewer((options.decide ?? routeWhileBound)(v1Of), prompts, affects);
+  const runtimes = reviewer((options.decide ?? routeWhileBound)(pins), prompts, affects);
   const f = await inputFixture(
     runtimes,
     options.approvalMode ? { approvalMode: options.approvalMode } : {},
   );
   const boardId = f.h.createBoard('Contract route board').id;
   const v1 = f.h.contract('Artifact format', 'Version one.', undefined, undefined, source);
-  v1Id = v1.id;
+  pins.v1 = v1.id;
   const taskId = f.h.addTask(boardId, {
     title: 'Task bound to a contract asks',
     description: `An observable outcome that needs a decision ${DEMO_ASK}.`,
@@ -129,7 +141,7 @@ async function answered(
     },
     'operator',
   );
-  return { f, runtimes, prompts, boardId, taskId, v1, requestId: summary.requestId };
+  return { f, runtimes, prompts, pins, boardId, taskId, v1, requestId: summary.requestId };
 }
 
 async function review(f: InputFixture, requestId: string) {
@@ -143,9 +155,10 @@ async function review(f: InputFixture, requestId: string) {
 }
 
 /** Новая редакция контракта и перепривязка задачи к ней (как шаг rebind). */
-function rebind(f: InputFixture, taskId: string, from: string) {
+function rebind(f: InputFixture, taskId: string, from: string, pins?: Pins) {
   const v2 = f.h.contract('Artifact format', 'Version two.', undefined, undefined, source);
   assert.deepEqual(f.h.rebind([taskId], [from], v2.id), [taskId]);
+  if (pins) pins.next = v2.id;
   return v2;
 }
 
@@ -156,12 +169,15 @@ function operation(
   contractId: string | undefined,
   status: ContractChange['status'],
   id = 'CC-route',
+  file = source,
 ) {
-  const owner = repositories(f.h.config)[0].id;
+  const all = repositories(f.h.config);
+  const owner = all.some((r) => r.id === 'main') ? 'main' : all[0].id;
   const record: ContractChangeTrace & Partial<ContractChange> = {
     id,
-    key: `${owner}:${source}`,
+    key: `${owner}:${file}`,
     owner,
+    proposal: { title: file === source ? 'Artifact format' : 'Other format', file },
     status,
     ...(contractId ? { contractId } : {}),
     rebound: contractId ? [taskId] : [],
@@ -196,7 +212,7 @@ const answers = (f: InputFixture, requestId: string) =>
   executionOf(f.h).engine.inputRequest(requestId).answers.length;
 
 test('F83: a review that names the contract route makes the question the lead’s contract-change step; the operator card closes and the same answer goes through after the rebinding', async () => {
-  const { f, prompts, boardId, taskId, v1, requestId } = await answered();
+  const { f, prompts, pins, boardId, taskId, v1, requestId } = await answered();
   try {
     const { result } = await review(f, requestId);
     assert.equal(result.approved, false);
@@ -238,7 +254,7 @@ test('F83: a review that names the contract route makes the question the lead’
     assert.match(step.detail, /devcontour contract-change --file proposal\.json/);
 
     // Ведущий меняет контракт: перепривязка, утверждение, завершённая операция.
-    const v2 = rebind(f, taskId, v1.id);
+    const v2 = rebind(f, taskId, v1.id, pins);
     f.h.approve(boardId, [taskId]);
     operation(f, taskId, v2.id, 'completed');
     assert.equal(f.service.show({ requestId }).state, 'answer-saved');
@@ -267,7 +283,7 @@ test('F83: a review that names the contract route makes the question the lead’
 });
 
 test('F83: with a running server the pass stops at the contract route without another review, and after the completed operation reviews and applies the same answer itself', async () => {
-  const { f, runtimes, prompts, boardId, taskId, v1, requestId } = await answered({
+  const { f, runtimes, prompts, pins, boardId, taskId, v1, requestId } = await answered({
     paused: false,
   });
   try {
@@ -287,9 +303,17 @@ test('F83: with a running server the pass stops at the contract route without an
     assert.equal(summary.actor, 'lead');
     await ticks(2);
     assert.equal(prompts.length, 1, 'до изменения контракта ревью не повторяется');
+    // Предел ревью прохода исчерпан прежними попытками по старому основанию:
+    // ревью на новой редакции — новое основание, а не повтор.
+    const record = resumeRecord(f.h, requestId)!;
+    assert.equal(record.phase, 'rejected');
+    f.store.atomic(() =>
+      f.store.saveLocal(RESUME, undefined, requestId, { ...record, reviews: RESUME_REVIEWS }),
+    );
+    const digestBefore = executionOf(f.h).engine.inputRequest(requestId).answers[0].digest;
 
     // Перепривязка идёт (операция не завершена): ход ведущего, без ревью.
-    const v2 = rebind(f, taskId, v1.id);
+    const v2 = rebind(f, taskId, v1.id, pins);
     operation(f, taskId, v2.id, 'running');
     const waiting = f.service.show({ requestId });
     assert.equal(waiting.state, 'contract-change-required');
@@ -303,15 +327,20 @@ test('F83: with a running server the pass stops at the contract route without an
     operation(f, taskId, v2.id, 'completed');
     await ticks(3);
     assert.equal(prompts.length, 2, 'проход сам проверил тот же ответ на новой редакции');
+    assert.ok(prompts[1].includes(`"contracts":["${v2.id}"]`), 'ревью на новой редакции');
     const applied = f.store
       .allEvents()
       .filter((e) => e.type === 'input.applied')
-      .map((e) => (e as unknown as { data: Record<string, unknown> }).data);
-    assert.equal(applied.at(-1)?.origin, 'server');
+      .map((e) => (e as unknown as { data: Record<string, unknown> }).data)
+      .filter((d) => d.requestId === requestId);
+    assert.equal(applied.length, 1);
+    assert.equal(applied[0].origin, 'server');
     assert.ok(
       ['applied-awaiting-claim', 'delivered'].includes(f.service.show({ requestId }).state),
     );
-    assert.equal(answers(f, requestId), 1);
+    const after = executionOf(f.h).engine.inputRequest(requestId);
+    assert.equal(after.answers.length, 1);
+    assert.equal(after.answers[0].digest, digestBefore, 'применён тот же ответ');
   } finally {
     await f.cleanup();
   }
@@ -342,7 +371,7 @@ test('F83: an abandoned or stale contract-change returns the question to the ope
 });
 
 test('F83: the route is deterministic — a contract not on the task, a mixed finding or a question without contract stays an ordinary rejection', async () => {
-  const cases: { name: string; affects?: string[]; decide: (v1: () => string) => Decide }[] = [
+  const cases: { name: string; affects?: string[]; decide: (pins: Pins) => Decide }[] = [
     {
       name: 'чужой контракт',
       decide: () => () => ({
@@ -354,10 +383,14 @@ test('F83: the route is deterministic — a contract not on the task, a mixed fi
     },
     {
       name: 'смешанные находки',
-      decide: (v1) => () => ({
+      decide: (pins) => () => ({
         approve: false,
         findings: [
-          { severity: 'blocking', message: 'Amends the pinned', rule: `contract-change:${v1()}` },
+          {
+            severity: 'blocking',
+            message: 'Amends the pinned',
+            rule: `contract-change:${pins.v1}`,
+          },
           { severity: 'blocking', message: 'Also changes the acceptance' },
         ],
       }),
@@ -365,10 +398,14 @@ test('F83: the route is deterministic — a contract not on the task, a mixed fi
     {
       name: 'вопрос не о контракте',
       affects: ['acceptance'],
-      decide: (v1) => () => ({
+      decide: (pins) => () => ({
         approve: false,
         findings: [
-          { severity: 'blocking', message: 'Amends the pinned', rule: `contract-change:${v1()}` },
+          {
+            severity: 'blocking',
+            message: 'Amends the pinned',
+            rule: `contract-change:${pins.v1}`,
+          },
         ],
       }),
     },
@@ -397,7 +434,9 @@ test('F83: the route is deterministic — a contract not on the task, a mixed fi
 });
 
 test('F83: in approvalMode operator the route is the lead’s too — no apply over the review; after the rebinding the lead reviews and the operator applies the same answer', async () => {
-  const { f, boardId, taskId, v1, requestId } = await answered({ approvalMode: 'operator' });
+  const { f, pins, boardId, taskId, v1, requestId } = await answered({
+    approvalMode: 'operator',
+  });
   try {
     const { result } = await review(f, requestId);
     assert.equal((result as { route?: string }).route, 'contract-change');
@@ -423,7 +462,7 @@ test('F83: in approvalMode operator the route is the lead’s too — no apply o
         e.code === 'CONTRACT_CHANGE_REQUIRED' || /поправка закреплённого контракта/.test(e.message),
     );
 
-    const v2 = rebind(f, taskId, v1.id);
+    const v2 = rebind(f, taskId, v1.id, pins);
     f.h.approve(boardId, [taskId]);
     operation(f, taskId, v2.id, 'completed');
     assert.equal(f.service.show({ requestId }).state, 'answer-saved');
@@ -435,6 +474,81 @@ test('F83: in approvalMode operator the route is the lead’s too — no apply o
     });
     assert.equal(applied.applied, true);
     assert.equal(answers(f, requestId), 1);
+  } finally {
+    await f.cleanup();
+  }
+});
+
+test('F83: a new answer does not inherit the route of the previous one; an operation of another contract is not the route operation', async () => {
+  const { f, pins, boardId, taskId, v1, requestId } = await answered();
+  try {
+    await review(f, requestId);
+    // Операция другого договора, удерживающая задачу, маршрут не касается.
+    operation(f, taskId, undefined, 'abandoned', 'CC-other', 'docs/contracts/other-format.md');
+    const shown = f.service.show({ requestId });
+    assert.equal(shown.state, 'contract-change-required');
+    assert.equal(shown.route?.operation, undefined);
+    // Перепривязка ждёт операции: маршрут держится для того же ответа.
+    const v2 = rebind(f, taskId, v1.id, pins);
+    operation(f, taskId, v2.id, 'running');
+    assert.equal(f.service.show({ requestId }).route?.waiting, true);
+    // Оператор передумал и ответил иначе из карточки задачи: новый ответ
+    // маршрута не наследует.
+    const now = f.service.show({ requestId });
+    f.service.answerInTask(taskId, requestId, {
+      text: 'Keep the current behaviour; no contract change.',
+      expectedVersion: now.version,
+    });
+    const renewed = f.service.show({ requestId });
+    assert.notEqual(renewed.state, 'contract-change-required');
+    assert.equal(renewed.route, undefined);
+    void boardId;
+  } finally {
+    await f.cleanup();
+  }
+});
+
+test('F83: after an abandoned operation in approvalMode operator the answer still cannot be applied to the old revision', async () => {
+  const { f, taskId, requestId } = await answered({ approvalMode: 'operator' });
+  try {
+    await review(f, requestId);
+    operation(f, taskId, undefined, 'abandoned');
+    const shown = f.service.show({ requestId });
+    assert.equal(shown.state, 'review-rejected');
+    assert.equal(shown.actor, 'operator');
+    const card = (await cardOf(f, requestId))!;
+    assert.ok(!card.actions.some((a) => a.id === 'apply'), 'нет «Применить вопреки ревью»');
+    const last = shown.reviews.at(-1)!;
+    const target = f.service.target({ requestId, contextDigest: last.contextDigest! });
+    assert.ok(target.problems.some((p) => p.includes('поправка закреплённого контракта')));
+    assert.throws(
+      () =>
+        f.service.applyInTask(taskId, requestId, {
+          expectedVersion: shown.version,
+          confirmRejectedRound: shown.round,
+        }),
+      /поправка закреплённого контракта/,
+    );
+  } finally {
+    await f.cleanup();
+  }
+});
+
+test('F83: a route that names a contract not pinned to the task stays a rejection after the task changes too', async () => {
+  const { f, pins, taskId, v1, requestId } = await answered({
+    decide: () => () => ({
+      approve: false,
+      findings: [{ severity: 'blocking', message: 'Amends another', rule: 'contract-change:C-x' }],
+    }),
+  });
+  try {
+    await review(f, requestId);
+    assert.equal(f.service.show({ requestId }).state, 'review-rejected');
+    const v2 = rebind(f, taskId, v1.id, pins);
+    operation(f, taskId, v2.id, 'running');
+    const shown = f.service.show({ requestId });
+    assert.notEqual(shown.state, 'contract-change-required');
+    assert.equal(shown.route, undefined);
   } finally {
     await f.cleanup();
   }

@@ -27,7 +27,7 @@ export const orderContentDigest = (order: WorkOrder) =>
  * (`ContractChanges.revisions`): тот же компонент и файл, а без файла —
  * тот же заголовок.
  */
-const sameChain = (a: Contract, b: Contract) =>
+export const sameChain = (a: Contract, b: Contract) =>
   (a.repositoryId ?? undefined) === (b.repositoryId ?? undefined) &&
   (a.source || b.source ? a.source === b.source : a.title === b.title);
 

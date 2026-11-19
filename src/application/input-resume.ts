@@ -11,6 +11,7 @@ import { repositories } from '../core/repositories.ts';
 import { pausedByLead } from '../core/work-status.ts';
 import { executionOf } from '../harness/execution.ts';
 import { inputReviewDigest, inputReviewRounds } from '../harness/input-host.ts';
+import { routeRules } from './input-route.ts';
 
 /** Локальные записи прохода (`local_workflow`): ключ — ID запроса; `@driver` — признак живого сервера. */
 export const RESUME = 'input-resume';
@@ -153,6 +154,32 @@ export function resumeRecord(h: DevContour, requestId: string) {
 }
 
 /**
+ * Запись прохода по текущему ответу запроса. Ревью, отклонённые маршрутом
+ * contract-change (F83), по прежнему основанию не тратят предел ревью после
+ * смены основания: изменение контракта перепривязало задачу, и ревью того
+ * же ответа на новой редакции — новое основание, а не повтор.
+ */
+export function resumeRecordFor(
+  h: DevContour,
+  request: InputRequest,
+  task: Task,
+): ResumeRecord | undefined {
+  const answer = latestAnswer(request);
+  const saved = resumeRecord(h, request.id);
+  if (!answer || saved?.answerDigest !== answer.digest) return undefined;
+  if (saved.phase !== 'rejected') return saved;
+  const last = executionOf(h).engine.read((v) => inputReviewRounds(v, request.id).at(-1));
+  if (
+    !last ||
+    last.approved ||
+    !routeRules(last, request) ||
+    last.digest === inputReviewDigest(h, task, request.id, answer.digest)
+  )
+    return saved;
+  return { ...saved, reviews: 0 };
+}
+
+/**
  * Одобренный раунд ревью, который уже покрывает текущий ответ и
  * утверждение задачи: устаревшее применение (`stale` не по контексту) не
  * требует нового ревью — тот же снимок, новая цель. `undefined` — нужно ревью.
@@ -217,8 +244,7 @@ export function resumeOf(
   // Пауза держит любой шаг прохода — и ревью, и применение — раньше записей.
   const held = resumeHeld(h);
   if (held) return view('paused', { detail: held });
-  const saved = resumeRecord(h, request.id);
-  const record = saved?.answerDigest === answer.digest ? saved : undefined;
+  const record = resumeRecordFor(h, request, task);
   const review = needsReview(h, request, state, task);
   if (review) {
     // Идущее ревью — пока не истёк его срок; запись прерванного процесса —
