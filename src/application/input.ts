@@ -55,6 +55,7 @@ import { taskOwner } from '../core/sync-state.ts';
 import { resumeOf, type ResumeView } from './input-resume.ts';
 import {
   orderContentDigest,
+  reboundAt,
   reboundByOperation,
   reboundOf,
   waitingOperation,
@@ -123,6 +124,8 @@ const contractRoute = (request: InputRequest) =>
     : '';
 
 /** Причина замены, которой применение переносит ответ после перепривязки контракта (F39). */
+const ROUTE_CARRY_REASON =
+  'Постановку задачи правили в операции contract-change маршрута ответа (F85): тот же ответ одобрен ревью на новой постановке и переносится в неё';
 const REBOUND_REASON =
   'Постановка задачи изменилась только перепривязкой контракта к новой редакции (contract-change): проверенный ответ переносится в новую редакцию';
 
@@ -750,6 +753,46 @@ export class InputService {
   }
 
   /**
+   * Перенос ответа маршрута contract-change в правленую постановку (F85):
+   * ревью плана операции потребовало правки постановки задачи вопроса, и
+   * исходная остановка уже не держится (`moved`), хотя ответ — тот же
+   * ответ, которому маршрут назвал только поправку контракта. Условия:
+   * блокирующий вопрос с ответом-уточнением; раунд ревью назвал маршрут для
+   * этого последнего ответа (снимок раунда несёт его); операция маршрута
+   * завершена и перепривязала эту задачу после вопроса; после вопроса
+   * другой попытки не было, и задача снова на исходной остановке. Тогда
+   * выход — не решение оператора (замена критического вопроса), а перенос
+   * его же ответа ведущим или проходом сервера: ответ снова проходит ревью
+   * на правленой постановке, и только одобренный раунд по текущей
+   * постановке переносится (`input_apply`: замена той же задачей и перенос
+   * одной записью). Новый ответ маршрут прежнего не наследует. Только чтение.
+   */
+  routeCarry(view: ExecutionView, request: InputRequest) {
+    if (request.kind !== 'question' || !request.blocking || request.lifecycle !== 'answered')
+      return false;
+    const answer = latestAnswer(request);
+    if (answer?.kind !== 'clarification') return false;
+    const work = view.work(request.workId);
+    if (!work || view.attempts(work.id).at(-1)?.id !== request.runId) return false;
+    const atOrigin =
+      (work.status === 'failed' && work.failureKind === 'needs-input') || work.status === 'ready';
+    if (!atOrigin) return false;
+    if (this.originOf(view, request) !== 'moved') return false;
+    const contracts = executionOf(this.h).store.stateOf(view).contracts;
+    return inputReviewRounds(view, request.id).some((round) => {
+      const ids = routeRules(round, request);
+      if (!ids || !round.contextDigest || !this.carries(request, round.contextDigest).ok)
+        return false;
+      const op = this.routeOperation(round, ids, contracts);
+      return (
+        op?.status === 'completed' &&
+        !!op.rebound?.includes(request.workId) &&
+        reboundAt(op) >= request.createdAt
+      );
+    });
+  }
+
+  /**
    * Ревью ответа снова нужно потому, что маршрут contract-change сменил
    * основание (F83): последний раунд назвал проверенный маршрут для этого
    * ответа, а задача с тех пор перепривязана к новой редакции и утверждена
@@ -761,7 +804,7 @@ export class InputService {
     const last = inputReviewRounds(view, request.id).at(-1);
     if (!answer || !last || last.approved) return false;
     if (last.digest === inputReviewDigest(this.h, task, request.id, answer.digest)) return false;
-    if (this.originOf(view, request) !== 'rebound') return false;
+    if (this.originOf(view, request) !== 'rebound') return this.routeCarry(view, request);
     const contracts = executionOf(this.h).store.stateOf(view).contracts;
     return !!this.routeOf(request, task, last, false, contracts);
   }
@@ -817,7 +860,8 @@ export class InputService {
       request.kind === 'question' &&
       request.blocking &&
       request.lifecycle === 'answered' &&
-      this.originOf(view, request) === 'moved'
+      this.originOf(view, request) === 'moved' &&
+      !this.routeCarry(view, request)
     );
   }
 
@@ -830,7 +874,10 @@ export class InputService {
     const proposed = this.engine.proposeTarget(request.id, contextDigest);
     const origin = this.originOf(view, request);
     const answer = latestAnswer(request);
-    const rebound = origin === 'rebound' && answer?.kind === 'clarification';
+    // Перенос ответа маршрута в правленую постановку (F85) — как перепривязка.
+    const rebound =
+      (origin === 'rebound' && answer?.kind === 'clarification') ||
+      (origin === 'moved' && this.routeCarry(view, request));
     const waiting = origin === 'pending' ? this.waitingProblem(request.workId) : undefined;
     return {
       ...proposed,
@@ -2120,11 +2167,17 @@ export class InputService {
         // и раунд его ревью те же, цель — та, что назвал input_target.
         const current = engine.inputRequest(request.id);
         const answer = latestAnswer(current);
-        if (
-          current.lifecycle === 'answered' &&
-          answer?.kind === 'clarification' &&
-          engine.read((view) => this.originOf(view, current)) === 'rebound'
-        ) {
+        const carriedBy =
+          current.lifecycle === 'answered' && answer?.kind === 'clarification'
+            ? engine.read((view) =>
+                this.originOf(view, current) === 'rebound'
+                  ? REBOUND_REASON
+                  : this.routeCarry(view, current)
+                    ? ROUTE_CARRY_REASON
+                    : undefined,
+              )
+            : undefined;
+        if (carriedBy && answer) {
           if (answer.digest !== input.answerDigest)
             throw refuse(
               'APPROVAL_STALE',
@@ -2132,7 +2185,7 @@ export class InputService {
             );
           const superseded = engine.supersedeInput(
             request.id,
-            { by: actor, reason: REBOUND_REASON, successor: request.workId },
+            { by: actor, reason: carriedBy, successor: request.workId },
             input.expectedVersion,
           );
           const carried = engine.carryInput(request.id, {
@@ -2278,6 +2331,25 @@ export class InputService {
   cancelInTask(taskId: string, requestId: string, raw: unknown) {
     this.ofTask(taskId, requestId);
     return this.cancel({ ...(raw as object), requestId }, 'operator');
+  }
+
+  /**
+   * Замена вопроса оператором той же задачей из центра внимания (F85):
+   * исходная остановка не держится, ответ сохраняется и переносится ведущим.
+   */
+  supersedeInTask(taskId: string, requestId: string, raw: unknown) {
+    this.ofTask(taskId, requestId);
+    const { expectedVersion } = z.strictObject({ expectedVersion: version }).parse(raw);
+    return this.supersede(
+      {
+        requestId,
+        successorTaskId: taskId,
+        reason:
+          'Постановка задачи изменилась после вопроса: оператор заменил вопрос той же задачей, ответ переносится',
+        expectedVersion,
+      },
+      'operator',
+    );
   }
 
   /**

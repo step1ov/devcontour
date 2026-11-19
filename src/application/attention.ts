@@ -608,6 +608,10 @@ const inputSource: AttentionSourceRule = {
             !!proposal &&
             proposalText.length <= ATTENTION_LIMITS.prompt &&
             ctx.redact(proposalText) === proposalText;
+          // Исходная остановка не держится, а вопрос решает оператор (F39,
+          // F85): выход — его замена той же задачей одним действием, затем
+          // ведущий переносит тот же ответ в новую постановку.
+          const supersede = operator && !!r.moved && r.kind !== 'follow-up';
           let findings = '';
           if (rejected)
             engine.read((v) => {
@@ -714,6 +718,16 @@ const inputSource: AttentionSourceRule = {
                       ...(rejected && r.round !== undefined
                         ? { round: r.round, prompt: findings }
                         : {}),
+                    },
+                  ]
+                : []),
+              ...(supersede
+                ? [
+                    {
+                      id: 'supersede',
+                      kind: 'domain' as const,
+                      label: 'Заменить вопрос той же задачей',
+                      input: 'confirm' as const,
                     },
                   ]
                 : []),
@@ -2134,6 +2148,7 @@ const ownCas = new Set([
   'input/answer',
   'input/confirm-proposal',
   'input/apply',
+  'input/supersede',
   'corpus/approve',
   'changeset/deploy-preview',
 ]);
@@ -2311,6 +2326,15 @@ const actionHandlers: Record<string, (a: ActContext) => ActOutcome> = {
         ...(input.confirmRejectedRound !== undefined
           ? { confirmRejectedRound: input.confirmRejectedRound }
           : {}),
+      }),
+    };
+  },
+  // Замена вопроса той же задачей (F85): право и сверка версии — в операции.
+  'input/supersede': ({ ctx, item, root }) => {
+    const b = basisOf<{ taskId: string; requestId: string; expectedVersion: number }>(item);
+    return {
+      result: new InputService(ctx.h!, root).supersedeInTask(b.taskId, b.requestId, {
+        expectedVersion: b.expectedVersion,
       }),
     };
   },

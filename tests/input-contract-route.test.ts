@@ -16,6 +16,7 @@ import { LeadRunner } from '../src/runner/lead-workflow.ts';
 import { LeadWorkflow } from '../src/core/lead-workflow.ts';
 import { executionOf } from '../src/harness/execution.ts';
 import { repositories } from '../src/core/repositories.ts';
+import { specDigest } from '../src/core/task-digest.ts';
 import type { ContractChangeTrace } from '../src/application/input-rebound.ts';
 import type { ContractChange } from '../src/runner/contract-change.ts';
 import {
@@ -673,6 +674,217 @@ test('F83: only a validated route exempts earlier server-pass reviews from the l
       const summary = f.service.list({ taskId }).requests[0];
       assert.equal(summary.state, 'answer-saved', String(valid));
       assert.equal(summary.resume?.phase, valid ? 'pending' : 'failed', String(valid));
+    } finally {
+      await f.cleanup();
+    }
+  }
+});
+
+/** Правка постановки перепривязанной задачи в черновике (её требует ревью плана операции). */
+function respecify(f: InputFixture, taskId: string) {
+  const t = f.store.read().tasks.find((x) => x.id === taskId)!;
+  f.h.editTask(
+    taskId,
+    {
+      title: t.title,
+      description: `${t.description} The amended contract wording is named in the spec.`,
+      role: t.role,
+      acceptance: [...t.acceptance, 'The amended wording is covered.'],
+      contracts: t.contracts,
+    },
+    specDigest(t),
+  );
+}
+
+/** Шаг передачи и применение через input_target/input_apply ведущим. */
+function leadApply(f: InputFixture, requestId: string, contextDigest: string) {
+  const target = f.service.target({ requestId, contextDigest });
+  assert.deepEqual(target.problems, []);
+  return {
+    target,
+    applied: f.service.apply(
+      {
+        requestId,
+        answerDigest: target.answerDigest!,
+        expectedVersion: target.version,
+        contextDigest,
+        targetDigest: target.targetDigest!,
+      },
+      'lead',
+    ),
+  };
+}
+
+test('F85: a spec edit forced by the route operation does not make the critical question the operator’s again — the lead reviews and carries the same answer', async () => {
+  const { f, prompts, pins, boardId, taskId, v1, requestId } = await answered();
+  try {
+    await review(f, requestId);
+    assert.equal(f.service.show({ requestId }).state, 'contract-change-required');
+    const v2 = rebind(f, taskId, v1.id, pins);
+    respecify(f, taskId);
+    f.h.approve(boardId, [taskId]);
+    operation(f, taskId, v2.id, 'completed');
+
+    // До нового ревью: ход ведущего (ревью того же ответа), не оператора.
+    const saved = f.service.show({ requestId });
+    assert.equal(saved.state, 'answer-saved');
+    assert.equal(saved.actor, 'lead');
+    assert.equal((saved as { moved?: true }).moved, undefined);
+    assert.equal(handoffStep(f).code, 'apply-saved');
+
+    const again = await review(f, requestId);
+    assert.equal(again.result.approved, true);
+    assert.ok(prompts[1].includes('The amended contract wording is named in the spec.'));
+    const ready = f.service.show({ requestId });
+    assert.equal(ready.state, 'ready-to-apply');
+    assert.equal(ready.actor, 'lead');
+    const card = (await cardOf(f, requestId))!;
+    assert.equal(card.actor, 'lead');
+    assert.ok(!card.actions.some((a) => a.id === 'supersede'));
+    const step = handoffStep(f);
+    assert.equal(step.action, 'apply-input');
+    assert.equal(step.input?.actor, 'lead');
+
+    const { target, applied } = leadApply(f, requestId, again.context.contextDigest);
+    assert.equal((target as { rebound?: boolean }).rebound, true);
+    assert.equal(applied.applied, true);
+    const after = executionOf(f.h).engine.inputRequest(requestId);
+    assert.equal(after.answers.length, 1, 'оператор не отвечал и не заменял вопрос');
+    assert.equal(after.closed?.by, 'lead');
+    assert.match(after.closed?.reason ?? '', /F85/);
+    assert.ok(
+      ['applied-awaiting-claim', 'delivered'].includes(f.service.show({ requestId }).state),
+    );
+  } finally {
+    await f.cleanup();
+  }
+});
+
+test('F85: with a running server the pass reviews and carries the same answer into the edited spec itself', async () => {
+  const { f, runtimes, prompts, pins, boardId, taskId, v1, requestId } = await answered({
+    paused: false,
+  });
+  try {
+    new LeadWorkflow(f.h).start({ kind: 'board', id: boardId, authorRuntime: 'codex' });
+    const lead = new LeadRunner(f.h, f.root, runtimes);
+    const ticks = async (n: number) => {
+      for (let i = 0; i < n; i++) {
+        await lead.tick();
+        await lead.settled();
+      }
+    };
+    await ticks(3);
+    assert.equal(f.service.show({ requestId }).state, 'contract-change-required');
+    const v2 = rebind(f, taskId, v1.id, pins);
+    respecify(f, taskId);
+    f.h.approve(boardId, [taskId]);
+    operation(f, taskId, v2.id, 'completed');
+    await ticks(3);
+    assert.equal(prompts.length, 2, 'проход проверил тот же ответ на правленой постановке');
+    const applied = f.store
+      .allEvents()
+      .filter((e) => e.type === 'input.applied')
+      .map((e) => (e as unknown as { data: Record<string, unknown> }).data)
+      .filter((d) => d.requestId === requestId);
+    assert.equal(applied.length, 1);
+    assert.equal(applied[0].origin, 'server');
+    assert.equal(executionOf(f.h).engine.inputRequest(requestId).answers.length, 1);
+  } finally {
+    await f.cleanup();
+  }
+});
+
+test('F85: without a completed route operation, with a new answer or with a rejection on the edited spec the question stays the operator’s; the card supersedes it in one click', async () => {
+  const cases = ['no-route', 'running', 'new-answer', 'rejected'] as const;
+  for (const name of cases) {
+    const { f, pins, boardId, taskId, v1, requestId } = await answered({
+      ...(name === 'no-route'
+        ? { decide: () => () => ({ approve: true, findings: [] }) }
+        : name === 'rejected'
+          ? {
+              decide: (p: Pins) => (prompt: string) =>
+                prompt.includes('The amended contract wording')
+                  ? {
+                      approve: false,
+                      findings: [
+                        { severity: 'blocking' as const, message: 'Edited spec conflicts' },
+                      ],
+                    }
+                  : routeWhileBound(p)(prompt),
+            }
+          : {}),
+    });
+    try {
+      if (name !== 'no-route') await review(f, requestId);
+      const v2 = rebind(f, taskId, v1.id, pins);
+      respecify(f, taskId);
+      f.h.approve(boardId, [taskId]);
+      operation(f, taskId, v2.id, name === 'running' ? 'running' : 'completed');
+      if (name === 'new-answer') {
+        const current = f.service.show({ requestId });
+        f.service.answer(
+          {
+            requestId,
+            text: 'A different choice after all.',
+            optionId: 'json',
+            expectedVersion: current.version,
+          },
+          'operator',
+        );
+      }
+      const again = await review(f, requestId);
+      const shown = f.service.show({ requestId });
+      assert.equal(shown.actor, 'operator', name);
+      if (name === 'rejected') {
+        assert.equal(again.result.approved, false, name);
+        assert.equal(shown.state, 'review-rejected', name);
+        continue;
+      }
+      assert.equal((shown as { moved?: true }).moved, true, name);
+      assert.ok(
+        f.service
+          .target({ requestId, contextDigest: again.context.contextDigest })
+          .problems.some((p) => p.startsWith('работа уже не в исходной остановке')),
+        name,
+      );
+      assert.throws(
+        () =>
+          f.service.supersede(
+            {
+              requestId,
+              successorTaskId: taskId,
+              reason: 'lead tries',
+              expectedVersion: shown.version,
+            },
+            'lead',
+          ),
+        /заменяет оператор/,
+        name,
+      );
+      const step = handoffStep(f);
+      assert.equal(step.action, 'operator', name);
+      assert.equal(step.code, 'apply-moved', name);
+      const attention = new AttentionService(f.store, f.h, { root: f.root });
+      const card = (await attention.active()).items.find(
+        (i) => i.sourceKey === `input:${requestId}`,
+      )!;
+      assert.equal(card.actor, 'operator', name);
+      assert.ok(
+        card.actions.some((a) => a.id === 'supersede'),
+        name,
+      );
+      await attention.act({
+        sourceKey: card.sourceKey,
+        occurrenceId: card.occurrenceId,
+        expectedVersion: card.sourceVersion,
+        action: 'supersede',
+      });
+      const after = executionOf(f.h).engine.inputRequest(requestId);
+      assert.equal(after.lifecycle, 'superseded', name);
+      assert.equal(after.closed?.by, 'operator', name);
+      assert.equal(after.closed?.carry, true, name);
+      // Дальше перенос ведёт ведущий: шаг — его.
+      assert.equal(f.service.show({ requestId }).actor, 'lead', name);
     } finally {
       await f.cleanup();
     }
