@@ -204,7 +204,16 @@ test('Route fixtures: exhausted budget, failing gate, startupError and long titl
     home.startupError = 'Нет конфигурации: config.json не найден';
     home.sections.development.boards.top = [
       { id: 'B-long', title: long, phase: 'failed', href: '/?tab=kanban&board=B-long' },
+      {
+        id: 'B-parked',
+        title: 'Отложенная доска',
+        phase: 'draft',
+        href: '/?tab=kanban&board=B-parked',
+        parked: { reason: 'Ждём решения по API', until: '2026-12-01T09:30:00.000Z', by: 'lead' },
+      },
     ];
+    home.sections.development.boards.parked = 1;
+    home.sections.development.jobs.closed = 1;
     harness.budget = {
       state: 'exceeded',
       scope: 'workspace',
@@ -279,6 +288,13 @@ test('Route fixtures: exhausted budget, failing gate, startupError and long titl
   );
   await expect(harness).toContainText('Задержки цикла сервера за час: 4');
   await expect(page.getByRole('link', { name: long })).toBeVisible();
+  // Отложенная доска (F90): причина и срок вместо фазы «черновик».
+  const boards = page.getByRole('list', { name: 'Живые доски' });
+  const parked = boards.getByRole('listitem').filter({ hasText: 'Отложенная доска' });
+  await expect(parked).toContainText(/отложена до 1 дек\.?,? \d\d:\d\d: Ждём решения по API/);
+  const dev = page.getByRole('region', { name: 'Разработка', exact: true });
+  await expect(dev).toContainText('досок отложено 1');
+  await expect(dev).toContainText('заданий закрыто 1');
   await axeClean(page);
   await page.setViewportSize({ width: 390, height: 844 });
   expect(await noHorizontalScroll(page)).toBe(true);

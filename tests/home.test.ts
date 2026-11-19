@@ -19,6 +19,8 @@ import { DevContour } from '../src/core/service.ts';
 import { loadConfig } from '../src/runner/config.ts';
 import { Preparation } from '../src/core/preparation.ts';
 import { LeadWorkflow } from '../src/core/lead-workflow.ts';
+import { LeadRunner } from '../src/runner/lead-workflow.ts';
+import { closeDeadJob, setPark } from '../src/core/board-hold.ts';
 import {
   attentionSections,
   attentionSources,
@@ -346,6 +348,7 @@ test('Home: before setup — bootstrap and preparation only, without an engine',
       running: 0,
       waiting: 0,
       failed: 0,
+      closed: 0,
       top: [],
     });
 
@@ -687,6 +690,87 @@ test('Home: a failed job of an accepted board is settled; a truncated attention 
     assert.equal(home.attention.truncated, 201);
   } finally {
     list.mock.restore();
+    f.cleanup();
+  }
+});
+
+test('F90: a closed dead job is not a failed job on the home; a parked board says why and until when, and its drafts are not waiting', async () => {
+  const f = fixture();
+  try {
+    // Мёртвая доска: выданная задача упала и отменена, вторая отменена, её
+    // задание упало своим циклом (D46).
+    const dead = f.h.createBoard('Мёртвая доска', '', 'main');
+    const stopped = f.h.addTask(dead.id, input('Падает на проверке'));
+    const dropped = f.h.addTask(dead.id, input('Снята'));
+    f.h.approve(dead.id);
+    const flow = new LeadWorkflow(f.h);
+    const job = flow.start({ kind: 'board', id: dead.id, authorRuntime: 'codex', maxAttempts: 3 });
+    f.h.pause(false);
+    const run = f.h.claim('test')!;
+    f.h.fail(run.id, run.token, 'gate failed', false, 'gate');
+    f.h.cancel(stopped.id, 'Replanned on another board', 'host');
+    f.h.cancel(dropped.id, 'Replanned on another board', 'host');
+    const runner = new LeadRunner(f.h, f.root);
+    for (let i = 0; i < 4; i++) await runner.tick();
+    await runner.stop();
+    assert.equal(flow.get(job.key, job.owner).status, 'failed');
+    // Доска с черновиком, которую потом отложат, и обычная доска с черновиком.
+    const later = f.h.createBoard('Отложенная доска', '', 'main');
+    f.h.addTask(later.id, input('Черновик отложенной'));
+    const plain = f.h.createBoard('Обычная доска', '', 'main');
+    f.h.addTask(plain.id, input('Черновик обычной'));
+    const attention: AttentionView = {
+      revision: 1,
+      generatedAt: '2026-11-19T00:00:00.000Z',
+      engineConnected: true,
+      lead: { present: false, lastActivityAt: null },
+      counts: {
+        active: 0,
+        unread: 0,
+        byActor: { operator: { active: 0, unread: 0 }, lead: { active: 0, unread: 0 } },
+        bySection: zeroSections(),
+      },
+      items: [],
+    };
+    const dev = () =>
+      homeView({ state: f.store.view(), h: f.h, attention, revision: 1, now: Date.now() }).sections
+        .development;
+
+    let d = dev();
+    assert.deepEqual([d.jobs.failed, d.jobs.closed], [1, 0]);
+    assert.deepEqual(
+      d.jobs.top.map((j) => [j.id, j.status]),
+      [[dead.id, 'failed']],
+    );
+    assert.equal(d.queue.drafts, 2);
+    assert.equal(d.boards.parked, 0);
+
+    // workflow_close: остановка — не шаг host.next, и главная её не считает.
+    closeDeadJob(f.h, dead.id, 'Work was replanned on another board', 'lead');
+    d = dev();
+    assert.deepEqual([d.jobs.failed, d.jobs.closed], [0, 1]);
+    assert.deepEqual(d.jobs.top, []);
+    assert.doesNotMatch(d.blocker ?? '', /остановлены/);
+    assert.notEqual(d.state, 'blocked');
+
+    // board_park: доска помечена причиной и сроком, идёт после остальных, её
+    // черновик не в счёте черновиков, ждущих решения.
+    const until = new Date(Date.now() + 86_400_000).toISOString();
+    setPark(f.h, later.id, { parked: true, reason: 'Ждём решения по API', until }, 'lead');
+    d = dev();
+    assert.equal(d.boards.parked, 1);
+    assert.equal(d.queue.drafts, 1);
+    const shown = d.boards.top.find((b) => b.id === later.id)!;
+    assert.deepEqual(shown.parked, { reason: 'Ждём решения по API', until, by: 'lead' });
+    assert.equal(shown.phase, 'draft');
+    assert.equal(d.boards.top.find((b) => b.id === plain.id)?.parked, undefined);
+    assert.equal(d.boards.top.at(-1)?.id, later.id, 'отложенная — после остальных');
+    // Утверждение снимает действие отметки — доска снова обычная.
+    f.h.approve(later.id);
+    d = dev();
+    assert.equal(d.boards.parked, 0);
+    assert.equal(d.boards.top.find((b) => b.id === later.id)?.parked, undefined);
+  } finally {
     f.cleanup();
   }
 });

@@ -468,6 +468,21 @@ function PreparationTile({
   );
 }
 
+/** Отложенная доска (`board_park`): «отложена до …: причина» вместо фазы. */
+const parkedLabel = (park: { reason: string; until?: string }) =>
+  'отложена' +
+  (park.until
+    ? ' до ' +
+      new Date(park.until).toLocaleString('ru-RU', {
+        day: 'numeric',
+        month: 'short',
+        hour: '2-digit',
+        minute: '2-digit',
+      })
+    : '') +
+  ': ' +
+  park.reason;
+
 function DevelopmentTile({
   dev,
   engine,
@@ -501,6 +516,8 @@ function DevelopmentTile({
   const more = [
     q.blocked ? `ждут зависимостей ${q.blocked}` : '',
     q.drafts ? `черновиков ${q.drafts}` : '',
+    dev.boards.parked ? `досок отложено ${dev.boards.parked}` : '',
+    dev.jobs.closed ? `заданий закрыто ${dev.jobs.closed}` : '',
     q.quiet ? `без движения ${q.quiet}` : '',
     dev.boards.closed ? `досок закрыто ${dev.boards.closed}` : '',
   ].filter(Boolean);
@@ -552,7 +569,9 @@ function DevelopmentTile({
                   <PanelLink href={b.href} className="min-w-0 truncate">
                     {b.title}
                   </PanelLink>
-                  <span className="text-muted-foreground text-xs">{boardPhaseLabels[b.phase]}</span>
+                  <span className="text-muted-foreground text-xs">
+                    {b.parked ? parkedLabel(b.parked) : boardPhaseLabels[b.phase]}
+                  </span>
                 </li>
               ))}
             </ul>

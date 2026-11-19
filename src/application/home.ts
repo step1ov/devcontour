@@ -3,6 +3,7 @@ import type { DevContour } from '../core/service.ts';
 import type { ProductChange } from '../core/preparation-model.ts';
 import { Preparation } from '../core/preparation.ts';
 import { LeadWorkflow, type WorkflowJob } from '../core/lead-workflow.ts';
+import { closureOf, parkedBoards, parkedHold, type BoardPark } from '../core/board-hold.ts';
 import { boardPhase, heldBaseOf, type BoardPhase } from '../core/work-status.ts';
 import { readyTasks } from '../core/graph.ts';
 import { repositories } from '../core/repositories.ts';
@@ -132,12 +133,30 @@ export interface DevelopmentSection {
     closed: number;
     accepted: number;
     byPhase: Partial<Record<BoardPhase, number>>;
-    top: { id: string; title: string; phase: BoardPhase; href: string }[];
+    /**
+     * Отложенные доски (`board_park`, F90): в счёте живых, но их черновик —
+     * не работа, которая ждёт решения; в списке — после остальных.
+     */
+    parked: number;
+    top: {
+      id: string;
+      title: string;
+      phase: BoardPhase;
+      href: string;
+      /** Доска отложена: причина и срок отметки, как в `host.parked`. */
+      parked?: { reason: string; until?: string; by: BoardPark['by'] };
+    }[];
   };
   jobs: {
     running: number;
     waiting: number;
+    /** Упавшие задания, которые держат работу: без закрытых и отложенных. */
     failed: number;
+    /**
+     * Упавшие задания, остановка которых уже не шаг (F90): закрыто
+     * (`workflow_close`) или доска отложена — как в `host.next`.
+     */
+    closed: number;
     top: {
       kind: WorkflowJob['kind'];
       id: string;
@@ -739,6 +758,7 @@ function development(
   owner: OwnerQuestions,
 ): DevelopmentSection {
   const { state, h, attention } = ctx;
+  const redact = ctx.redact ?? maskUrlCredentials;
   const byId = new Map(state.tasks.map((t) => [t.id, t]));
   const phases = state.boards.map((b) => {
     const own = [...new Set(b.revisions.flatMap((r) => r.taskIds))].flatMap((id) => {
@@ -749,11 +769,25 @@ function development(
   });
   const byPhase: Partial<Record<BoardPhase, number>> = {};
   for (const { phase } of phases) byPhase[phase] = (byPhase[phase] ?? 0) + 1;
+  // Действующие отметки «отложена» (F90) — те же, что прячут шаги доски в
+  // `host.next` и карточки центра внимания (`parkedHold`).
+  const parked = new Map(
+    h
+      ? parkedBoards(h, ctx.now)
+          .filter((p) => parkedHold(h, state, p.boardId))
+          .map((p) => [p.boardId, p] as const)
+      : [],
+  );
   const live = phases
     .filter((p) => LIVE_PHASES.includes(p.phase))
     .map((p, i) => ({ ...p, i }))
-    // Идущие и упавшие — первыми, затем новые.
-    .sort((a, b) => LIVE_PHASES.indexOf(a.phase) - LIVE_PHASES.indexOf(b.phase) || b.i - a.i);
+    // Идущие и упавшие — первыми, затем новые; отложенные — в конце.
+    .sort(
+      (a, b) =>
+        Number(parked.has(a.board.id)) - Number(parked.has(b.board.id)) ||
+        LIVE_PHASES.indexOf(a.phase) - LIVE_PHASES.indexOf(b.phase) ||
+        b.i - a.i,
+    );
   const boardTitle = new Map(state.boards.map((b) => [b.id, b.title]));
   const changeSetTitle = new Map(state.changeSets.map((c) => [c.id, c.title]));
 
@@ -778,7 +812,15 @@ function development(
     j.kind === 'board'
       ? state.boards.find((b) => b.id === j.id)?.revisions.at(-1)?.status === 'accepted'
       : Boolean(state.changeSets.find((c) => c.id === j.id)?.acceptance);
-  const current = [...latest.values()].filter((j) => j.status !== 'failed' || !accepted(j));
+  // Упавшее задание, остановка которого уже не шаг `host.next` (F90):
+  // закрытое `workflow_close` или задание отложенной доски.
+  const settled = (j: WorkflowJob) =>
+    j.kind === 'board' && (parked.has(j.id) || Boolean(h && closureOf(h, state, j.id, j)));
+  const failedLatest = [...latest.values()].filter((j) => j.status === 'failed' && !accepted(j));
+  const closedJobs = failedLatest.filter(settled);
+  const current = [...latest.values()].filter(
+    (j) => j.status !== 'failed' || (!accepted(j) && !closedJobs.includes(j)),
+  );
   const rank = (s: WorkflowJob['status']) =>
     s === 'running' ? 0 : s === 'queued' ? 1 : s === 'failed' ? 2 : 3;
   const shownJobs = current
@@ -811,6 +853,9 @@ function development(
     .filter((i) => i.impact.waiting > 0)
     .sort((a, b) => b.impact.waiting - a.impact.waiting)[0];
   const open = state.tasks.filter((t) => t.status === 'ready' && !t.activeRunId).length;
+  const parkedTasks = new Set(
+    state.boards.filter((b) => parked.has(b.id)).flatMap((b) => b.revisions.at(-1)?.taskIds ?? []),
+  );
   const failedTasks = state.tasks.filter((t) => t.status === 'failed').length;
   const failedJobs = current.filter((j) => j.status === 'failed');
   const verifying = state.changeSets.some((c) =>
@@ -852,17 +897,31 @@ function development(
       closed: (byPhase.closed ?? 0) + (byPhase.empty ?? 0),
       accepted: byPhase.accepted ?? 0,
       byPhase,
-      top: live.slice(0, HOME_LIMITS.boards).map(({ board, phase }) => ({
-        id: board.id,
-        title: clip(board.title),
-        phase,
-        href: hrefs.board(board.id),
-      })),
+      parked: live.filter((p) => parked.has(p.board.id)).length,
+      top: live.slice(0, HOME_LIMITS.boards).map(({ board, phase }) => {
+        const park = parked.get(board.id);
+        return {
+          id: board.id,
+          title: clip(board.title),
+          phase,
+          href: hrefs.board(board.id),
+          ...(park
+            ? {
+                parked: {
+                  reason: clip(redact(park.reason)),
+                  ...(park.until ? { until: park.until } : {}),
+                  by: park.by,
+                },
+              }
+            : {}),
+        };
+      }),
     },
     jobs: {
       running: current.filter((j) => j.status === 'running').length,
       waiting: current.filter((j) => j.status === 'queued').length,
       failed: current.filter((j) => j.status === 'failed').length,
+      closed: closedJobs.length,
       top: shownJobs.map((j) => ({
         kind: j.kind,
         id: j.id,
@@ -879,7 +938,8 @@ function development(
       ready,
       blocked: Math.max(0, open - ready),
       waitingInput: holds.size,
-      drafts: state.tasks.filter((t) => t.status === 'draft').length,
+      // Черновик отложенной доски ждёт снятия отметки, а не решения (F90).
+      drafts: state.tasks.filter((t) => t.status === 'draft' && !parkedTasks.has(t.id)).length,
       quiet: quietAttempts(state, ctx.now).length,
     },
     runningNow: active.slice(0, HOME_LIMITS.runningNow).map((r) => {
