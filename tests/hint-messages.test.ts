@@ -210,6 +210,22 @@ const samples: { [C in HintCode]: (HintSubject & Extract<HintOf, { code: C }>)[]
       job,
       loop: { step: 'stop' as const, taskId: 't-1', reason: 'cancelled' },
     })),
+    // Мёртвая доска, остановки — решения ведущего: закрытие задания (F86).
+    {
+      code: 'job-cancelled-task' as const,
+      params: {
+        taskId: 't-1',
+        by: 'host' as const,
+        budget: false,
+        live: false,
+        allCancelled: true as const,
+        closable: true as const,
+        error: 'boom',
+      },
+      boardId: 'board-1',
+      job,
+      loop: { step: 'stop' as const, taskId: 't-1', reason: 'cancelled' },
+    },
   ],
   'job-retry': [
     {
@@ -235,6 +251,12 @@ const samples: { [C in HintCode]: (HintSubject & Extract<HintOf, { code: C }>)[]
       job: { ...job, repositoryId: undefined },
     },
     { code: 'job-exhausted', params: { error: 'boom' }, boardId: 'board-1', job },
+    {
+      code: 'job-exhausted',
+      params: { error: 'boom', closable: true },
+      boardId: 'board-1',
+      job,
+    },
   ],
   'job-settled': [
     { code: 'job-settled', params: {}, boardId: 'board-1', job: { ...job, status: 'stale' } },
@@ -641,8 +663,11 @@ test('Подсказки шага: новая конфигурация setup п�
  * роли оставляет находку неразобранной (для ждущей решения владельца).
  * Намеренное изменение (F83): новый код `contract-change-required` — ответ
  * принят как выбор, которому нужна поправка закреплённого контракта.
+ * Намеренное изменение (F86): добавлены образцы `job-cancelled-task` и
+ * `job-exhausted` с `closable` (закрытие задания мёртвой доски,
+ * workflow_close); прежние образцы байтово прежние.
  */
-const ENGLISH_SAMPLES_SHA256 = 'c43568e4645c6a989f627927dc0ed9f10391739a49dcf4771e5c518365a0eb36';
+const ENGLISH_SAMPLES_SHA256 = '07b0316295ed44ebb5aac1991e60275585126a3a6c4836eac2d39580c7b78fcb';
 
 test('Подсказки шага: английские тексты образцов закреплены', () => {
   assert.equal(

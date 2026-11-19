@@ -238,5 +238,10 @@
 // называют маршрут contract-change (правило находки contract-change:<id>,
 // route и contracts результата ревью, код шага contract-change-required);
 // прочие операции байтово прежние.
-export const CATALOG_DIGEST = 'fa57ff359613382950745d5d90f440d6bc425b7a0c8fe0847c3c41e1e7ef7695';
+// Намеренное изменение (F86): новые пишущие операции workflow_close (закрыть
+// упавшее задание мёртвой доски) после workflow_retry и board_park (отложить
+// доску или снять отметку) после board_create; описание session_handoff
+// называет params.closable, отложенные доски без шага и host.parked;
+// прочие операции байтово прежние.
+export const CATALOG_DIGEST = 'a148a0f36e252d85b48e3d1a1b5c6428fbcc18fbc3af641cc06dffefe16795cf';
 export const SNAPSHOT_VERSION = '0.4.0-alpha.7';

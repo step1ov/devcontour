@@ -16,6 +16,7 @@ import { boardOwner } from './sync-state.ts';
 import { Workspace } from './workspace.ts';
 import { repositories } from './repositories.ts';
 import { technicalReviewer } from '../harness/policy.ts';
+import { assertNotParked } from './board-hold.ts';
 
 /** Текст очереди harness для задания, исчерпавшего попытки стадии. */
 const STAGE_ATTEMPTS_EXHAUSTED = 'Исчерпаны попытки стадии';
@@ -506,6 +507,8 @@ export class LeadWorkflow {
   }
   start(raw: unknown) {
     const input = workflowInput.parse(raw);
+    // Отложенная доска (F86) заданий не ведёт: старт ждёт снятия отметки.
+    if (input.kind === 'board') assertNotParked(this.h, input.id, 'workflow_start');
     return domain(() => this.queue().start(input)) as WorkflowJob;
   }
   /**

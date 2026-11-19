@@ -63,6 +63,7 @@ import {
   type CorrectionEffect,
 } from '../runner/contract-change.ts';
 import { resolveIdPrefix } from '../core/id-prefix.ts';
+import { closureOf, parkedBoards, parkedHold, userStoppers } from '../core/board-hold.ts';
 import type { DevContourExecutionStore } from '../harness/store.ts';
 
 export const handoffFormats = ['json', 'md'] as const;
@@ -260,6 +261,11 @@ export interface DevContourHandoff {
      * контракта (F69): до пяти, старые операции первыми; `more` — сколько
      * ещё. Каждая закрывается `command` после проверки принятого результата.
      */
+    /**
+     * Отложенные доски (F86, `board_park`): до десяти, с причиной и сроком.
+     * Их план и задание не шаг ведущего, пока отметка действует.
+     */
+    parked?: { boardId: string; reason: string; until?: string; by: string; at: string }[];
     corrections?: {
       items: {
         operation: string;
@@ -302,6 +308,26 @@ function correctionsOfHandoff(
   if (!all.length) return undefined;
   const items = all.slice(0, HANDOFF_CORRECTIONS);
   return { items, ...(all.length > items.length ? { more: all.length - items.length } : {}) };
+}
+
+/** Предел записей `host.parked`. */
+const HANDOFF_PARKED = 10;
+
+/** Отложенные доски (`host.parked`); с `boardId` — только она. */
+function parkedOf(
+  h: DevContour,
+  state: State,
+  boardId: string | undefined,
+  redact: (text: string) => string,
+): DevContourHandoff['host']['parked'] {
+  const found = parkedBoards(h)
+    .filter(
+      (p) => (boardId === undefined || p.boardId === boardId) && parkedHold(h, state, p.boardId),
+    )
+    .sort((a, b) => a.at.localeCompare(b.at))
+    .slice(0, HANDOFF_PARKED)
+    .map((p) => ({ ...p, reason: redact(p.reason) }));
+  return found.length ? found : undefined;
 }
 
 /** Предел записей `host.verifications`. */
@@ -869,6 +895,8 @@ const REASON_CHARS = 300;
 export function planStep(boardId: string, ctx: HostContext): HandoffHostNext | undefined {
   const found = boardTasks(ctx.state, boardId);
   if (!found || planApproved(ctx.h, found.revision, found.tasks)) return undefined;
+  // Отложенная доска (F86): решение о её плане ждёт снятия отметки.
+  if (parkedHold(ctx.h, ctx.state, boardId)) return undefined;
   const why = unapprovedTasks(ctx.h, ctx.state, found.tasks);
   const stopper = revisionStopper(ctx.state, boardId);
   // Утверждение (и ревью плана до модели) отвергнет черновик без предусловий,
@@ -996,6 +1024,11 @@ function boardDraft(boardId: string, ctx: HostContext): HostNextDraft | undefine
       params: { stage },
     };
   }
+  // Отложенная доска (F86): ни решения о плане, ни старта или повтора её
+  // задания — до снятия отметки или её срока. Действующее задание выше
+  // отметку обходит: отложить доску с ним нельзя, и шаги идущей работы
+  // остаются.
+  if (parkedHold(h, state, boardId)) return undefined;
   const job = jobs.find((j) => ctx.current(j));
   const error = job?.error ? { error: job.error } : {};
   // Доска без неотменённых задач (см. выше): шаг — только остановка D46
@@ -1004,16 +1037,19 @@ function boardDraft(boardId: string, ctx: HostContext): HostNextDraft | undefine
   // исчерпаны. Без такой остановки шага нет.
   if (closed) {
     if (job?.status !== 'failed') return undefined;
+    // Задание мёртвой доски закрыто (`workflow_close`, F86): остановки нет.
+    if (closureOf(h, boardId, job.key)) return undefined;
     const { outlook: loop } = loopAhead(h, state, { ...asLead(job), status: 'queued' });
     const cancelled = cancelledStop(boardId, ctx, job, loop, error);
     if (!cancelled || job.attempts < job.maxAttempts) return cancelled;
+    const closable = (cancelled.params as { closable?: true }).closable;
     return {
       action: 'decide',
       decision: 'job',
       boardId,
       job: jobRef(job),
       code: 'job-exhausted',
-      params: error,
+      params: { ...error, ...(closable ? { closable } : {}) },
     };
   }
   const refused = ctx.inputError(boardId);
@@ -1170,6 +1206,12 @@ function cancelledStop(
       budget: stoppedOnBudget(task, ctx.state.runs),
       live,
       ...(allCancelled ? { allCancelled: true as const } : {}),
+      // Мёртвая доска, остановки которой — решения ведущего: он может
+      // закрыть упавшее задание (`workflow_close`, F86). У действующего
+      // задания закрывать ещё нечего.
+      ...(allCancelled && !live && !userStoppers(ctx.state, revision.taskIds).length
+        ? { closable: true as const }
+        : {}),
       ...error,
     },
   };
@@ -1907,11 +1949,13 @@ export function devcontourHandoffWithin(
       // усечения текста (`boardsWaitingOf`), иначе усечённый секрет ей не узнать.
       let changesets = changesetsOf(h, state, boardId, options.redact);
       const corrections = correctionsOfHandoff(h, state, boardId);
+      const parked = parkedOf(h, state, boardId, options.redact);
       const withDiscussion = (discussion: DevContourHandoff['host']['discussion']) => ({
         ...(next ? { next } : {}),
         liveBoards,
         ...(verifications ? { verifications } : {}),
         ...(changesets ? { changesets } : {}),
+        ...(parked ? { parked } : {}),
         ...(corrections ? { corrections } : {}),
         ...(discussion ? { discussion } : {}),
       });
@@ -2085,6 +2129,10 @@ function hostMarkdown(
         `- ChangeSet ${c.changeSetId} ждёт приёмки досок (задание ${c.job.key} — ${c.job.status}, стадия ${c.job.stage}): ${c.waiting.boards
           .map((b) => `${b.boardId} — ${blockerText(b.blocker)}`)
           .join('; ')}${c.waiting.more ? ` и ещё ${c.waiting.more}` : ''}`,
+    ),
+    ...(host.parked ?? []).map(
+      (p) =>
+        `- Доска ${p.boardId} отложена${p.until ? ` до ${p.until}` : ''}: ${p.reason} — снять отметку: \`board_park {"boardId": "${p.boardId}", "parked": false}\``,
     ),
     ...(host.corrections
       ? [

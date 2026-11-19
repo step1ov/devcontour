@@ -66,10 +66,16 @@ export interface HintParamMap {
      * задачи. Нет поля — в ревизии есть неотменённые задачи.
      */
     allCancelled?: true;
+    /**
+     * Доска мертва (все задачи отменены), и каждую выданную отменённую
+     * задачу отменил ведущий или граф: ведущий может закрыть упавшее
+     * задание (`workflow_close`, F86), если работа уже перепланирована.
+     */
+    closable?: true;
     error?: string;
   };
-  /** Попытки задания исчерпаны. */
-  'job-exhausted': { error?: string };
+  /** Попытки задания исчерпаны; `closable` — как у `job-cancelled-task`. */
+  'job-exhausted': { error?: string; closable?: true };
   /** Задание текущего входа уже stale или completed. */
   'job-settled': None;
   /** Задание не продолжается (применение политики, другой процесс). */
@@ -328,6 +334,9 @@ function planEn(p: HintParamMap['plan-unapproved'], s: HintSubject) {
 }
 
 const failedEn = (error: string | undefined) => (error ? ': ' + error : '');
+/** Закрытие задания мёртвой доски ведущим (`closable`, F86). */
+const closeEn = (board: string) =>
+  ` Every task of this board is cancelled by the lead or the graph: if the work was replanned elsewhere or dropped, close this dead job instead — workflow_close {"boardId": ${JSON.stringify(board)}, "reason": "…"} (devcontour workflow-close --board ${board} --reason … --by host); it accepts nothing and leaves host.next and the attention center.`;
 
 const en: Catalog = {
   // operator-only: шаг только режима `approvalMode: operator` (OPERATOR_ONLY_HINTS).
@@ -376,12 +385,12 @@ const en: Catalog = {
     const second = p.allCancelled
       ? `(2) every task of the revision is cancelled, so the board cannot be accepted: when the user decides so, the lead plans the work on a new board (plan_import without boardId, then workflow_start {"kind": "board"}; plan_import with boardId waits for an accepted revision)`
       : `(2) the operator accepts the revision without task ${task} in the panel (the accept action on the board page) once its other tasks are done; (3) a replacement goes on a new board (plan_import without boardId, then workflow_start {"kind": "board"} for it; move drafts that belong there with task_move): a task added to this revision would run with no job to repair or accept it`;
-    return `The lead workflow job of board ${s.boardId!} ${p.live ? 'stops at its next step' : 'stopped'}${failedEn(p.error)}: task ${task} was ${who}${p.budget ? ' when it hit a budget' : ''}, and an issued task does not leave the job (D46, docs/decisions.md), so workflow_retry and workflow_start do not move it. Recovery paths: ${first}; ${second}. ${owner}`;
+    return `The lead workflow job of board ${s.boardId!} ${p.live ? 'stops at its next step' : 'stopped'}${failedEn(p.error)}: task ${task} was ${who}${p.budget ? ' when it hit a budget' : ''}, and an issued task does not leave the job (D46, docs/decisions.md), so workflow_retry and workflow_start do not move it. Recovery paths: ${first}; ${second}. ${owner}${p.closable ? closeEn(s.boardId!) : ''}`;
   },
   'job-retry': (p, s) =>
     `The lead workflow job of board ${s.boardId!} failed${failedEn(p.error)}. On retry the job loop ${loopEn(s.loop!)}: workflow_retry ${retryArgs(s)}.`,
   'job-exhausted': (p, s) =>
-    `The lead workflow job of board ${s.boardId!} used all ${s.job!.maxAttempts} attempts${failedEn(p.error)}. workflow_start returns this failed job until the board input changes: diagnose, then change the board or its tasks (a new input registers a new job) or ask the user.`,
+    `The lead workflow job of board ${s.boardId!} used all ${s.job!.maxAttempts} attempts${failedEn(p.error)}. workflow_start returns this failed job until the board input changes: diagnose, then change the board or its tasks (a new input registers a new job) or ask the user.${p.closable ? closeEn(s.boardId!) : ''}`,
   'job-settled': (_, s) =>
     `A lead workflow job for exactly the current input of board ${s.boardId!} is already ${s.job!.status}${s.job!.status === 'stale' ? ' (the input changed and then returned to it)' : ''}; workflow_start returns it unchanged and it will not run. Change the board or its tasks to register a new job, or continue by hand (queue_set {"paused": false} or devcontour queue --start --by host, devcontour retry --by host, accept; docs/cli.md), or ask the user.`,
   'job-idle': (_, s) =>
@@ -620,6 +629,9 @@ function planRu(p: HintParamMap['plan-unapproved'], s: HintSubject) {
 }
 
 const failedRu = (error: string | undefined) => (error ? ': ' + error : '');
+/** Закрытие задания мёртвой доски ведущим (`closable`, F86). */
+const closeRu = (board: string) =>
+  ` Все задачи доски отменены ведущим или графом: если работа уже перепланирована или не нужна, закройте мёртвое задание — workflow_close {"boardId": ${JSON.stringify(board)}, "reason": "…"} (devcontour workflow-close --board ${board} --reason … --by host); закрытие ничего не принимает и убирает задание из host.next и центра внимания.`;
 
 const ru: Catalog = {
   // operator-only: шаг только режима `approvalMode: operator` (OPERATOR_ONLY_HINTS).
@@ -666,12 +678,12 @@ const ru: Catalog = {
     const second = p.allCancelled
       ? `(2) все задачи ревизии отменены, принимать нечего: по решению пользователя ведущий планирует работу на новой доске (plan_import без boardId, затем workflow_start {"kind": "board"}; plan_import с boardId ждёт принятой ревизии)`
       : `(2) оператор принимает ревизию без задачи ${task} в панели (страница доски, «Принять доску»), когда остальные задачи готовы; (3) замена — на новой доске (plan_import без boardId, затем для неё workflow_start {"kind": "board"}; черновики, которым место там, переносит task_move): задача, добавленная в эту ревизию, пошла бы без задания, которое её чинит и принимает`;
-    return `Задание ведущего доски ${s.boardId!} ${p.live ? 'остановится на следующем такте' : 'остановлено'}${failedRu(p.error)}: задача ${task} ${who}${p.budget ? ', когда упёрлась в бюджет' : ''}, а выданная задача из работы задания не выпадает (D46, docs/decisions.md), поэтому workflow_retry и workflow_start его не продвинут. Пути восстановления: ${first}; ${second}. ${owner}`;
+    return `Задание ведущего доски ${s.boardId!} ${p.live ? 'остановится на следующем такте' : 'остановлено'}${failedRu(p.error)}: задача ${task} ${who}${p.budget ? ', когда упёрлась в бюджет' : ''}, а выданная задача из работы задания не выпадает (D46, docs/decisions.md), поэтому workflow_retry и workflow_start его не продвинут. Пути восстановления: ${first}; ${second}. ${owner}${p.closable ? closeRu(s.boardId!) : ''}`;
   },
   'job-retry': (p, s) =>
     `Задание ведущего доски ${s.boardId!} упало${failedRu(p.error)}. После workflow_retry цикл задания ${loopRu(s.loop!)}: workflow_retry ${retryArgs(s)}.`,
   'job-exhausted': (p, s) =>
-    `Задание ведущего доски ${s.boardId!} израсходовало все попытки (${s.job!.maxAttempts})${failedRu(p.error)}. Пока вход доски не изменится, workflow_start возвращает это упавшее задание: разберите причину, затем измените доску или её задачи (новый вход регистрирует новое задание) либо спросите пользователя.`,
+    `Задание ведущего доски ${s.boardId!} израсходовало все попытки (${s.job!.maxAttempts})${failedRu(p.error)}. Пока вход доски не изменится, workflow_start возвращает это упавшее задание: разберите причину, затем измените доску или её задачи (новый вход регистрирует новое задание) либо спросите пользователя.${p.closable ? closeRu(s.boardId!) : ''}`,
   'job-settled': (_, s) =>
     `Задание ведущего для точно такого же текущего входа доски ${s.boardId!} уже в состоянии ${s.job!.status}${s.job!.status === 'stale' ? ' (вход менялся и вернулся к прежнему)' : ''}; workflow_start вернёт его без изменений, и оно не будет исполняться. Измените доску или её задачи, чтобы зарегистрировать новое задание, или продолжайте вручную (queue_set {"paused": false} или devcontour queue --start --by host, devcontour retry --by host, accept; docs/cli.md), или спросите пользователя.`,
   'job-idle': (_, s) =>
