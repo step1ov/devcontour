@@ -377,6 +377,14 @@ test('inputPolicy bounds 1..11; absent leaves the policy and config digest as be
       executionDigest(policyFromConfig(autonomous)),
       executionDigest(policyFromConfig(plain)),
     );
+    // Основание прежней версии: та же политика без inputPolicy (до правила
+    // ответов ведущего) — digest исполнения тот же.
+    const before = { ...policyFromConfig(plain) };
+    delete before.inputPolicy;
+    assert.equal(executionDigest(before), executionDigest(policyFromConfig(plain)));
+    // Утверждаемая часть политики не зависит от режима и правила ответов.
+    write({ approvalMode: 'operator' });
+    assert.equal(approvalPolicyDigest(loadConfig(path)), approvalPolicyDigest(plain));
     assert.equal(approvalPolicyDigest(autonomous), approvalPolicyDigest(plain));
     assert.equal(workspacePolicyDigest(autonomous), workspacePolicyDigest(plain));
   } finally {

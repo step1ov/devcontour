@@ -82,6 +82,13 @@ test('D03-K: the lead answers through discussion_post; the message id is the mes
     const shown = page.messages.find((m) => m.id === first.message.id)!;
     assert.equal(shown.text, 'Use JSON as now.');
     assert.equal(shown.kind, 'answer');
+    // Причина ведущего — из той же версии ответа запроса, в записи её нет.
+    assert.equal((answer as { reason?: string }).reason, 'Fixture: the checks read JSON today.');
+    assert.equal(
+      (shown.input as { reason?: string }).reason,
+      'Fixture: the checks read JSON today.',
+    );
+    assert.equal('reason' in (rawRow(f, taskId, first.message.id).input as object), false);
     // Повтор по ключу — то же сообщение и тот же ответ.
     const again = agent.execute({ operation: 'discussion_post', input: post }) as {
       message: { id: string };

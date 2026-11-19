@@ -1579,6 +1579,24 @@ function inputStep(ctx: HostContext, taskId: string): HandoffHostNext | undefine
             },
           }),
     });
+  // Сохранённый ответ ведущего на вопрос владельца (записан до правила
+  // ответов ведущего): не доводится, вопрос снова отвечает владелец.
+  if (
+    !operator &&
+    summary.actor === 'operator' &&
+    ['answer-saved', 'context-review', 'ready-to-apply', 'stale'].includes(summary.state)
+  )
+    return withDetail(h, {
+      action: 'answer-input',
+      ...base,
+      code: 'answer-operator' as const,
+      params: {
+        floors: summary.floors,
+        version: summary.version,
+        proposed: !!summary.proposal,
+        ...stops,
+      },
+    });
   return withDetail(h, {
     action: 'apply-input',
     ...base,

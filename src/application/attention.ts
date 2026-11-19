@@ -649,8 +649,14 @@ const inputSource: AttentionSourceRule = {
           }
           // Оператор отвечает на ожидающий вопрос и исправляет ответ, который
           // отклонило ревью (как в карточке задачи).
+          // В режиме agent сохранённый ответ ведущего на вопрос владельца
+          // (записан до правила ответов ведущего) тоже ждёт ответа владельца.
           const answer =
-            operator && (r.state === 'awaiting-answer' || r.state === 'review-rejected');
+            operator &&
+            (r.state === 'awaiting-answer' ||
+              r.state === 'review-rejected' ||
+              (!operatorMode &&
+                ['answer-saved', 'context-review', 'ready-to-apply', 'stale'].includes(r.state)));
           // Отклонённое ревью (D03 `review-rejected`): в режиме operator ответ
           // применяют только подтверждением показанного раунда — то же правило
           // `InputService.apply`, что у панели; его находки — в карточке.

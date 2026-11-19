@@ -47,6 +47,11 @@ import {
 } from '../harness/input-host.ts';
 import { runtimeAdapters } from '../harness/adapters.ts';
 import { LEAD_ANSWERS, leadDecides } from '../harness/policy.ts';
+import {
+  clearReviewDecisions,
+  escalationRefusal,
+  pendingReviewDecisions,
+} from '../core/review-decisions.ts';
 import { boardOf, UNASSIGNED_GRAPH } from '../harness/projection.ts';
 import { adapters, type AgentAdapter } from '../runner/adapters.ts';
 import { checkoutRoots } from '../runner/checkout-root.ts';
@@ -594,6 +599,25 @@ export class InputService {
     return leadDecides(this.h.config, request);
   }
 
+  /**
+   * Сохранённый ответ ведущего (или хоста) на блокирующий вопрос, который
+   * ведущий решать не вправе: ответ записан до обновления правила (вопрос
+   * без `impact`) или до смены режима. Такой ответ не применяется и не
+   * переносится — вопрос снова ждёт владельца. Причина отказа или `undefined`.
+   */
+  leadAnswerHeld(request: InputRequest) {
+    if (!forOperator(request) || this.leadMayDecide(request)) return undefined;
+    const last = latestAnswer(request);
+    if (!last || last.actor.kind === 'operator') return undefined;
+    return `Ответ на вопрос ${request.id} дал ведущий, но вопрос решает владелец (${
+      request.floors.length
+        ? 'критический: ' + request.floors.join(', ')
+        : this.h.config.approvalMode === 'operator'
+          ? 'approvalMode operator'
+          : 'меняет результат для пользователя'
+    }): ответ не применяется, владелец отвечает в панели`;
+  }
+
   /* -------------------------------------------------------------- */
   /* Проекции                                                         */
   /* -------------------------------------------------------------- */
@@ -998,6 +1022,17 @@ export class InputService {
         actor: 'lead' as const,
         next: carryStep(task, !!task && !!this.unreleasedBoard(task)),
       };
+    // Ответ ведущего на вопрос владельца не доводится: отвечает владелец.
+    if (
+      this.leadAnswerHeld(request) &&
+      ['answer-saved', 'context-review', 'ready-to-apply', 'review-rejected', 'stale'].includes(
+        state,
+      )
+    )
+      return {
+        actor: 'operator' as const,
+        next: `the saved answer is the lead's, but this question is the owner's (it changes the result for the user, is critical, or approvalMode is operator): the operator answers in the panel: ${hrefs.input(request.workId)}`,
+      };
     switch (state) {
       case 'awaiting-answer':
         return request.kind === 'follow-up'
@@ -1330,7 +1365,10 @@ export class InputService {
           text: input.text,
           optionId: input.optionId ?? null,
           kind: input.kind,
-          actor: { kind: actor },
+          // Ведущий через CLI (`--by host`) отвечает на блокирующий вопрос по
+          // тому же правилу политики, что агентский API: движок проверяет его
+          // и записывает правило (`basis`) только у актёра `lead`.
+          actor: { kind: actor === 'host' && forOperator(request) ? 'lead' : actor },
           ...(link.messageRef ? { messageRef: link.messageRef } : {}),
           // Причина — только у ответа ведущего: ответ оператора её не несёт.
           ...(actor !== 'operator' && input.reason ? { reason: input.reason } : {}),
@@ -2016,15 +2054,19 @@ export class InputService {
       // Итог ревью ответа читает оператор в центре внимания: на его языке.
       ...reviewLanguageInstructions(hintLocaleOf(this.h.config)),
     ];
+    const reviewSubjectId = inputReviewSubject(request.id);
     try {
+      // Решения владельца по находкам после эскалации — этим раундом (alpha.54).
+      const dispositions = pendingReviewDecisions(this.h.store, 'plan', reviewSubjectId);
       const record = await technicalReview(
         engine,
         engine.policy,
         runtimeAdapters(this.h, engine.policy, this.runtimes),
         {
           kind: 'plan',
-          subject: inputReviewSubject(request.id),
+          subject: reviewSubjectId,
           digest: inputReviewDigest(this.h, task, request.id, answer.digest),
+          ...(dispositions.length ? { dispositions } : {}),
           author: input.authorRuntime,
           instructions,
           context: snapshot,
@@ -2042,6 +2084,7 @@ export class InputService {
             : AbortSignal.timeout(this.h.config.runTimeoutMs),
         },
       );
+      clearReviewDecisions(this.h.store, 'plan', reviewSubjectId);
       // Маршрут, признанный на постановке, которую ревью читало (F85): позже
       // задача может закрепить и другие контракты, основание — этот снимок.
       const routed = record.approved
@@ -2099,7 +2142,7 @@ export class InputService {
           : {}),
       };
     } catch (error) {
-      throw toDomain(error);
+      throw escalationRefusal(error, 'plan', reviewSubjectId) ?? toDomain(error);
     }
   }
 
@@ -2189,6 +2232,8 @@ export class InputService {
         'В approvalMode agent ответ применяет ведущий агент: input_target, затем input_apply',
       );
     const request = this.request(input.requestId);
+    const held = this.leadAnswerHeld(request);
+    if (held) throw refuse('OPERATOR_ANSWERS', held, 403);
     const approval = actor === 'operator' ? ('operator' as const) : ('agent' as const);
     const { store, engine } = executionOf(this.h);
     try {

@@ -108,6 +108,7 @@ import { propertySeed } from 'devcontour-harness';
 import { evaluateVisualRun } from './runner/visual.ts';
 import { brokerAddress, httpBroker } from './runner/visual-broker.ts';
 import { VISUAL_RUN_DEADLINE_MS, visualRun } from './runner/visual-run.ts';
+import { recordReviewDecision } from './core/review-decisions.ts';
 const args = process.argv.slice(2),
   operation = args[0] ?? 'serve';
 /** Причина отказа проверки файла по-русски: частые коды zod, иначе текст zod. */
@@ -734,6 +735,7 @@ async function main() {
     'workspace-verify',
     'changeset-accept',
     'changeset-budget-reset',
+    'review-decide',
     'journal',
     'contract-impact',
     'contract-change',
@@ -1341,7 +1343,24 @@ async function main() {
         result = workspace.create(await readAgentJson(resolve(option('--file', 'changeset.json'))));
       else if (operation === 'workspace-verify')
         result = await workspaceRunner.verify(option('--changeset', ''));
-      else if (operation === 'changeset-budget-reset') {
+      else if (operation === 'review-decide') {
+        // Решение владельца по находке ревью после эскалации (три раунда
+        // подряд): только человек — ведущему движок такое решение не разрешает.
+        if (actorOf() !== 'operator')
+          throw new Error(
+            'Решение по находке после эскалации — решение оператора; --by host не допускается',
+          );
+        result = recordReviewDecision(h.store, {
+          kind: option('--kind', ''),
+          subject: option('--subject', ''),
+          findings: option('--findings', '')
+            .split(',')
+            .map((x) => x.trim())
+            .filter(Boolean),
+          decision: option('--decision', ''),
+          reason: option('--reason', ''),
+        });
+      } else if (operation === 'changeset-budget-reset') {
         // Решение человека с причиной: ведущий агент сброс не выполняет —
         // в каталоге агента и MCP этой операции нет, `--by host` отклоняется.
         if (actorOf() !== 'operator')

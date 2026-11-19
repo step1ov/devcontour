@@ -194,3 +194,64 @@ test('the product demo question carries forUser lines; the owner card shows them
     await f.cleanup();
   }
 });
+
+test('the CLI lead (--by host) answers a technical question by the same engine rule: actor lead, basis technical', async () => {
+  const { f, requestId } = await asked(undefined);
+  try {
+    const shown = f.service.show({ requestId }) as unknown as Shown;
+    const reason = 'The checks read JSON today.';
+    f.service.answer({ requestId, ...answer, reason, expectedVersion: shown.version }, 'host');
+    const stored = executionOf(f.h).engine.inputRequest(requestId).answers.at(-1)!;
+    assert.deepEqual(
+      [stored.actor.kind, stored.basis, stored.reason],
+      ['lead', 'technical', reason],
+    );
+  } finally {
+    await f.cleanup();
+  }
+});
+
+test('a lead answer saved before the rule on a question the owner decides is not applied; the owner answers again', async () => {
+  const { f, taskId, requestId } = await asked(null);
+  try {
+    const shown = f.service.show({ requestId }) as unknown as Shown;
+    // Запись прежней версии: ответ хоста движок не проверяет — так выглядит
+    // ответ ведущего, сохранённый до обновления.
+    executionOf(f.h).engine.answerInput(
+      requestId,
+      { ...answer, actor: { kind: 'host' } },
+      shown.version,
+    );
+    const [held] = f.service.list({ taskId }).requests;
+    assert.equal(held.state, 'answer-saved');
+    assert.equal(held.actor, 'operator');
+    assert.match(held.next, /the operator answers in the panel/);
+    const digest = 'a'.repeat(64);
+    assert.equal(
+      codeOf(() =>
+        f.service.apply(
+          {
+            requestId,
+            answerDigest: digest,
+            expectedVersion: held.version,
+            contextDigest: digest,
+            targetDigest: digest,
+          },
+          'lead',
+        ),
+      ),
+      '403:OPERATOR_ANSWERS',
+    );
+    // Карточка владельца с формой ответа.
+    const items = (await new AttentionService(f.store, f.h, { root: f.root }).active()).items;
+    const card = byKey(items, `input:${requestId}`)!;
+    assert.equal(card.actor, 'operator');
+    assert.ok(card.actions.some((a) => a.id === 'answer'));
+    // Ответ владельца снимает удержание: дальше цепочку ведёт ведущий.
+    f.service.answer({ requestId, ...answer, expectedVersion: held.version }, 'operator');
+    const [after] = f.service.list({ taskId }).requests;
+    assert.equal(after.actor, 'lead');
+  } finally {
+    await f.cleanup();
+  }
+});

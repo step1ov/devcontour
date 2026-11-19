@@ -106,6 +106,11 @@ export const discussionMessage = z.strictObject({
         requestId: inputRequestId,
         revision: z.number().int().positive(),
         answerDigest: z.string().regex(/^[a-f0-9]{64}$/),
+        /**
+         * Причина ведущего из той же версии ответа в запросе harness: в записи
+         * её нет, `read()` подставляет её вместе с текстом.
+         */
+        reason: z.string().max(1000).optional(),
       }),
       z.strictObject({
         requestId: inputRequestId,
