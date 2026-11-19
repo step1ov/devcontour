@@ -8,7 +8,12 @@ import assert from 'node:assert/strict';
 import { join } from 'node:path';
 import { mkdirSync } from 'node:fs';
 import { DatabaseSync } from 'node:sqlite';
-import { Engine, WORKSPACE_OWNER, type ExecutionView } from 'devcontour-harness';
+import {
+  Engine,
+  WORKSPACE_OWNER,
+  type ExecutionTransaction,
+  type ExecutionView,
+} from 'devcontour-harness';
 import { fixture, input } from './helpers.ts';
 import { loadedDigest } from '../src/core/service.ts';
 import { Store } from '../src/core/store.ts';
@@ -558,6 +563,109 @@ test('pristine: продление совместной проверки (jointH
       f.store.idleVersion().revision > hostIdle.revision,
       'изменение данных открывает шлюз простоя',
     );
+  } finally {
+    await f.cleanup();
+  }
+});
+
+test('F79: продление совместной проверки нейтрально и после отката, а правка документа рядом с ним открывает шлюз простоя', async () => {
+  const f = await jointFixture({ gateMs: 120_000, start: false });
+  try {
+    const v = f.workspace.start(f.change.id);
+    const { store: execution } = executionOf(f.h);
+    const renew = (tx: ExecutionTransaction) => {
+      const current = tx.verification(v.id)!;
+      tx.putVerification({ ...current, leaseUntil: current.leaseUntil + 1 });
+    };
+    const gate = f.scheduler.idleClaims;
+    gate.maxMs = 60_000;
+    /** Такт шлюза сервера: true — выдачу он пропустил бы. */
+    const held = async () => {
+      let skipped = false;
+      await gate.around(
+        () => 0,
+        () => Promise.resolve((skipped = gate.holds())),
+      );
+      return skipped;
+    };
+    assert.equal(await held(), false, 'первая выдача');
+    assert.equal(await held(), true, 'без перемен — пропуск');
+
+    // Продление, откаченное внешней транзакцией уже после своей фиксации
+    // (точка сохранения): учёт нейтральных записей возвращается с ним.
+    const idle = f.store.idleVersion();
+    const version = f.store.version();
+    assert.throws(
+      () =>
+        f.store.atomic(() => {
+          execution.transact('heartbeat', (tx) => renew(tx));
+          assert.ok(f.store.version().lease > version.lease, 'продление записано');
+          assert.deepEqual(f.store.idleVersion(), idle, 'внутри — нейтрально');
+          throw new Error('откат');
+        }),
+      { message: 'откат' },
+    );
+    assert.deepEqual(f.store.version(), version, 'счётчики откачены');
+    assert.deepEqual(f.store.idleVersion(), idle, 'откат продления учёт не сдвигает');
+
+    // Продление само по себе шлюз не открывает: такт сервера пропускает выдачу.
+    execution.transact('heartbeat', (tx) => renew(tx));
+    assert.deepEqual(f.store.idleVersion(), idle, 'продление нейтрально');
+    assert.equal(await held(), true, 'шлюз пропускает выдачу через продление');
+
+    // Отказавшая вложенная правка хоста откатывается вместе со своей отметкой.
+    execution.transact('heartbeat', (tx) => {
+      assert.throws(
+        () =>
+          execution.host('heartbeat', (h) => {
+            h.state.changeSets = [...h.state.changeSets];
+            throw new Error('отказ');
+          }),
+        { message: 'отказ' },
+      );
+      renew(tx);
+    });
+    assert.deepEqual(f.store.idleVersion(), idle, 'откаченная правка хоста — не правка');
+    assert.equal(await held(), true, 'шлюз по-прежнему пропускает');
+
+    // Изменяемый документ транзакции, полученный через stateOf после
+    // продления, хост может изменить: снятое удержание меняет выдачу.
+    const taskId = f.store.view().tasks[0].id;
+    f.store.change('fixture.hold', (s) => {
+      s.tasks.find((t) => t.id === taskId)!.hold = { operation: 'fixture', reason: 'fixture' };
+    });
+    assert.equal(await held(), false, 'новое удержание — выдача');
+    assert.equal(await held(), true, 'и снова пропуск');
+    const beforeStateOf = f.store.idleVersion();
+    execution.host('heartbeat', (h) => {
+      renew(h.tx);
+      delete execution.stateOf(h.tx).tasks.find((t) => t.id === taskId)!.hold;
+    });
+    assert.equal(f.store.view().tasks.find((t) => t.id === taskId)!.hold, undefined);
+    assert.notDeepEqual(
+      f.store.idleVersion(),
+      beforeStateOf,
+      'правка через stateOf открывает шлюз',
+    );
+    assert.equal(await held(), false, 'такт выдаёт после снятого удержания');
+    assert.equal(await held(), true);
+
+    // Снятие удержания движком (запись модели) в одном heartbeat с продлением.
+    f.store.change('fixture.hold', (s) => {
+      s.tasks.find((t) => t.id === taskId)!.hold = { operation: 'fixture', reason: 'fixture' };
+    });
+    assert.equal(await held(), false);
+    assert.equal(await held(), true);
+    const beforeRelease = f.store.idleVersion();
+    execution.transact('heartbeat', (tx) => {
+      renew(tx);
+      const { hold, ...work } = tx.work(taskId)!;
+      assert.ok(hold, 'поручение удержано');
+      tx.putWork(work);
+    });
+    assert.equal(f.store.view().tasks.find((t) => t.id === taskId)!.hold, undefined);
+    assert.notDeepEqual(f.store.idleVersion(), beforeRelease, 'снятое удержание открывает шлюз');
+    assert.equal(await held(), false, 'такт выдаёт после снятого удержания движком');
   } finally {
     await f.cleanup();
   }

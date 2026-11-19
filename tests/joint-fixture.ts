@@ -100,6 +100,7 @@ export async function jointFixture(options: {
       h,
       store,
       lead,
+      scheduler,
       flow,
       job: job!,
       board: b,

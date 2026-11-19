@@ -134,6 +134,8 @@ export class DevContourExecutionStore implements ExecutionStore {
   private frame?: Frame;
   /** Документ DevContour каждого выданного вида: порты хоста читают продуктовые поля. */
   private readonly states = new WeakMap<ExecutionView, () => DevContourState>();
+  /** Кадр транзакции, из которого построен вид (`stateOf` отмечает выданный изменяемый документ). */
+  private readonly frames = new WeakMap<ExecutionView, Frame>();
   constructor(
     readonly store: Store,
     readonly options: ProjectionOptions,
@@ -234,7 +236,7 @@ export class DevContourExecutionStore implements ExecutionStore {
     const enclosed = this.store.inTransaction;
     this.store.atomic(() => {
       const before = this.store.lastEventId();
-      this.store.lazyUpdate(kind, (draft) => {
+      const action = (draft: () => Draft) => {
         const frame: Frame = {
           get draft() {
             return draft();
@@ -259,13 +261,13 @@ export class DevContourExecutionStore implements ExecutionStore {
           throw new Error('Слишком много событий в одной транзакции');
         drafts = frame.drafts;
         data = this.journalData(frame);
-        // Транзакция heartbeat без записей модели и правок хоста меняет в
-        // документе только сроки (продление совместной проверки): для шлюза
-        // простоя выдачи — нейтральная запись своего процесса (F79).
-        if (kind === 'heartbeat' && !frame.modelWrote && !frame.hostWrote)
-          this.store.markRenewalOnly();
         return data;
-      });
+      };
+      // Транзакция heartbeat без записей модели и правок хоста меняет в
+      // документе только сроки (продление совместной проверки): для шлюза
+      // простоя выдачи — нейтральная запись своего процесса (F79).
+      const renewalOnly = () => !!written && !written.modelWrote && !written.hostWrote;
+      this.store.lazyUpdate(kind, action, renewalOnly);
       // Store.change не пишет событие, если документ не изменился: событие
       // транзакции с нейтральными событиями записывается явно, в ней же.
       if (kind !== 'heartbeat' && drafts.length && this.store.lastEventId() === before)
@@ -385,6 +387,12 @@ export class DevContourExecutionStore implements ExecutionStore {
   stateOf(view: ExecutionView): DevContourState {
     const state = this.states.get(view);
     if (!state) throw new Error('Вид получен не от этого хранилища');
+    // Изменяемый документ открытой транзакции вызывающий может и изменить:
+    // для шлюза простоя (F79) это правка хоста, как через `h.state`, —
+    // продление под видом heartbeat перестаёт быть нейтральным. Неизменённый
+    // документ — общий замороженный снимок, его не изменить.
+    const frame = this.frames.get(view);
+    if (frame && frame === this.frame && frame.draft.edited) frame.hostWrote = true;
     return state();
   }
 
@@ -614,6 +622,7 @@ export class DevContourExecutionStore implements ExecutionStore {
           .map((r) => attemptOf(state(), r)),
     });
     this.states.set(view, state);
+    this.frames.set(view, frame);
     return view;
   }
 }

@@ -1129,8 +1129,16 @@ export class Store {
    * То же изменение, но документ открывается только при первом вызове
    * `draft()`. Транзакция, которая его не открыла (продление аренды строкой),
    * документ не разбирает, не пишет и событий журнала не пишет.
+   *
+   * `renewalOnly` для изменения `heartbeat` вызывается после успешного
+   * действия, когда вызывающий знает все его записи: `true` — документ
+   * изменён только в сроках владения (продление срока совместной проверки).
+   * Такая запись этого процесса выдачу не меняет — нейтральна для
+   * `idleVersion` (F79). Без него документ, изменённый под видом heartbeat,
+   * шлюз простоя открывает. Решение — значение этого вызова, а не состояние
+   * соединения: откат точки сохранения его не переносит на другое изменение.
    */
-  lazyUpdate<T>(type: string, action: (draft: () => Draft) => T): T {
+  lazyUpdate<T>(type: string, action: (draft: () => Draft) => T, renewalOnly?: () => boolean): T {
     // Вложенное изменение записало бы документ и событие журнала, а внешнее
     // при фиксации переписало бы документ своей копией: изменение пропало
     // бы, событие о нём осталось. Отказ — до любой записи.
@@ -1146,16 +1154,14 @@ export class Store {
       const draft = () => (open ??= this.openDraft()).draft;
       let result: T;
       this.editing = true;
-      this.renewalOnly = false;
-      let renewalOnly: boolean;
       try {
         result = action(draft);
       } finally {
         this.editing = false;
-        renewalOnly = this.renewalOnly;
-        this.renewalOnly = false;
       }
-      return open ? this.closeDraft(open, type, result, renewalOnly) : result;
+      if (!open) return result;
+      const neutral = type === 'heartbeat' && renewalOnly?.() === true;
+      return this.closeDraft(open, type, result, neutral);
     });
   }
   /** Начало изменения: документ транзакции (`Draft`) со сроками и ролью из строк. */
@@ -1332,8 +1338,8 @@ export class Store {
     // для шлюза простоя — нейтральная запись этого процесса. Документ,
     // изменённый под видом heartbeat, — нет: движок может записать в такой
     // транзакции и то, что меняет выдачу (снятое удержание). Документ, в
-    // котором вызывающий изменил только сроки (`markRenewalOnly`: продление
-    // срока совместной проверки), — тоже нейтральная запись.
+    // котором вызывающий изменил только сроки (`renewalOnly` у `lazyUpdate`:
+    // продление срока совместной проверки), — тоже нейтральная запись.
     if (documentChanged)
       if (type === 'heartbeat') this.bumpAs('lease', renewalOnly);
       else this.bump('data');
@@ -1866,19 +1872,6 @@ export class Store {
       .prepare(`DELETE FROM ${schema}.local_workflow WHERE namespace=? AND owner=? AND key=?`)
       .run(namespace, owner ?? '@workspace', key);
     if (removed.changes) this.bump('data');
-  }
-  /** Изменение `heartbeat`, открытое сейчас, меняет в документе только сроки (`markRenewalOnly`). */
-  private renewalOnly = false;
-  /**
-   * Изменение `heartbeat`, открытое сейчас (действие `update`/`lazyUpdate`),
-   * меняет в документе только сроки владения: запись этого процесса, которая
-   * выдачу не меняет (учёт для `idleVersion`, F79). Без отметки документ,
-   * изменённый под видом heartbeat, шлюз простоя открывает. Вызывающий
-   * отмечает это в конце действия, когда знает все его записи.
-   */
-  markRenewalOnly() {
-    if (!this.editing) throw new Error('Store.markRenewalOnly требует открытого изменения');
-    this.renewalOnly = true;
   }
   /** Открыта ли транзакция записи (`atomic`) этого соединения. */
   get inTransaction() {
