@@ -783,6 +783,37 @@ test('D02-D: handoff в байтовом пределе — обращения �
   }
 });
 
+test('D02-D: handoff md в пределе при длинном тексте шага — Markdown не повторяет host.next.detail и commands', () => {
+  const w = world();
+  try {
+    // Несколько черновиков: текст шага plan-unapproved называет каждый id в
+    // plan_review и в CLI, а Markdown повторял его рядом с host.next.detail.
+    for (let i = 2; i <= 4; i++) w.h.addTask(w.board.id, input('Черновик ' + i));
+    for (let i = 1; i <= 6; i++) say(w.d, w.task.id, `Обращение ${i}: ` + 'щ'.repeat(320));
+    const free = handoffResponse(devcontourHandoff(w.h), 'md');
+    const detail = free.host.next?.detail ?? '';
+    assert.ok(detail.length > 900, 'шаг с длинным текстом: ' + detail.length);
+    assert.ok(free.markdown?.includes(detail), 'без предела Markdown несёт текст шага');
+    for (const bytes of [6000, 6500, 7000, 9000]) {
+      const { value } = devcontourHandoffWithin(w.h, {}, { bytes, format: 'md' });
+      const response = handoffResponse(value, 'md');
+      const size = Buffer.byteLength(JSON.stringify(response));
+      assert.ok(size <= bytes, `md ${bytes}: ответ ${size} байт`);
+      assert.ok(value.host.discussion, 'обращения названы хотя бы отметкой');
+      assert.equal(response.host.next?.detail, detail, 'текст шага в JSON ответа цел');
+      assert.deepEqual(response.commands, free.commands, 'описания команд в ответе целы');
+      const markdown = response.markdown ?? '';
+      assert.match(markdown, /discussion_inbox/);
+      assert.ok(
+        markdown.includes(detail) || markdown.includes('host.next.detail'),
+        'шаг в Markdown — текстом или ссылкой на поле',
+      );
+    }
+  } finally {
+    w.cleanup();
+  }
+});
+
 test('D02-E: секрет в обращении скрыт в handoff, даже на границе выдержки', () => {
   const SECRET = 'okapi-discussion-secret-4815162342';
   const previous = process.env.DC_DISCUSSION_SECRET;

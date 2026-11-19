@@ -229,5 +229,9 @@
 // ожидание boards задания ChangeSet на стадии 0, session_handoff —
 // plan_review, plan.misrouted, params.stopper и host.changesets; прочие
 // операции байтово прежние.
-export const CATALOG_DIGEST = 'f4a2df31852fd90f39ddf1dc04dec095755cd357bb3b1cf698f0b2f3eedb11dd';
+// Намеренное изменение: описание session_handoff называет последнюю уступку
+// предела ответа md — раздел DevContour ссылается на host.next.detail и
+// commands того же ответа вместо повтора их текста; прочие операции
+// байтово прежние.
+export const CATALOG_DIGEST = '400fda86407382ab00f5e5b5d6058a6b5ea23adc3ee4812c932d3412f9d90d3d';
 export const SNAPSHOT_VERSION = '0.4.0-alpha.7';

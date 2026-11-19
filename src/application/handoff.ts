@@ -211,6 +211,12 @@ export interface DevContourHandoff {
    * ответ не входит. Без поля — английский.
    */
   locale?: HintLocale;
+  /**
+   * Markdown ответа `md` не повторяет тексты, которые уже есть в JSON того же
+   * ответа (`host.next.detail`, `commands`), а называет их поля: последняя
+   * уступка предела ответа (`devcontourHandoffWithin`). В ответ не входит.
+   */
+  markdownRefs?: true;
   host: {
     next?: HandoffHostNext;
     /** Доски с действующим заданием ведущего (его очередь продолжает сервер). */
@@ -2015,8 +2021,18 @@ export function devcontourHandoffWithin(
         }));
         host = { ...host, changesets };
       }
+      // Последняя уступка — повторы Markdown: текст шага (`host.next.detail`)
+      // и описания команд стоят в JSON того же ответа, а раздел DevContour
+      // повторял их целиком. Шаг и команды Markdown называет по полям, без
+      // потери сведений; иначе длинный текст шага при пакете на нижнем
+      // пределе и обращениях в одной отметке выводил ответ за предел.
+      const markdownRefs =
+        limit.format === 'md' &&
+        bytes(handoffResponse({ pack: fitted, host, locale }, limit.format)) > limit.bytes
+          ? (true as const)
+          : undefined;
       return {
-        value: { pack: fitted, host, locale },
+        value: { pack: fitted, host, locale, ...(markdownRefs ? { markdownRefs } : {}) },
         trimmed: droppedOf(fitted.truncated) > droppedOf(pack.truncated),
       };
     });
@@ -2036,7 +2052,7 @@ export function handoffResponse(value: DevContourHandoff, format: HandoffFormat)
   return format === 'md'
     ? {
         format,
-        markdown: handoffMarkdown(pack) + hostMarkdown(host, commands),
+        markdown: handoffMarkdown(pack) + hostMarkdown(host, commands, value.markdownRefs),
         host,
         commands,
       }
@@ -2063,12 +2079,20 @@ function blockerText(b: BoardBlocker) {
   }
 }
 
-function hostMarkdown(host: DevContourHandoff['host'], commands: Record<string, string>) {
+function hostMarkdown(
+  host: DevContourHandoff['host'],
+  commands: Record<string, string>,
+  refs?: true,
+) {
   return [
     '',
     '## В DevContour',
     '',
-    ...(host.next ? [`- **Следующий шаг: ${host.next.action}** — ${host.next.detail}`] : []),
+    ...(host.next
+      ? [
+          `- **Следующий шаг: ${host.next.action}** — ${refs ? 'текст шага — host.next.detail этого ответа' : host.next.detail}`,
+        ]
+      : []),
     `- Действующие задания досок: ${host.liveBoards.length ? host.liveBoards.join(', ') : 'нет'}`,
     ...(host.verifications ?? []).map(
       (v) =>
@@ -2101,7 +2125,13 @@ function hostMarkdown(host: DevContourHandoff['host'], commands: Record<string, 
             : '- Есть обращения к ведущему без обработки — discussion_inbox',
         ]
       : []),
-    ...Object.entries(commands).map(([k, v]) => `- \`${k}\` — ${v}`),
+    ...(refs
+      ? [
+          `- ${Object.keys(commands)
+            .map((k) => `\`${k}\``)
+            .join(', ')} — что делать в DevContour: commands этого ответа`,
+        ]
+      : Object.entries(commands).map(([k, v]) => `- \`${k}\` — ${v}`)),
     '',
   ].join('\n');
 }
