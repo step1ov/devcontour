@@ -173,6 +173,27 @@ test('F93: lead pause over an unheld base check with a board job — no operator
   });
 });
 
+test('F93: without a base-move range the loop cannot check the base — attention and home both leave the action to the operator', async () => {
+  await withRepo(async ({ h, data }) => {
+    const b = h.createBoard('Board');
+    h.addTask(b.id, input('Task'));
+    h.approve(b.id);
+    h.pause(false);
+    new LeadWorkflow(h).start({ kind: 'board', id: b.id, authorRuntime: 'codex' });
+    const agent = new AgentService(h, data);
+    await agent.run({ operation: 'queue_set', input: { paused: true, reason: 'Guides' } });
+    await baseUpdateOperation(h, data, { by: 'host' });
+    // Ожидание прежней версии: без диапазона переноса.
+    h.store.change('fixture.legacy-wait', (s) => {
+      delete s.baseMoves;
+    });
+    const { attention, queue } = await views(h);
+    const card = attention.items.find((i) => i.sourceKey === 'wait:base-check');
+    assert.equal(card?.actor, 'operator');
+    assert.match(queue.hint ?? '', /Проверьте базу gates и запустите очередь/);
+  });
+});
+
 test('F93: a human pause over the same base check keeps the operator action', async () => {
   await withRepo(async ({ h, data }) => {
     const b = h.createBoard('Board');

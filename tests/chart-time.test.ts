@@ -3,6 +3,7 @@
 // зависит от его часового пояса.
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
+import { execFileSync } from 'node:child_process';
 import { atClock, clock, dayLabel, span } from '../src/web/lib/chart-time.ts';
 
 const local = (d: number, h: number, m = 0) => new Date(2026, 10, d, h, m).getTime();
@@ -23,4 +24,17 @@ test('F92: a time of yesterday says «вчера», today stays bare, older days
     dayLabel(new Date(2026, 10, 30, 22).getTime(), new Date(2026, 11, 1, 1).getTime()),
     'вчера',
   );
+});
+
+test('F92: a day whose midnight is skipped by a clock change still has a «вчера»', () => {
+  // America/Santiago: 2026-09-06 00:00 не существует (часы переводят на 01:00).
+  const run = (code: string) =>
+    execFileSync(process.execPath, ['--import', 'tsx', '-e', code], {
+      env: { ...process.env, TZ: 'America/Santiago' },
+      encoding: 'utf8',
+    }).trim();
+  const out = run(
+    `import('${new URL('../src/web/lib/chart-time.ts', import.meta.url).href}').then((m) => console.log(m.clock(new Date(2026, 8, 5, 12).getTime(), new Date(2026, 8, 6, 10).getTime())))`,
+  );
+  assert.equal(out, 'вчера 12:00');
 });

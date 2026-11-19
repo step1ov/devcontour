@@ -7,20 +7,17 @@
 const hhmm = (ms: number) =>
   new Date(ms).toLocaleTimeString('ru-RU', { hour: '2-digit', minute: '2-digit' });
 
-const startOfDay = (ms: number) => {
-  const d = new Date(ms);
-  return new Date(d.getFullYear(), d.getMonth(), d.getDate()).getTime();
-};
+/** Календарный день по часам браузера: сравнение дат, а не полуночей (полночь бывает пропущена переводом часов). */
+const dayKey = (d: Date) => `${d.getFullYear()}-${d.getMonth()}-${d.getDate()}`;
 
 /** День момента относительно `today`: `''` — сегодня, «вчера» или дата. */
 export function dayLabel(ms: number, today: number): string {
-  const day = startOfDay(ms);
-  const ref = startOfDay(today);
-  if (day === ref) return '';
-  // Предыдущий календарный день (переход на летнее время — не 24 ч).
-  const yesterday = new Date(ref);
-  yesterday.setDate(yesterday.getDate() - 1);
-  if (day === yesterday.getTime()) return 'вчера';
+  const day = dayKey(new Date(ms));
+  const ref = new Date(today);
+  if (day === dayKey(ref)) return '';
+  // Предыдущий календарный день — от полудня: он есть в любой день.
+  const yesterday = new Date(ref.getFullYear(), ref.getMonth(), ref.getDate() - 1, 12);
+  if (day === dayKey(yesterday)) return 'вчера';
   return new Date(ms).toLocaleDateString('ru-RU', { day: 'numeric', month: 'short' });
 }
 

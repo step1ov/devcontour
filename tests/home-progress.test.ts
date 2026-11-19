@@ -1331,14 +1331,23 @@ test('Home queue text: who resumes depends on the lead workflow and the approval
     'Ведущий агент проверит базу и продолжит выдачу сам.',
   );
   assert.match(operatorQueue(q('operator'), wait, agentLive).hint, /Проверьте базу gates/);
-  // Пауза ведущего над тем же ожиданием (F93): снимает ведущий, базу проверяет цикл.
-  assert.equal(
+  // Пауза ведущего над тем же ожиданием (F93): снимает ведущий, базу проверяет
+  // цикл — если у ожидания есть диапазон переноса; без него — оператор.
+  assert.match(
     operatorQueue(q('operator', { by: 'lead' }), wait, agentLive).hint,
+    /Проверьте базу gates/,
+  );
+  const moved = {
+    ...wait,
+    baseMoves: { at: new Date(NOW).toISOString() },
+  } as unknown as typeof wait;
+  assert.equal(
+    operatorQueue(q('operator', { by: 'lead' }), moved, agentLive).hint,
     'Свою паузу ведущий агент снимает сам; затем он проверит базу и продолжит выдачу.',
   );
   // Без задания ведущего цикл базу не проверит: действие остаётся оператору.
   assert.match(
-    operatorQueue(q('operator', { by: 'lead' }), wait, { ...agentLive, workflowActive: false })
+    operatorQueue(q('operator', { by: 'lead' }), moved, { ...agentLive, workflowActive: false })
       .hint,
     /Проверьте базу gates/,
   );

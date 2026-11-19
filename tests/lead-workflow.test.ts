@@ -23,6 +23,8 @@ import { baseUpdateOperation } from '../src/runner/base-update.ts';
 import { devcontourHandoff } from '../src/application/handoff.ts';
 import { AgentService } from '../src/application/agent.ts';
 import { repository } from '../src/core/repositories.ts';
+import { RESUME, RESUME_DRIVER, resumeDriverAlive } from '../src/application/input-resume.ts';
+import { existsSync } from 'node:fs';
 
 // Копии одного учебного workspace вместо новой сборки демо в каждом тесте.
 const demos = demoPool(testDemo);
@@ -418,6 +420,64 @@ test('В режиме агента workflow доски сам проверяет
     assert.equal(store.read().pauseReason, 'base-check');
     assert.equal(events('base.check.started').length, 3);
   } finally {
+    await f.cleanup();
+  }
+});
+
+test('F91: while the loop runs a real base check, timer ticks keep the answer-pass heartbeat alive', async () => {
+  const f = await baseCheckFixture();
+  const { store, h, lead, commit, events, config } = f;
+  // Gate базы ждёт файла-разрешения: проверка идёт, пока тест её держит.
+  const release = join(f.root, 'release-gate');
+  config.gates = [
+    {
+      id: 'base-gate',
+      kind: 'test',
+      timeoutMs: 30000,
+      command: [
+        process.execPath,
+        '-e',
+        `const fs=require('fs');const t=setInterval(()=>{if(!fs.existsSync(${JSON.stringify(release)}))return;clearInterval(t);fs.mkdirSync('.reports',{recursive:true});fs.writeFileSync(process.env.DEVCONTOUR_REPORT_PATH,'<testsuite><testcase name="base"/></testsuite>');process.exit(0)},50)`,
+      ],
+      report: { type: 'junit', path: '.reports/base.xml' },
+    },
+  ];
+  let running: Promise<void> | undefined;
+  try {
+    store.change('fixture.reset', (s) => {
+      s.tasks = [];
+      s.boards = [];
+      s.runs = [];
+    });
+    const b = h.createBoard('Base check board', '', 'main');
+    h.addTask(b.id, input());
+    new LeadWorkflow(h).start({ kind: 'board', id: b.id, authorRuntime: 'codex' });
+    await lead.tick();
+    await lead.tick();
+    assert.deepEqual(h.holdForBaseUpdate(), { held: true });
+    await commit('ok');
+    // Такт начинает проверку базы и ждёт её.
+    running = lead.tick();
+    const deadline = Date.now() + 20_000;
+    while (!events('base.check.started').length && Date.now() < deadline)
+      await new Promise((r) => setTimeout(r, 25));
+    assert.equal(events('base.check.started').length, 1, 'проверка базы идёт');
+    assert.equal(store.read().pauseReason, 'base-check');
+    // Прежняя отметка прохода истекла, пока стадия ждёт gates.
+    store.atomic(() =>
+      store.saveLocal(RESUME, undefined, RESUME_DRIVER, { leaseUntil: Date.now() - 1 }, 'lease'),
+    );
+    assert.equal(resumeDriverAlive(h), false);
+    // Такт таймера возвращает ту же стадию и обновляет отметку.
+    assert.equal(lead.tick(), running);
+    assert.equal(resumeDriverAlive(h), true, 'сервер жив — отметка прохода свежая');
+    assert.ok(!existsSync(release));
+    await writeFile(release, '');
+    await running;
+    assert.equal(events('base.check.passed').length, 1);
+  } finally {
+    if (!existsSync(release)) await writeFile(release, '');
+    await running?.catch(() => {});
     await f.cleanup();
   }
 });

@@ -674,7 +674,7 @@ export interface QueueFacts {
 export function operatorQueue(
   queue: { reason?: string; stopReason?: string; failed?: true; by?: 'lead' },
   state: Pick<DevContourState, 'pauseFailures' | 'waits' | 'paused'> &
-    Partial<Pick<DevContourState, 'pauseActor'>>,
+    Partial<Pick<DevContourState, 'pauseActor' | 'baseMoves'>>,
   facts: QueueFacts,
 ): { reason: string; hint: string } {
   const agent = (facts.approvalMode ?? 'agent') === 'agent';
@@ -730,8 +730,15 @@ export function operatorQueue(
     // Пауза ведущего над неудержанным ожиданием (F93, `leadResumeOf`
     // `keeps-base-check`): ведущий снимает свою паузу, базу проверяет цикл
     // ведущего — у оператора действия нет, как в `queueStopView` и центре
-    // внимания.
-    if (byLead && queue.by === 'lead' && queue.reason === 'operator' && !queue.failed)
+    // внимания. Без диапазона переноса (`baseMoves`) цикл базу не проверит
+    // (`baseWaitOf`, `checkBase`): тогда действие остаётся оператору.
+    if (
+      byLead &&
+      queue.by === 'lead' &&
+      queue.reason === 'operator' &&
+      !queue.failed &&
+      state.baseMoves
+    )
       return {
         reason: leadReason,
         hint: 'Свою паузу ведущий агент снимает сам; затем он проверит базу и продолжит выдачу.',
