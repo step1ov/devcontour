@@ -32,7 +32,11 @@ export interface HintParamMap {
   /** `approvalMode: operator`: задания ведущего не исполняются. */
   operator: None;
   /** План доски не согласован (`decision: plan`); `scope` — задач плана в области ревью. */
-  'plan-unapproved': { scope: number };
+  /**
+   * `stopper` — задача ревизии, отменённая после выдачи (D46, F75): любое
+   * задание этой ревизии остановится на ней.
+   */
+  'plan-unapproved': { scope: number; stopper?: string };
   /** Действующее задание остановится на следующем такте (`stage`). */
   'job-stops': { stage: number };
   /** Действующее задание продолжает сервер; `stage` — стадия следующего такта. */
@@ -173,6 +177,8 @@ export interface HintSubject {
     unverifiedCount: number;
     blocked: { id: string; reason: string }[];
     blockedCount: number;
+    misrouted?: { id: string; role: string; path: string; owners: string[] }[];
+    misroutedCount?: number;
   };
   input?: { requestId: string; taskId: string };
 }
@@ -209,6 +215,19 @@ const blockedList = (s: HintSubject) =>
     '; ',
   );
 const reviewTasks = (s: HintSubject) => s.plan!.review.join(',');
+/** Аргумент `plan_review` с областью подсказки (JSON как есть). */
+const reviewArgs = (s: HintSubject, all: boolean) =>
+  `{"boardId": ${JSON.stringify(s.boardId!)}${all ? '' : ', "tasks": ' + JSON.stringify(s.plan!.review)}, "authorRuntime": "codex|claude"}`;
+/** Черновики находок с ролью, которая не может изменить файл находки (F73). */
+const misroutedList = (s: HintSubject, none: string) =>
+  hintList(
+    (s.plan!.misrouted ?? []).map(
+      (m) => `${m.id} (${m.role}, ${m.path} → ${m.owners.length ? m.owners.join('|') : none})`,
+    ),
+    s.plan!.misroutedCount ?? 0,
+    'plan.misrouted',
+    '; ',
+  );
 
 // ── English (по умолчанию: тексты байтово прежние) ─────────────────────────
 
@@ -262,7 +281,7 @@ const chainEn = (operator: boolean, taskId: string) =>
     ? `input_context, input_review --author-runtime; then the operator applies in the panel (${hrefs.input(taskId)})`
     : 'input_context, input_review --author-runtime, input_target, input_apply';
 
-function planEn(p: { scope: number }, s: HintSubject) {
+function planEn(p: HintParamMap['plan-unapproved'], s: HintSubject) {
   const plan = s.plan!;
   const boardId = s.boardId!;
   const unverified = plan.unverifiedCount
@@ -271,16 +290,23 @@ function planEn(p: { scope: number }, s: HintSubject) {
   const blocked = plan.blockedCount
     ? ` ${plan.blockedCount} draft task(s) fail approval preconditions, so approval refuses them and review-plan stops on them before the model call; fix these first (${EDIT_EN}) or cancel them: ${blockedList(s)}.`
     : '';
+  const misrouted = plan.misroutedCount
+    ? ` ${plan.misroutedCount} finding draft(s) have a role whose write scope does not cover the finding path, so its writer could not edit that file: set the owning role (in parentheses after the arrow) when triaging them (${EDIT_EN}): ${misroutedList(s, 'no role with an explicit scope')}.`
+    : '';
+  const stopper = p.stopper
+    ? ` Task ${p.stopper} of this revision was cancelled by a person or after issue (D46): every lead workflow job of the revision stops on it before its tasks run, and tasks approved here would run with no job to repair or accept them. Retry ${p.stopper} if it is still needed (task_retry), or plan the replacement on a new board (plan_import without boardId, then workflow_start {"kind": "board"}); move drafts that belong there with task_move.`
+    : '';
+  const whole = plan.reviewCount > PLAN_HINT_IDS && plan.reviewCount === p.scope;
   const tasks =
     plan.reviewCount <= PLAN_HINT_IDS
       ? `--tasks ${reviewTasks(s)} `
-      : plan.reviewCount === p.scope
+      : whole
         ? `(the whole plan, ${plan.reviewCount} tasks: no --tasks needed) `
         : `--tasks ${reviewTasks(s)} (scope truncated: the first ${PLAN_HINT_IDS} of ${plan.reviewCount} reviewable tasks; review the rest in a later round) `;
   const next = plan.reviewCount
-    ? ` Review the plan with an explicit scope (devcontour review-plan --board ${boardId} ${tasks}--author-runtime codex|claude --workspace …, keeping only the tasks to run; review-plan also checks INTENT story bindings, which this hint does not), or edit/cancel the tasks first; register workflow_start only for an approved plan.`
-    : ' No task of the plan is ready for review: review-plan only after these are handled; register workflow_start only for an approved plan.';
-  return `The plan of board ${boardId} is not approved (${plan.drafts.length} draft task(s)${plan.stale.length ? `, ${plan.stale.length} approved under another policy` : ''}).${unverified}${blocked} workflow_start would send the whole plan to review and run every task once approved: choosing the scope is the lead's or the user's decision.${next}`;
+    ? ` Review the plan with an explicit scope (plan_review ${reviewArgs(s, whole)}, CLI devcontour review-plan --board ${boardId} ${tasks}--author-runtime codex|claude --workspace …, keeping only the tasks to run; plan review also checks INTENT story bindings, which this hint does not), or edit/cancel the tasks first; register workflow_start only for an approved plan.`
+    : ` No task of the plan is ready for review: review only after these are handled — once triaged, release just those drafts (their ids as tasks) with plan_review {"boardId": ${JSON.stringify(boardId)}, "tasks": ["ID"], "authorRuntime": "codex|claude"} (CLI devcontour review-plan --board ${boardId} --tasks ID,ID); the other drafts stay drafts. Register workflow_start only for an approved plan.`;
+  return `The plan of board ${boardId} is not approved (${plan.drafts.length} draft task(s)${plan.stale.length ? `, ${plan.stale.length} approved under another policy` : ''}).${stopper}${unverified}${misrouted}${blocked} workflow_start would send the whole plan to review and run every task once approved: choosing the scope is the lead's or the user's decision.${next}`;
 }
 
 const failedEn = (error: string | undefined) => (error ? ': ' + error : '');
@@ -330,8 +356,8 @@ const en: Catalog = {
         : "Accepting without the task is the user's decision and the attention center shows it to the operator: do not accept the board yourself.";
     // Все задачи ревизии отменены: принимать нечего, второй путь — новая ревизия.
     const second = p.allCancelled
-      ? `(2) every task of the revision is cancelled, so the board cannot be accepted: when the user decides so, the lead plans a new revision of board ${s.boardId!}`
-      : `(2) the operator accepts the revision without task ${task} in the panel (the accept action on the board page) once its other tasks are done`;
+      ? `(2) every task of the revision is cancelled, so the board cannot be accepted: when the user decides so, the lead plans the work on a new board (plan_import without boardId, then workflow_start {"kind": "board"}; plan_import with boardId waits for an accepted revision)`
+      : `(2) the operator accepts the revision without task ${task} in the panel (the accept action on the board page) once its other tasks are done; (3) a replacement goes on a new board (plan_import without boardId, then workflow_start {"kind": "board"} for it; move drafts that belong there with task_move): a task added to this revision would run with no job to repair or accept it`;
     return `The lead workflow job of board ${s.boardId!} ${p.live ? 'stops at its next step' : 'stopped'}${failedEn(p.error)}: task ${task} was ${who}${p.budget ? ' when it hit a budget' : ''}, and an issued task does not leave the job (D46, docs/decisions.md), so workflow_retry and workflow_start do not move it. Recovery paths: ${first}; ${second}. ${owner}`;
   },
   'job-retry': (p, s) =>
@@ -523,7 +549,7 @@ const chainRu = (operator: boolean, taskId: string) =>
     ? `input_context, input_review --author-runtime; затем оператор применяет ответ в панели (${hrefs.input(taskId)})`
     : 'input_context, input_review --author-runtime, input_target, input_apply';
 
-function planRu(p: { scope: number }, s: HintSubject) {
+function planRu(p: HintParamMap['plan-unapproved'], s: HintSubject) {
   const plan = s.plan!;
   const boardId = s.boardId!;
   const unverified = plan.unverifiedCount
@@ -532,16 +558,23 @@ function planRu(p: { scope: number }, s: HintSubject) {
   const blocked = plan.blockedCount
     ? ` Черновики, не проходящие условия утверждения: ${plan.blockedCount}. Утверждение их отвергнет, а review-plan остановится на них до вызова модели; сначала исправьте их (${EDIT_RU}) или отмените: ${blockedList(s)}.`
     : '';
+  const misrouted = plan.misroutedCount
+    ? ` Черновики находок, роль которых не может изменить файл находки (путь вне её области записи): ${plan.misroutedCount}. При разборе назначьте роль-владельца пути (после стрелки) (${EDIT_RU}): ${misroutedList(s, 'нет роли с явной областью')}.`
+    : '';
+  const stopper = p.stopper
+    ? ` Задача ${p.stopper} этой ревизии отменена человеком или после выдачи (D46): любое задание ведущего ревизии остановится на ней раньше её задач, и утверждённые здесь задачи пошли бы без задания, которое их чинит и принимает. Повторите ${p.stopper}, если она ещё нужна (task_retry), или планируйте замену на новой доске (plan_import без boardId, затем workflow_start {"kind": "board"}); черновики, которым место там, переносите task_move.`
+    : '';
+  const whole = plan.reviewCount > PLAN_HINT_IDS && plan.reviewCount === p.scope;
   const tasks =
     plan.reviewCount <= PLAN_HINT_IDS
       ? `--tasks ${reviewTasks(s)} `
-      : plan.reviewCount === p.scope
+      : whole
         ? `(весь план, задач: ${plan.reviewCount}; --tasks не нужен) `
         : `--tasks ${reviewTasks(s)} (область усечена: первые ${PLAN_HINT_IDS} из ${plan.reviewCount} задач, готовых к ревью; остальные — в следующем раунде) `;
   const next = plan.reviewCount
-    ? ` Проведите ревью плана с явной областью (devcontour review-plan --board ${boardId} ${tasks}--author-runtime codex|claude --workspace …, оставив только задачи к исполнению; review-plan проверяет и привязки к историям INTENT, чего эта подсказка не делает) или сначала исправьте либо отмените задачи; workflow_start регистрируйте только для утверждённого плана.`
-    : ' Ни одна задача плана не готова к ревью: review-plan — только после разбора этих задач; workflow_start регистрируйте только для утверждённого плана.';
-  return `План доски ${boardId} не утверждён (черновиков: ${plan.drafts.length}${plan.stale.length ? `, утверждено при другой политике: ${plan.stale.length}` : ''}).${unverified}${blocked} workflow_start отправил бы на ревью весь план и после утверждения запустил бы все его задачи: выбор объёма — решение ведущего или пользователя.${next}`;
+    ? ` Проведите ревью плана с явной областью (plan_review ${reviewArgs(s, whole)}, CLI devcontour review-plan --board ${boardId} ${tasks}--author-runtime codex|claude --workspace …, оставив только задачи к исполнению; ревью плана проверяет и привязки к историям INTENT, чего эта подсказка не делает) или сначала исправьте либо отмените задачи; workflow_start регистрируйте только для утверждённого плана.`
+    : ` Ни одна задача плана не готова к ревью: ревью — только после разбора этих задач; разобранные выпускайте отдельно (их id — в tasks) — plan_review {"boardId": ${JSON.stringify(boardId)}, "tasks": ["ID"], "authorRuntime": "codex|claude"} (CLI devcontour review-plan --board ${boardId} --tasks ID,ID), остальные черновики останутся черновиками. workflow_start регистрируйте только для утверждённого плана.`;
+  return `План доски ${boardId} не утверждён (черновиков: ${plan.drafts.length}${plan.stale.length ? `, утверждено при другой политике: ${plan.stale.length}` : ''}).${stopper}${unverified}${misrouted}${blocked} workflow_start отправил бы на ревью весь план и после утверждения запустил бы все его задачи: выбор объёма — решение ведущего или пользователя.${next}`;
 }
 
 const failedRu = (error: string | undefined) => (error ? ': ' + error : '');
@@ -589,8 +622,8 @@ const ru: Catalog = {
         ? 'Оба решения — пользователя, центр внимания показывает их оператору: спросите пользователя; сами не поднимайте бюджет, не повторяйте задачу и не принимайте доску.'
         : 'Приёмка без задачи — решение пользователя, центр внимания показывает его оператору: сами доску не принимайте.';
     const second = p.allCancelled
-      ? `(2) все задачи ревизии отменены, принимать нечего: по решению пользователя ведущий планирует новую ревизию доски ${s.boardId!}`
-      : `(2) оператор принимает ревизию без задачи ${task} в панели (страница доски, «Принять доску»), когда остальные задачи готовы`;
+      ? `(2) все задачи ревизии отменены, принимать нечего: по решению пользователя ведущий планирует работу на новой доске (plan_import без boardId, затем workflow_start {"kind": "board"}; plan_import с boardId ждёт принятой ревизии)`
+      : `(2) оператор принимает ревизию без задачи ${task} в панели (страница доски, «Принять доску»), когда остальные задачи готовы; (3) замена — на новой доске (plan_import без boardId, затем для неё workflow_start {"kind": "board"}; черновики, которым место там, переносит task_move): задача, добавленная в эту ревизию, пошла бы без задания, которое её чинит и принимает`;
     return `Задание ведущего доски ${s.boardId!} ${p.live ? 'остановится на следующем такте' : 'остановлено'}${failedRu(p.error)}: задача ${task} ${who}${p.budget ? ', когда упёрлась в бюджет' : ''}, а выданная задача из работы задания не выпадает (D46, docs/decisions.md), поэтому workflow_retry и workflow_start его не продвинут. Пути восстановления: ${first}; ${second}. ${owner}`;
   },
   'job-retry': (p, s) =>

@@ -2,7 +2,8 @@
 // следующем такте — чистые правила без записи. Цикл исполняет ровно эти
 // решения, пакет передачи контекста (`session_handoff`) объясняет по ним
 // следующий шаг: правила одни, разойтись им негде.
-import type { WorkflowJob } from '../core/lead-workflow.ts';
+import { LeadWorkflow, type WorkflowJob } from '../core/lead-workflow.ts';
+import { boardOwner } from '../core/sync-state.ts';
 import {
   DomainError,
   unverifiedFinding,
@@ -13,6 +14,7 @@ import {
 import type { DevContour } from '../core/service.ts';
 import { carriedTaskIds, heldBaseOf, staleBaseStop } from '../core/work-status.ts';
 import { repairDecision, type RepairDecision } from '../core/repair.ts';
+import { findingOutsideScope } from '../core/workflow.ts';
 
 /** Решение по эпизоду восстановления свойства (`recoverProperties`). */
 export type RecoveryStep =
@@ -244,6 +246,12 @@ export function unapprovedTasks(h: DevContour, s: DevContourState, tasks: readon
     drafts: drafts.map((t) => t.id),
     stale: tasks.filter((t) => t.status !== 'draft' && h.approvalStale(t)).map((t) => t.id),
     unverified: drafts.filter(unverifiedFinding).map((t) => t.id),
+    // Черновики находок, чья роль не может изменить файл находки (F73):
+    // разобранные и нет — роль выбирают при разборе.
+    misrouted: drafts.flatMap((t) => {
+      const out = findingOutsideScope(h.config, t);
+      return out ? [{ id: t.id, role: t.role, ...out }] : [];
+    }),
     blocked: drafts
       .filter((t) => !unverifiedFinding(t))
       .flatMap((t) => {
@@ -290,8 +298,13 @@ export function loopOutlook(h: DevContour, s: DevContourState, job: WorkflowJob)
   const found = boardTasks(s, job.id);
   if (!found) return { step: 'none' };
   const { revision, tasks } = found;
-  if (job.stage === 0)
+  if (job.stage === 0) {
+    // Отменённая выданная задача остановит любую стадию задач (D46): ревью
+    // плана до неё выпустило бы задачи, которые задание не доведёт (F75).
+    const stop = stageZeroStop(h, s, job, tasks);
+    if (stop) return { step: 'stop', ...stop };
     return planApproved(h, revision, tasks) ? { step: 'advance' } : { step: 'review-plan' };
+  }
   // Стадии исполнения и приёмки ведут задачи без отменённых ведущим (`leadScope`).
   const scope = leadScope(tasks, s.runs);
   if (scope.stop) return { step: 'stop', ...scope.stop };
@@ -367,4 +380,106 @@ export function loopAhead(
     outlook = loopOutlook(h, s, { ...job, stage });
   }
   return { stage, outlook };
+}
+
+/** Задачу уже выдавали: попытка, отказ, исчерпанный бюджет или прогон. */
+export const issuedTask = (
+  t: Pick<Task, 'id' | 'attempt' | 'failure' | 'neutralFailures'>,
+  runs: DevContourState['runs'],
+) => t.attempt > 0 || !!t.failure || !!t.neutralFailures || runs.some((r) => r.taskId === t.id);
+
+/**
+ * Отменённая задача текущей ревизии доски, на которой остановится любое
+ * задание этой ревизии (D46, F75): отменённая человеком, без актёра или
+ * ведущим после выдачи — то, что `leadScope` оставляет в работе. Пока она
+ * в ревизии, ни одно задание доски её не примет: задачи, добавленные и
+ * утверждённые в эту ревизию, пойдут без задания, которое их чинит и
+ * принимает.
+ */
+export function revisionStopper(s: DevContourState, boardId: string): Task | undefined {
+  const found = boardTasks(s, boardId);
+  if (!found || found.revision.status === 'accepted') return undefined;
+  return leadScope(found.tasks, s.runs).tasks.find((t) => t.status === 'cancelled');
+}
+
+/** Пути после остановки задания отменой выданной задачи (D46): текст подсказок CLI. */
+const stopRoutes = (taskId: string) =>
+  `пути: повтор задачи, если она ещё нужна (task_retry или devcontour retry --task ${taskId} --by host; отмену человеком повторяет только пользователь), приёмка ревизии без неё оператором в панели, либо замена на новой доске (plan_import без boardId, затем workflow_start {"kind": "board"} для новой доски) — добавленная в эту ревизию задача пошла бы без задания`;
+
+/**
+ * Предупреждение о доске, задание которой остановлено отменённой задачей
+ * (F75): для ответов `task_create` и ревью плана.
+ */
+export function stopperWarning(s: DevContourState, boardId: string) {
+  const stopper = revisionStopper(s, boardId);
+  if (!stopper) return {};
+  return {
+    jobStop: {
+      taskId: stopper.id,
+      warning: `Задача ${stopper.id} ревизии доски ${boardId} ${stopper.cancelledBy === 'host' ? 'отменена ведущим после выдачи' : 'отменена человеком'} (D46): любое задание ведущего этой ревизии остановится на ней, поэтому утверждённые здесь задачи никто не будет чинить и принимать; ${stopRoutes(stopper.id)}.`,
+    },
+  };
+}
+
+/**
+ * Что отмена задачи `taskId` актёром `by` сделает с заданиями её доски
+ * (F75): по D46 отмена человеком или отмена ведущим уже выданной задачи
+ * останавливает задание доски навсегда — `workflow_retry` и `workflow_start`
+ * его не продвинут, а ChangeSet с этой доской будет ждать её приёмки.
+ * `undefined` — отмена задание не останавливает (невыданная задача ведущего,
+ * задача вне текущей ревизии, уже отменённая или выполненная).
+ */
+export function cancelImpact(h: DevContour, taskId: string, by: 'host' | 'operator') {
+  const s = h.store.read();
+  const t = s.tasks.find((x) => x.id === taskId);
+  if (!t || t.status === 'cancelled' || t.status === 'done') return undefined;
+  const board = s.boards.find((b) => b.revisions.at(-1)!.taskIds.includes(taskId));
+  if (!board || board.revisions.at(-1)!.status === 'accepted') return undefined;
+  const issued = issuedTask(t, s.runs);
+  if (by === 'host' && !issued) return undefined;
+  const live = (j: WorkflowJob) => j.status === 'queued' || j.status === 'running';
+  const workflow = new LeadWorkflow(h);
+  const owner = boardOwner(board, s);
+  const jobs = [
+    ...workflow
+      .list(owner)
+      .filter((j) => j.kind === 'board' && j.id === board.id && live(j))
+      .map((j) => ({ key: j.key, kind: j.kind, id: j.id, status: j.status, stage: j.stage })),
+    ...workflow
+      .list()
+      .filter(
+        (j) =>
+          j.kind === 'changeset' &&
+          live(j) &&
+          s.changeSets.some((c) => c.id === j.id && c.boardIds.includes(board.id)),
+      )
+      .map((j) => ({ key: j.key, kind: j.kind, id: j.id, status: j.status, stage: j.stage })),
+  ];
+  return {
+    boardId: board.id,
+    taskId,
+    issued,
+    jobs,
+    warning: `Отмена задачи ${taskId}${issued ? ' после выдачи' : ' человеком'} навсегда останавливает задание ведущего доски ${board.id} (D46)${jobs.length ? `: действующие задания ${jobs.map((j) => j.key.slice(0, 8)).join(', ')} остановятся на следующем такте` : ''}; workflow_retry и workflow_start его не продвинут, ChangeSet с этой доской будет ждать её приёмки; ${stopRoutes(taskId)}.`,
+  };
+}
+
+/**
+ * Остановка стадии 0 задания доски (F75): в ревизии есть отменённая задача,
+ * на которой остановится стадия задач (D46). Причина — та же, что у
+ * остановки на стадии задач (`repairStep`), чтобы шаг передачи узнал её
+ * (`job-cancelled-task`).
+ */
+export function stageZeroStop(
+  h: DevContour,
+  s: DevContourState,
+  job: WorkflowJob,
+  tasks: readonly Task[],
+): { taskId: string; reason: string } | undefined {
+  const stopper = leadScope(tasks, s.runs).tasks.find((t) => t.status === 'cancelled');
+  if (!stopper) return undefined;
+  const decided = repairStep(h, job, [stopper.id]);
+  return decided?.action === 'stop'
+    ? { taskId: decided.taskId ?? stopper.id, reason: decided.reason }
+    : undefined;
 }

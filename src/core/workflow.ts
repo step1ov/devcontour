@@ -435,3 +435,81 @@ export const withinPaths = (path: string, prefixes: string[]) =>
   prefixes.some(
     (prefix) => path === prefix || path.startsWith(prefix.endsWith('/') ? prefix : prefix + '/'),
   );
+
+/**
+ * Роли компонента, чья явная область записи покрывает путь, — самые узкие
+ * первыми (длина совпавшего префикса). Роль без области (весь репозиторий)
+ * владельцем не названа: такой совет ничего не сужает.
+ */
+export function pathOwners(config: Config, repositoryId: string, path: string): string[] {
+  const depth = (role: string) =>
+    Math.max(
+      -1,
+      ...(roleBinding(config, role, repositoryId)?.writePaths ?? [])
+        .filter((p) => withinPaths(path, [p]))
+        .map((p) => p.length),
+    );
+  return declaredRoles(config, repositoryId)
+    .filter((role) => depth(role) >= 0)
+    .sort((a, b) => depth(b) - depth(a));
+}
+
+/**
+ * Роль черновика находки (F73): находку чинит роль, которой принадлежит её
+ * путь, а не роль задачи, в которой её нашли. Исполнитель роли источника,
+ * чья область записи путь не покрывает, не вправе изменить файл находки:
+ * утверждённый как есть черновик тратил бы попытку на отказ по области.
+ * Роль источника остаётся, когда её область покрывает путь (или она пишет
+ * весь репозиторий); иначе — самая узкая роль, покрывающая путь. Если такой
+ * роли нет или узких несколько, остаётся роль источника, а `note` говорит
+ * ведущему, что роль нужно выбрать при разборе.
+ */
+export function findingRole(
+  config: Config,
+  repositoryId: string,
+  path: string,
+  sourceRole: string,
+): { role: string; owners: string[]; note?: string } {
+  const own = roleBinding(config, sourceRole, repositoryId)?.writePaths;
+  const owners = pathOwners(config, repositoryId, path);
+  if (!own?.length || withinPaths(path, own)) return { role: sourceRole, owners };
+  const depth = (role: string) =>
+    Math.max(
+      ...(roleBinding(config, role, repositoryId)?.writePaths ?? [])
+        .filter((p) => withinPaths(path, [p]))
+        .map((p) => p.length),
+    );
+  const narrowest = owners.filter((r) => depth(r) === depth(owners[0]));
+  if (narrowest.length === 1)
+    return {
+      role: narrowest[0],
+      owners,
+      note: `Роль ${narrowest[0]} выбрана по области записи пути ${path}; задача-источник — роли ${sourceRole}.`,
+    };
+  return {
+    role: sourceRole,
+    owners,
+    note: narrowest.length
+      ? `Путь ${path} вне области записи роли ${sourceRole}, а покрывают его несколько ролей (${narrowest.join(', ')}): выберите роль при разборе.`
+      : `Путь ${path} вне области записи роли ${sourceRole}, и ни одна роль с явной областью его не покрывает: выберите роль при разборе.`,
+  };
+}
+
+/**
+ * Черновик находки, чья роль не может изменить файл находки (F73): путь
+ * находки вне действующей области записи задачи. `owners` — роли, чья
+ * область путь покрывает. `undefined` — не находка или путь в области.
+ */
+export function findingOutsideScope(
+  config: Config,
+  task: Pick<TaskInput, 'role' | 'repositoryId' | 'writePaths' | 'finding'>,
+): { path: string; owners: string[] } | undefined {
+  const path = task.finding?.path;
+  if (!path) return undefined;
+  const area = effectiveWriteArea(config, task);
+  if (!area || withinPaths(path, area)) return undefined;
+  return {
+    path,
+    owners: pathOwners(config, task.repositoryId, path).filter((r) => r !== task.role),
+  };
+}

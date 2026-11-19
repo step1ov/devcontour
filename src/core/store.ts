@@ -59,6 +59,13 @@ export const BUSY_TIMEOUT_MS = 20_000;
  * меньше предела вызова инструмента агента.
  */
 export const READ_ONLY_BUSY_TIMEOUT_MS = 4_000;
+/**
+ * Размер, до которого усекается файл WAL после его сброса (F77). Документ
+ * состояния — одна строка в десятки мегабайт, и каждая его запись (с
+ * `secure_delete` — вдвое) ложится в WAL; без предела файл оставался
+ * размером с наибольший накопленный журнал (сотни мегабайт) навсегда.
+ */
+export const WAL_SIZE_LIMIT_BYTES = 64 * 1024 * 1024;
 
 /**
  * Отказ SQLite из-за блокировки: базу держит другой процесс (обычно
@@ -425,7 +432,7 @@ export class Store {
       (this.db.prepare('PRAGMA main.journal_mode').get() as { journal_mode: string })
         .journal_mode === 'wal';
     this.db.exec(
-      `${keepWal ? '' : `PRAGMA journal_mode=${journalMode ?? (locations?.length ? 'DELETE' : 'WAL')};`} PRAGMA synchronous=FULL; PRAGMA secure_delete=ON;`,
+      `${keepWal ? '' : `PRAGMA journal_mode=${journalMode ?? (locations?.length ? 'DELETE' : 'WAL')};`} PRAGMA synchronous=FULL; PRAGMA secure_delete=ON; PRAGMA journal_size_limit=${WAL_SIZE_LIMIT_BYTES};`,
     );
     this.db.exec(
       'CREATE TABLE IF NOT EXISTS state (id INTEGER PRIMARY KEY CHECK(id=1), data TEXT NOT NULL); CREATE TABLE IF NOT EXISTS events (id INTEGER PRIMARY KEY AUTOINCREMENT, at TEXT NOT NULL, type TEXT NOT NULL, data TEXT NOT NULL); CREATE TABLE IF NOT EXISTS revision (id INTEGER PRIMARY KEY CHECK(id=1), n INTEGER NOT NULL, lease INTEGER NOT NULL DEFAULT 0);',
@@ -603,6 +610,7 @@ export class Store {
   private readStartedAt = 0;
   private atomicRead<T>(read: () => T): T {
     if (this.transaction || this.reading) return read();
+    this.watch();
     this.readStartedAt = Date.now();
     this.db.exec('BEGIN');
     this.reading = true;
@@ -675,6 +683,109 @@ export class Store {
         rows.set(row.id, { ...row, schema });
     }
     return rows;
+  }
+  /**
+   * Проверка задержки основного потока этого процесса (F74): её ставит
+   * планировщик сервера (`Scheduler.watchLeases`). Она идёт перед каждой
+   * внешней транзакцией и каждым согласованным чтением этого соединения —
+   * до того, как продление, запись фазы или evidence попытки либо истечение
+   * такта решат по сроку аренды, — и вне их: продление после задержки
+   * фиксируется своей транзакцией и не откатывается вместе с вызвавшей.
+   */
+  leaseWatch?: () => void;
+  private watching = false;
+  private watch() {
+    if (!this.leaseWatch || this.watching || this.transaction || this.reading) return;
+    this.watching = true;
+    try {
+      this.leaseWatch();
+    } catch {
+      /* Проверка задержки — защита сроков; её сбой не отменяет операцию. */
+    } finally {
+      this.watching = false;
+    }
+  }
+  /**
+   * Счётчики базы, последний раз виденные этим процессом (после его записи
+   * или при проверке задержки). Совпадение с текущими после задержки — ни
+   * один другой процесс за это время в базу не писал.
+   */
+  private seen?: string;
+  private counters() {
+    const v = this.version();
+    return `${v.revision}:${v.lease}`;
+  }
+  /**
+   * Счётчики базы сейчас (вне транзакции) — для отметки `noteSeen` после
+   * проверки задержки: прочитанные до проверки, они не захватят чужую
+   * запись, сделанную, пока процесс стоял между проверкой и отметкой.
+   */
+  seenNow(): string | undefined {
+    return !this.transaction && !this.reading && this.hasRevision ? this.counters() : undefined;
+  }
+  /** Отметить счётчики базы (`seenNow`) как виденные этим процессом. */
+  noteSeen(seen = this.seenNow()) {
+    if (seen !== undefined) this.seen = seen;
+  }
+  /**
+   * Сроки аренды попыток владельца `owner`, ещё действовавших в начале
+   * задержки его основного потока (`until > aliveAt`), продлеваются до
+   * `until` (F74). Владелец — живой процесс, который сам стоял: его попытки
+   * (их исполнители — отдельные процессы) не продлены только потому, что не
+   * исполнялся интервал продления. Продления нет, если за задержку в базу
+   * писал другой процесс (`foreign`): его решение могло опереться на
+   * истёкший срок (например, начало совместной проверки ждёт истечения
+   * аренды всех попыток), и ожившая попытка его бы обошла. Строки чужого
+   * владельца, истёкшие до задержки, и снятые (попытка не активна — строки
+   * нет) не меняются. Только вне транзакции: продление фиксируется само.
+   */
+  extendStalledLeases(
+    owner: string,
+    aliveAt: number,
+    until: number,
+    busyMs = 2000,
+  ): { ids: string[]; foreign: boolean } {
+    if (this.transaction || this.reading)
+      throw new Error('Продление после задержки — своей транзакцией');
+    // Своя транзакция ждёт занятую базу недолго: вызывающий — основной поток
+    // сервера, только что простоявший.
+    this.db.exec(`PRAGMA busy_timeout=${Math.max(0, Math.floor(busyMs))};`);
+    // Своя транзакция не проходит проверку задержки (`watch`): когда задержку
+    // заметил интервал монитора или такт, а не транзакция, проверка перед
+    // BEGIN задержки уже не видит и отметила бы текущие счётчики — с чужой
+    // записью за задержку — как виденные, и сверка ниже её бы пропустила.
+    const watching = this.watching;
+    this.watching = true;
+    try {
+      return this.atomic(() => {
+        // Под локом записи: между сверкой и продлением чужой записи нет.
+        if (this.seen === undefined || this.seen !== this.counters())
+          return { ids: [], foreign: true };
+        const ids: string[] = [];
+        for (const schema of this.schemas()) {
+          if (!this.hasLeaseTable(schema)) continue;
+          const rows = this.db
+            .prepare(
+              `SELECT id FROM ${schema}.leases WHERE kind='attempt' AND owner=? AND until>? AND until<?`,
+            )
+            .all(owner, aliveAt, until) as { id: string }[];
+          for (const { id } of rows) {
+            this.db
+              .prepare(
+                `UPDATE ${schema}.leases SET until=? WHERE kind='attempt' AND id=? AND owner=?`,
+              )
+              .run(until, id, owner);
+            ids.push(id);
+          }
+        }
+        // Как продление строкой: счётчик сроков не растёт, срок накладывается
+        // из строки при каждом чтении (`withLeases`).
+        return { ids, foreign: false };
+      });
+    } finally {
+      this.watching = watching;
+      this.db.exec(`PRAGMA busy_timeout=${BUSY_TIMEOUT_MS};`);
+    }
   }
   /** Строка аренды одной попытки — без чтения документа. */
   attemptLeaseRow(id: string): AttemptLeaseRow | undefined {
@@ -938,6 +1049,7 @@ export class Store {
     const point = 'nested_' + ++this.savepoint;
     const pending = this.projectionPending;
     const written = this.written;
+    if (!outer) this.watch();
     this.db.exec(outer ? `SAVEPOINT ${point}` : 'BEGIN IMMEDIATE');
     this.transaction = true;
     if (!outer) {
@@ -945,6 +1057,7 @@ export class Store {
       this.startKey = this.components ? undefined : this.versionKey();
     }
     let value: T;
+    let seenAtCommit: string | undefined;
     try {
       value = action();
       if (value && typeof (value as any).then === 'function')
@@ -959,6 +1072,11 @@ export class Store {
           ? this.committed
           : undefined;
       const key = !outer && (this.written || carried) ? this.versionKey() : undefined;
+      // Счётчики для проверки задержки (F74) — до COMMIT, под локом записи:
+      // прочитанные после него захватили бы чужую запись, сделанную, пока
+      // этот процесс стоял между COMMIT и отметкой.
+      seenAtCommit =
+        !outer && this.leaseWatch && this.hasRevision ? this.counters() : undefined;
       this.db.exec(outer ? `RELEASE ${point}` : 'COMMIT');
       if (key && this.written) this.committed = { key, ...this.written };
       // На месте: замыкание `frozen()`, полученное в транзакции, заполняет тот же объект.
@@ -980,6 +1098,8 @@ export class Store {
     if (!outer) {
       this.written = undefined;
       this.startKey = undefined;
+      // Своя запись — не чужая для проверки задержки (`extendStalledLeases`).
+      if (seenAtCommit !== undefined) this.seen = seenAtCommit;
     }
     if (!outer && this.projectionPending) {
       this.projectionPending = false;

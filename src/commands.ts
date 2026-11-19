@@ -69,6 +69,7 @@ import { InputService } from './application/input.ts';
 import { DiscussionService } from './application/discussion.ts';
 import { randomUUID } from 'node:crypto';
 import { acceptBoard, reviewContract, reviewPlan } from './runner/agent-control.ts';
+import { cancelImpact } from './runner/lead-outlook.ts';
 import { currentContracts, specDigest } from './core/service.ts';
 import { WorkspaceRunner } from './runner/workspace.ts';
 import { setupWorkspace } from './runner/workspace-setup.ts';
@@ -657,6 +658,7 @@ async function main() {
     'decision-confirm',
     'decision-reverse',
     'edit-task',
+    'move-task',
     'edit-board',
     'task-feature',
     'task-story',
@@ -1569,7 +1571,25 @@ async function main() {
       else if (operation === 'cancel') {
         if (!args.includes('--reason') || !option('--reason', '').trim())
           throw new Error('Укажите --reason: почему задача больше не нужна');
-        result = h.cancel(option('--task', ''), option('--reason', ''), actorOf());
+        // Отмена выданной задачи по D46 навсегда останавливает задание её
+        // доски (F75): ведущий подтверждает это явно, ответ называет пути.
+        // Оценка и отмена — одна транзакция: выдача задачи между ними не
+        // обходит подтверждение.
+        result = h.store.atomic(() => {
+          const impact = cancelImpact(h, option('--task', ''), actorOf());
+          if (impact?.jobs.length && actorOf() === 'host' && !args.includes('--stop-job'))
+            throw new Error(
+              `${impact.warning} Повторите с --stop-job, если задание доски нужно остановить`,
+            );
+          return {
+            ...h.cancel(option('--task', ''), option('--reason', ''), actorOf()),
+            ...(impact ? { jobStop: impact } : {}),
+          };
+        });
+      } else if (operation === 'move-task') {
+        if (!args.includes('--reason') || !option('--reason', '').trim())
+          throw new Error('Укажите --reason: почему задача переходит на другую доску');
+        result = h.moveTask(option('--task', ''), option('--board', ''), option('--reason', ''));
       } else if (operation === 'task-feature')
         result = h.bindFeature(option('--task', ''), option('--feature', ''));
       else if (operation === 'task-story') {
