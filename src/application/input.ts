@@ -778,18 +778,63 @@ export class InputService {
       (work.status === 'failed' && work.failureKind === 'needs-input') || work.status === 'ready';
     if (!atOrigin) return false;
     if (this.originOf(view, request) !== 'moved') return false;
-    const contracts = executionOf(this.h).store.stateOf(view).contracts;
-    return inputReviewRounds(view, request.id).some((round) => {
-      const ids = routeRules(round, request);
-      if (!ids || !round.contextDigest || !this.carries(request, round.contextDigest).ok)
+    const state = executionOf(this.h).store.stateOf(view);
+    const task = state.tasks.find((t) => t.id === request.workId);
+    if (!task) return false;
+    const rounds = inputReviewRounds(view, request.id);
+    // Отклонение на правленой постановке — обычное отклонение: ответ
+    // исправляет оператор, а выход из сдвинутой остановки снова его.
+    const last = rounds.at(-1);
+    if (
+      last &&
+      !last.approved &&
+      last.digest === inputReviewDigest(this.h, task, request.id, answer.digest)
+    )
+      return false;
+    const operations = this.operations();
+    return rounds.some((round) => {
+      // Проверенный маршрут (`routeOf`): каждый названный контракт закреплён
+      // за задачей или заменён в ней более поздней редакцией той же цепочки.
+      const route = this.routeOf(request, task, round, false, state.contracts);
+      const op = route?.operation;
+      if (op?.status !== 'completed' || !op.contractId) return false;
+      // Редакция, которую провела операция, закреплена за задачей сейчас, и
+      // задачу перепривязала именно она, после вопроса.
+      if (!task.contracts.includes(op.contractId) || !op.rebound?.includes(task.id)) return false;
+      const at = reboundAt(op);
+      if (at < request.createdAt) return false;
+      // Позже её задачу не перепривязывала и не держит другая операция.
+      if (
+        operations.some(
+          (other) =>
+            other.id !== op.id &&
+            other.startedAt > op.startedAt &&
+            other.status !== 'abandoned' &&
+            (!!other.rebound?.includes(task.id) ||
+              (!!other.held?.includes(task.id) && other.status !== 'completed')),
+        )
+      )
         return false;
-      const op = this.routeOperation(round, ids, contracts);
-      return (
-        op?.status === 'completed' &&
-        !!op.rebound?.includes(request.workId) &&
-        reboundAt(op) >= request.createdAt
-      );
+      return this.editedOnlyAfter(task.id, request.createdAt, at);
     });
+  }
+
+  /**
+   * Постановку задачи правили только после перепривязки операцией (`at`),
+   * а перепривязки вручную позже не было: правка до операции — другое
+   * решение, чем правка, которой потребовало её ревью плана (F85). Чтение
+   * журнала с момента вопроса.
+   */
+  private editedOnlyAfter(taskId: string, since: string, at: string) {
+    const touches = (data: unknown) =>
+      Array.isArray(data)
+        ? data.includes(taskId)
+        : !!data && typeof data === 'object' && (data as { id?: unknown }).id === taskId;
+    return !this.h.store
+      .eventsSince(['task.edited', 'task.rebound'], since)
+      .some((e) =>
+        e.type === 'task.edited' ? e.at < at && touches(e.data) : e.at > at && touches(e.data),
+      );
   }
 
   /**
