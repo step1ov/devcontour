@@ -250,5 +250,12 @@
 // прочие операции байтово прежние. Ревью 1: причина до 300 знаков, until —
 // строгая дата ISO 8601, описания называют эпизод закрытия и снятие отметки
 // навсегда.
-export const CATALOG_DIGEST = '08c2f9cf0e935bbd817e42a888bbfe954cfe45987b55dfd231638619c03a2849';
+// Намеренное изменение (вопросы владельцу по разделам): preparation_question
+// принимает section и stage development, choices с consequence, recommended,
+// links, blocks, origin и revise, его stage необязателен; preparation_resolve —
+// refs и необязательный stage; описания preparation_question,
+// preparation_resolve и session_handoff называют разделы, удержание
+// черновиков (QUESTION_PENDING), host.questions и шаги owner-answer и
+// owner-question-pending; прочие операции байтово прежние.
+export const CATALOG_DIGEST = 'b6ef4f820432baedcfcf0cc1f86eb2d1d51ac1bd4d480c8dc3ab0c21767abf42';
 export const SNAPSHOT_VERSION = '0.4.0-alpha.7';

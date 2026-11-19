@@ -209,25 +209,102 @@ export const preparationActivity = z.strictObject({
   stage: activityStage,
   note,
 });
+// Owner questions are classified by the panel section where the owner reads
+// and answers them: product (scope, promises, content), architecture (stack,
+// contract method, protected paths), design (visual, interaction) and
+// development (tooling, environment, gates, budgets). The stage is the tab of
+// that section; development questions never gate a stage submission.
+export const questionSections = ['product', 'architecture', 'design', 'development'] as const;
+export const questionSection = z.enum(questionSections);
+export type QuestionSection = z.infer<typeof questionSection>;
+export const questionStage = activityStage;
+export type QuestionStage = z.infer<typeof questionStage>;
+export const QUESTION_LIMITS = {
+  choices: 10,
+  linkedTasks: 20,
+  linkedBoards: 5,
+  linkedContracts: 5,
+  linkedRequests: 5,
+  blockedTasks: 20,
+} as const;
+export const questionChoice = z.strictObject({
+  label: z.string().trim().min(1).max(300),
+  consequence: z.string().trim().min(1).max(600).optional(),
+});
+export const questionLinks = z.strictObject({
+  taskIds: z.array(id).max(QUESTION_LIMITS.linkedTasks).optional(),
+  boardIds: z.array(id).max(QUESTION_LIMITS.linkedBoards).optional(),
+  contractIds: z.array(id).max(QUESTION_LIMITS.linkedContracts).optional(),
+  // Writer questions (input requests, IR-…) the owner decision is about.
+  requestIds: z
+    .array(z.string().regex(/^IR-[A-Za-z0-9_-]{1,77}$/))
+    .max(QUESTION_LIMITS.linkedRequests)
+    .optional(),
+});
+// Drafts held until the question is resolved (a decision records the answer)
+// or withdrawn: they stay out of plan review and approval refuses them.
+export const questionBlocks = z.strictObject({
+  taskIds: z.array(id).min(1).max(QUESTION_LIMITS.blockedTasks),
+});
+// Provenance: a question moved from a repository file keeps its row as
+// `ref`; repeating the same kind and ref returns the existing question.
+export const questionOrigin = z.strictObject({
+  kind: z.enum(['lead', 'writer-question', 'markdown']),
+  ref: z.string().trim().min(1).max(200).optional(),
+});
 export const preparationQuestion = z.strictObject({
   id,
-  stage,
+  stage: questionStage,
+  section: questionSection.optional(),
   createdAt: z.iso.datetime(),
+  revisedAt: z.iso.datetime().optional(),
   text: z.string().trim().min(3).max(1500),
   why: z.string().trim().max(600).default(''),
   options: z.array(z.string().trim().min(1).max(300)).max(6).default([]),
+  // Supersedes `options` (kept for earlier rows): each choice may name its consequence.
+  choices: z.array(questionChoice).max(QUESTION_LIMITS.choices).optional(),
+  // The lead's recommendation: an index into the choices.
+  recommended: z
+    .number()
+    .int()
+    .min(0)
+    .max(QUESTION_LIMITS.choices - 1)
+    .optional(),
+  links: questionLinks.optional(),
+  blocks: questionBlocks.optional(),
+  origin: questionOrigin.optional(),
   status: z.enum(['open', 'answered', 'withdrawn']),
   answer: z
-    .strictObject({ at: z.iso.datetime(), text: z.string().trim().min(1).max(3000) })
+    .strictObject({
+      at: z.iso.datetime(),
+      text: z.string().trim().min(1).max(3000),
+      // The chosen option, beside the free text.
+      choice: z
+        .number()
+        .int()
+        .min(0)
+        .max(QUESTION_LIMITS.choices - 1)
+        .optional(),
+    })
     .optional(),
+});
+// What the decision changed: the record points at the revision, board,
+// tasks, contract change or ADR that carry the answer.
+export const recordRefs = z.strictObject({
+  productRevision: z.number().int().positive().optional(),
+  boardId: id.optional(),
+  taskIds: z.array(id).max(20).optional(),
+  contractChangeId: id.optional(),
+  adr: z.string().trim().min(3).max(300).optional(),
 });
 export const preparationRecord = z.strictObject({
   id,
-  stage,
+  stage: questionStage,
   createdAt: z.iso.datetime(),
   statement: z.string().trim().min(3).max(600),
   rationale: z.string().trim().min(3).max(1500),
   questionId: id.optional(),
+  refs: recordRefs.optional(),
   // A decision that no longer holds is struck out, never erased: the journal
   // has to show that it was once made and why it was taken back.
   withdrawn: z
@@ -400,15 +477,44 @@ export const preparationInputs = {
     stage: activityStage.default('product'),
     note,
   }),
+  // Owner questions: before setup and after it. `section` (or `stage`)
+  // classifies where the owner answers; choices carry consequences and the
+  // lead's `recommended` index; `blocks` holds drafts until resolved.
   preparation_question: z.strictObject({
     changeId: id.optional(),
-    stage: stage.default('product'),
+    stage: questionStage.optional(),
+    section: questionSection.optional(),
     add: z
       .array(
         z.strictObject({
           text: z.string().trim().min(3).max(1500),
           why: z.string().trim().max(600).default(''),
           options: z.array(z.string().trim().min(1).max(300)).max(6).default([]),
+          stage: questionStage.optional(),
+          section: questionSection.optional(),
+          choices: preparationQuestion.shape.choices,
+          recommended: preparationQuestion.shape.recommended,
+          links: questionLinks.optional(),
+          blocks: questionBlocks.optional(),
+          origin: questionOrigin.optional(),
+        }),
+      )
+      .max(10)
+      .default([]),
+    // An open question may be revised (new attention version); fields left
+    // out keep their values, `null` clears an optional one.
+    revise: z
+      .array(
+        z.strictObject({
+          id,
+          text: z.string().trim().min(3).max(1500).optional(),
+          why: z.string().trim().max(600).optional(),
+          stage: questionStage.optional(),
+          section: questionSection.optional(),
+          choices: z.array(questionChoice).max(QUESTION_LIMITS.choices).nullable().optional(),
+          recommended: preparationQuestion.shape.recommended.nullable(),
+          links: questionLinks.nullable().optional(),
+          blocks: questionBlocks.nullable().optional(),
         }),
       )
       .max(10)
@@ -419,21 +525,41 @@ export const preparationInputs = {
   // that no longer holds, and leaving it standing misleads whoever reads it.
   preparation_resolve: z.strictObject({
     changeId: id.optional(),
-    stage: stage.default('product'),
+    // Without it: the stage of the question, otherwise product.
+    stage: questionStage.optional(),
     statement: z.string().trim().min(3).max(600).optional(),
     rationale: z.string().trim().min(3).max(1500).optional(),
     questionId: id.optional(),
+    refs: recordRefs.optional(),
     withdraw: z
       .array(z.strictObject({ id, reason: z.string().trim().min(3).max(600) }))
       .max(10)
       .default([]),
   }),
 };
-export const preparationAnswer = z.strictObject({
-  changeId: id,
-  questionId: id,
-  text: z.string().trim().min(1).max(3000),
-});
+export const preparationAnswer = z
+  .strictObject({
+    changeId: id,
+    questionId: id,
+    text: z.string().trim().min(1).max(3000).optional(),
+    // Version of the question the owner saw (`version` in preparation_status):
+    // a revised question refuses the answer instead of mapping the index anew.
+    expectedVersion: z
+      .string()
+      .regex(/^[a-f0-9]{32}$/)
+      .optional(),
+    // Index of the chosen option; the text then may be left out.
+    choice: z
+      .number()
+      .int()
+      .min(0)
+      .max(QUESTION_LIMITS.choices - 1)
+      .optional(),
+  })
+  .refine(
+    (v) => v.text !== undefined || v.choice !== undefined,
+    'Введите ответ или выберите вариант',
+  );
 export const preparationDecision = z.strictObject({
   changeId: id,
   stage,

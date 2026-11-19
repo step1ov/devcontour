@@ -1,3 +1,5 @@
+import { questionSummary } from '../core/owner-questions.ts';
+import { hrefs } from '../application/panel-links.ts';
 import { notApplicableLine } from '../core/evidence-verdict.ts';
 import { workspaceDescription } from '../runner/workspace-mode.ts';
 import { DiscussionService } from '../application/discussion.ts';
@@ -454,6 +456,24 @@ export async function serve(
             },
           );
           jsonText(res, etaggedBody(await pending, known));
+          return;
+        }
+        // Сводка вопросов владельцу по разделам (главная панели): открытые,
+        // ответы без решения ведущего, удержанные черновики и до пяти записей.
+        // До setup и после него; только чтение.
+        if (req.method === 'GET' && path === '/api/questions/summary' && preparationStore) {
+          const store = preparationStore;
+          // Замороженный общий снимок: опрос главной не разбирает документ заново.
+          const shared = store.readShared();
+          json(res, 200, {
+            revision: shared.revision,
+            generatedAt: new Date().toISOString(),
+            sections: questionSummary(
+              shared.state,
+              hrefs.preparation,
+              attentionOf(store).redactor(),
+            ),
+          });
           return;
         }
         // Отметки «прочитано» и «увидел» — локальные записи оператора, не решение.

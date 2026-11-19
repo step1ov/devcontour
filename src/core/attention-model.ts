@@ -71,6 +71,10 @@ export const ATTENTION_LIMITS = {
   choiceHint: 300,
 } as const;
 
+/** Раздел панели, к которому относится карточка (вопросы владельцу — по разделу вопроса). */
+export const attentionSections = ['product', 'architecture', 'design', 'development'] as const;
+export type AttentionSection = (typeof attentionSections)[number];
+
 export const sourceKeyPattern = /^[a-z-]+(:[A-Za-z0-9:._#@-]+)?$/;
 const sourceKey = z.string().max(ATTENTION_LIMITS.sourceKey).regex(sourceKeyPattern);
 const occurrenceId = z.string().min(1).max(ATTENTION_LIMITS.occurrence);
@@ -118,6 +122,11 @@ export interface AttentionItem {
   source: AttentionSource;
   category: AttentionCategory;
   actor: AttentionActor;
+  /**
+   * Раздел панели: вопросы подготовки — по разделу вопроса, этапы — по этапу,
+   * быстрый маршрут — продукт, источники движка — разработка.
+   */
+  section: AttentionSection;
   title: string;
   reason: string;
   impact: { tasks: number; waiting: number; boards: string[]; taskIds: string[] };
@@ -176,6 +185,7 @@ export const attentionInputs = {
     view: z.enum(['active', 'history']).default('active'),
     actor: actor.optional(),
     category: category.optional(),
+    section: z.enum(attentionSections).optional(),
     component: z
       .string()
       .regex(/^[A-Za-z0-9_-]{1,80}$/)

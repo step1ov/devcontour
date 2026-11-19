@@ -1,3 +1,4 @@
+import { questionHolds } from '../core/owner-questions.ts';
 import { clipAtBoundary } from '../core/clip.ts';
 import { randomUUID } from 'node:crypto';
 import { readFile, writeFile } from 'node:fs/promises';
@@ -591,6 +592,7 @@ export class ContractChanges {
     // Новое задание доски отправит на ревью весь её план: неразобранные
     // находки, которые операция оставила вне ревью (F81), сначала
     // разбираются, переносятся или отменяются.
+    const holds = questionHolds(s);
     // Все неразобранные находки этих досок, не только перепривязанные:
     // ревью нового задания видит весь план.
     const untriaged = [
@@ -601,7 +603,8 @@ export class ContractChanges {
       ),
     ].filter((id) => {
       const t = s.tasks.find((x) => x.id === id);
-      return t?.status === 'draft' && unverifiedFinding(t);
+      // Черновик, который держит вопрос владельцу, ждёт ответа, а не разбора.
+      return t?.status === 'draft' && unverifiedFinding(t) && !holds.has(id);
     });
     const first = untriaged.length
       ? ` Сначала разберите (edit-task), перенесите (task_move) или отмените (cancel --by host) неразобранные находки этих досок: ${untriaged.join(', ')} — новое задание отправит на ревью весь план доски, и ревьюер отверг бы их.`
@@ -1456,8 +1459,12 @@ export class ContractChanges {
           );
           // Неразобранная находка — не готовый к утверждению черновик (F81):
           // перепривязка её сохраняет, ревью плана её не видит в области.
+          const holds = questionHolds(s);
           const onBoard = candidates.filter((id) => {
             const t = s.tasks.find((x) => x.id === id);
+            // Черновик, который держит вопрос владельцу, ревью не выпустит:
+            // он остаётся черновиком с новой привязкой до решения по вопросу.
+            if (holds.has(id)) return false;
             if (t && unverifiedFinding(t)) {
               kept.add(id);
               return false;

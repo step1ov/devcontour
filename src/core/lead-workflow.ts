@@ -1,3 +1,4 @@
+import { assertNotHeld } from './owner-questions.ts';
 import { assertAnyDevelopmentReady, assertTaskPreparation } from './preparation.ts';
 import { carriedTaskIds } from './work-status.ts';
 import { z } from 'zod';
@@ -568,6 +569,36 @@ export class LeadWorkflow {
     const input = workflowInput.parse(raw);
     // Отложенная доска (F86) заданий не ведёт: старт ждёт снятия отметки.
     if (input.kind === 'board') assertNotParked(this.h, input.id, 'workflow_start');
+    // Задание доски с неутверждённым планом отправит на ревью весь план, а
+    // черновик, который держит вопрос владельцу, ревью не выпустит: отказ
+    // 409 QUESTION_PENDING до регистрации задания.
+    // Повтор для действующего задания того же входа возвращает его
+    // (идемпотентность очереди): удержание отклоняет только регистрацию
+    // нового задания, в том числе на изменившийся вход доски.
+    if (input.kind === 'board') {
+      const s = this.h.store.read();
+      let current: string | undefined;
+      try {
+        current = this.input('board', input.id, s).digest;
+      } catch {
+        current = undefined;
+      }
+      const same = [undefined, ...repositories(this.h.config).map((r) => r.id)]
+        .flatMap((owner) => this.list(owner))
+        .some(
+          (j) =>
+            j.kind === 'board' &&
+            j.id === input.id &&
+            j.inputDigest === current &&
+            (j.status === 'queued' || j.status === 'running'),
+        );
+      const revision = s.boards.find((b) => b.id === input.id)?.revisions.at(-1);
+      if (!same && revision && revision.status !== 'accepted')
+        assertNotHeld(
+          s,
+          revision.taskIds.filter((id) => s.tasks.find((t) => t.id === id)?.status === 'draft'),
+        );
+    }
     return domain(() => this.queue().start(input)) as WorkflowJob;
   }
   /**

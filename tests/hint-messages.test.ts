@@ -60,6 +60,23 @@ const samples: { [C in HintCode]: (HintSubject & Extract<HintOf, { code: C }>)[]
   'plan-unapproved': [
     {
       code: 'plan-unapproved',
+      params: { scope: 3 },
+      boardId: 'board-1',
+      plan: {
+        drafts: ['t-1', 't-4'],
+        stale: [],
+        review: ['t-1'],
+        reviewCount: 1,
+        unverified: [],
+        unverifiedCount: 0,
+        blocked: [],
+        blockedCount: 0,
+        questions: [{ id: 't-4', questionId: 'Q-1' }],
+        questionsCount: 1,
+      },
+    },
+    {
+      code: 'plan-unapproved',
       params: { scope: 2 },
       boardId: 'board-1',
       plan: {
@@ -482,6 +499,22 @@ const samples: { [C in HintCode]: (HintSubject & Extract<HintOf, { code: C }>)[]
       input: input1,
     },
   ],
+  'owner-answer': [
+    {
+      code: 'owner-answer',
+      params: { count: 1, stage: 'product' },
+      question: { id: 'Q-1', changeId: 'PC-1', section: 'product' },
+    },
+    {
+      code: 'owner-answer',
+      params: { count: 3, stage: 'development' },
+      question: { id: 'Q-2', changeId: 'PC-1', section: 'development' },
+    },
+  ],
+  'owner-question-pending': [
+    { code: 'owner-question-pending', params: { questions: ['Q-1'], held: 2 }, boardId: 'b-1' },
+    { code: 'owner-question-pending', params: { questions: many('Q', 7), held: 9 } },
+  ],
 };
 
 /**
@@ -686,8 +719,10 @@ test('Подсказки шага: новая конфигурация setup п�
  * Намеренное изменение (F86): добавлены образцы `job-cancelled-task` и
  * `job-exhausted` с `closable` (закрытие задания мёртвой доски,
  * workflow_close); прежние образцы байтово прежние.
+ * Намеренное изменение (вопросы владельцу): новые коды owner-answer и owner-question-pending
+ * и образец plan-unapproved с plan.questions (вопросы владельцу); тексты прежних образцов байтово прежние.
  */
-const ENGLISH_SAMPLES_SHA256 = '53b2d096975a858ad412a218ccd00cc886504d32df104eba92f2b8f2b81fde7e';
+const ENGLISH_SAMPLES_SHA256 = 'ffdccb601de4fcd1f5f1f4b88c42da91e75ba4ffa6b6046d831f7a7cb8cc172a';
 
 test('Подсказки шага: английские тексты образцов закреплены', () => {
   assert.equal(

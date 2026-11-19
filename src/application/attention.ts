@@ -85,8 +85,19 @@ import {
   type AttentionMark,
   type OccurrenceMark,
   type AttentionSource,
+  type AttentionSection,
   type AttentionSubjectKind,
+  attentionSections,
 } from '../core/attention-model.ts';
+import {
+  answeredPending,
+  choicesOf,
+  maskUrlCredentials,
+  questionHolds,
+  questionVersion,
+  sectionOf,
+} from '../core/owner-questions.ts';
+import type { PreparationQuestion } from '../core/preparation-model.ts';
 import {
   leadPresence,
   quickPrerequisites,
@@ -118,6 +129,8 @@ export interface Candidate {
   source: AttentionSource;
   category: AttentionCategory;
   actor: AttentionActor;
+  /** Раздел панели; без поля — по источнику (`sectionOfCandidate`). */
+  section?: AttentionSection;
   title: string;
   reason: string;
   since: string;
@@ -178,86 +191,131 @@ const stageTitles: Record<(typeof stages)[number], string> = {
 };
 const changesOf = (ctx: AttentionContext): ProductChange[] => ctx.state.preparation?.changes ?? [];
 
+/** Ссылка вопроса: вкладка его этапа и блок вопросов. */
+const questionHref = (c: ProductChange, q: PreparationQuestion) =>
+  hrefs.preparation(c.id, q.stage, `questions-${q.stage}`);
+
+/** Текст вопроса для формы ответа: варианты с последствиями и рекомендация ведущего. */
+function questionPrompt(q: PreparationQuestion) {
+  const choices = choicesOf(q);
+  const recommended = q.recommended !== undefined ? choices[q.recommended] : undefined;
+  return (
+    q.text +
+    (q.why ? `\n\n${q.why}` : '') +
+    (recommended ? `\n\nРекомендация ведущего: ${recommended.label}` : '')
+  );
+}
+
 /**
- * S1. Открытый вопрос ведущего оператору. Появление — id вопроса: вопрос
- * неизменяем, переспрос — новый вопрос. Решение — ответ или снятие вопроса.
+ * S1. Открытый вопрос ведущего владельцу. Появление — id вопроса; уточнение
+ * открытого вопроса (`revise`) — новая версия того же появления, переспрос —
+ * новый вопрос. Решение — ответ или снятие вопроса. Раздел — раздел вопроса;
+ * удержанные черновики (`blocks`) покрыты карточкой.
  */
 const prepQuestion: AttentionSourceRule = {
   id: 'prep-question',
-  collect: (ctx) =>
-    changesOf(ctx).flatMap((c) =>
+  collect: (ctx) => {
+    const holds = questionHolds(ctx.state);
+    return changesOf(ctx).flatMap((c) =>
       c.questions
         .filter((q) => q.status === 'open')
-        .map((q): Candidate => ({
-          sourceKey: `prep:q:${c.id}:${q.id}`,
-          occurrenceId: q.id,
-          sourceVersion: d({ text: q.text, why: q.why, options: q.options }),
-          source: 'prep-question',
-          category: 'question',
-          actor: 'operator',
-          title: `Вопрос ведущего агента по «${c.title}»`,
-          reason: one(q.text) + (q.why ? ` — ${one(q.why)}` : ''),
-          since: q.createdAt,
-          subject: {
-            kind: 'change',
-            id: c.id,
-            href: hrefs.preparation(c.id, q.stage, `questions-${q.stage}`),
-          },
-          actions: [
-            {
-              id: 'answer',
-              kind: 'domain',
-              label: 'Ответить',
-              input: q.options.length ? 'text+option' : 'text',
-              prompt: q.text + (q.why ? `\n\n${q.why}` : ''),
-              ...(q.options.length
-                ? { choices: q.options.map((label, i) => ({ id: String(i), label })) }
-                : {}),
+        .map((q): Candidate => {
+          const choices = choicesOf(q);
+          return {
+            sourceKey: `prep:q:${c.id}:${q.id}`,
+            occurrenceId: q.id,
+            sourceVersion: questionVersion(q),
+            source: 'prep-question',
+            category: 'question',
+            actor: 'operator',
+            section: sectionOf(q),
+            title: `Вопрос ведущего агента по «${c.title}»`,
+            reason: one(q.text) + (q.why ? ` — ${one(q.why)}` : ''),
+            since: q.createdAt,
+            ...(q.revisedAt ? { updatedAt: q.revisedAt } : {}),
+            subject: { kind: 'change', id: c.id, href: questionHref(c, q) },
+            actions: [
+              {
+                id: 'answer',
+                kind: 'domain',
+                label: 'Ответить',
+                input: choices.length ? 'text+option' : 'text',
+                prompt: questionPrompt(q),
+                ...(choices.length
+                  ? {
+                      choices: choices.map((choice, i) => ({
+                        id: String(i),
+                        label: choice.label,
+                        ...(choice.consequence ? { hint: choice.consequence } : {}),
+                        ...(q.recommended === i ? { recommended: true } : {}),
+                      })),
+                    }
+                  : {}),
+              },
+            ],
+            covered: unclaimed(
+              ctx,
+              (q.blocks?.taskIds ?? []).filter((id) => holds.get(id)?.questionId === q.id),
+            ),
+            basis: {
+              changeId: c.id,
+              questionId: q.id,
+              options: choices.map((x) => x.label),
+              version: questionVersion(q),
             },
-          ],
-          basis: { changeId: c.id, questionId: q.id, options: q.options },
-        })),
-    ),
+          };
+        }),
+    );
+  },
 };
 
 /**
  * S2. Ответ оператора, который ведущий ещё не превратил в решение.
  * Появление — момент ответа; если решение по вопросу было записано и затем
  * снято, — момент снятия (решение — факт источника, его снятие — новый).
+ * Удержанные вопросом черновики покрыты до решения.
  */
 const prepAnswerPending: AttentionSourceRule = {
   id: 'prep-answer-pending',
-  collect: (ctx) =>
-    changesOf(ctx).flatMap((c) =>
+  collect: (ctx) => {
+    const holds = questionHolds(ctx.state);
+    return changesOf(ctx).flatMap((c) =>
       c.questions.flatMap((q): Candidate[] => {
-        if (q.status !== 'answered' || !q.answer) return [];
+        if (!answeredPending(c, q)) return [];
+        const answer = q.answer!;
         const records = c.decisions.filter((r) => r.questionId === q.id);
-        if (records.some((r) => !r.withdrawn)) return [];
         const withdrawn = records
           .map((r) => r.withdrawn!.at)
           .sort()
           .at(-1);
+        const chosen = answer.choice !== undefined ? choicesOf(q)[answer.choice] : undefined;
         return [
           {
             sourceKey: `prep:qa:${c.id}:${q.id}`,
-            occurrenceId: withdrawn ? `w:${withdrawn}` : `a:${q.answer.at}`,
-            sourceVersion: d(q.answer.text),
+            occurrenceId: withdrawn ? `w:${withdrawn}` : `a:${answer.at}`,
+            sourceVersion: d(answer.text),
             source: 'prep-answer-pending',
             category: 'technical',
             actor: 'lead',
+            section: sectionOf(q),
             title: `Ответ оператора ждёт решения ведущего по «${c.title}»`,
-            reason: `Вопрос: ${one(q.text)} Ответ: ${one(q.answer.text)}`,
+            reason:
+              `Вопрос: ${one(q.text)} Ответ: ` +
+              (chosen && chosen.label !== answer.text
+                ? `${one(chosen.label)}; ${one(answer.text)}`
+                : one(answer.text)),
             actions: [preparationHandoff(ctx)],
-            since: withdrawn ?? q.answer.at,
-            subject: {
-              kind: 'change',
-              id: c.id,
-              href: hrefs.preparation(c.id, q.stage, `questions-${q.stage}`),
-            },
+            since: withdrawn ?? answer.at,
+            subject: { kind: 'change', id: c.id, href: questionHref(c, q) },
+            covered: unclaimed(
+              ctx,
+              (q.blocks?.taskIds ?? []).filter((id) => holds.get(id)?.questionId === q.id),
+            ),
           },
         ];
       }),
-    ),
+    );
+  },
 };
 
 /**
@@ -1583,9 +1641,12 @@ const planSource: AttentionSourceRule = {
       if (!found || found.revision.status !== 'active') return [];
       if (planApproved(h, found.revision, found.tasks)) return [];
       const why = unapprovedTasks(h, s, found.tasks);
-      const held = new Set([...why.blocked.map((b) => b.id), ...why.unverified]);
+      const asked = new Set(why.questions.map((q) => q.id));
+      const held = new Set([...why.blocked.map((b) => b.id), ...why.unverified, ...asked]);
       const approvable = [...why.drafts.filter((id) => !held.has(id)), ...why.stale];
       if (!approvable.length && !why.drafts.length) return [];
+      // Все черновики держат вопросы владельцу: решение — их ответ (карточка вопроса).
+      if (!approvable.length && why.drafts.every((id) => asked.has(id))) return [];
       const byId = new Map(found.tasks.map((t) => [t.id, t]));
       const shown = Object.fromEntries(approvable.map((id) => [id, specDigest(byId.get(id)!)]));
       // Область проверок (gates, потребители) в digest постановки не входит
@@ -1606,6 +1667,9 @@ const planSource: AttentionSourceRule = {
           stale: why.stale,
           blocked: why.blocked.map((b) => b.id),
           unverified: why.unverified,
+          // Удержание вопросом меняет область утверждения: снятие вопроса —
+          // новая версия карточки, а не утверждение расширенной области по старой.
+          ...(asked.size ? { questions: [...asked].sort() } : {}),
         }),
         source: 'plan' as const,
         since: found.revision.createdAt,
@@ -1637,7 +1701,10 @@ const planSource: AttentionSourceRule = {
           reason:
             `Черновиков: ${why.drafts.length}` +
             (why.stale.length ? `, утверждённых при другой политике: ${why.stale.length}` : '') +
-            (blocked.length ? `. Не пройдут утверждение: ${blocked.join('; ')}` : ''),
+            (blocked.length ? `. Не пройдут утверждение: ${blocked.join('; ')}` : '') +
+            (asked.size
+              ? `. Ждут решения владельца и не утверждаются: ${[...asked].join(', ')}`
+              : ''),
           actions: [{ id: 'approve', kind: 'domain', label: 'Утвердить план', input: 'confirm' }],
           basis: {
             boardId: board.id,
@@ -2212,14 +2279,29 @@ const rule = (
 
 const actionHandlers: Record<string, (a: ActContext) => ActOutcome> = {
   'prep-question/answer': ({ ctx, item, input }) => {
-    const b = basisOf<{ changeId: string; questionId: string; options: string[] }>(item);
-    const option = input.optionId !== undefined ? b.options[Number(input.optionId)] : undefined;
-    const text = input.text?.trim() || option;
-    if (!text) throw new DomainError('Введите ответ или выберите вариант', 400);
+    const b = basisOf<{
+      changeId: string;
+      questionId: string;
+      options: string[];
+      version: string;
+    }>(item);
+    const choice =
+      input.optionId !== undefined && /^\d+$/.test(input.optionId)
+        ? Number(input.optionId)
+        : undefined;
+    if (input.optionId !== undefined && (choice === undefined || choice >= b.options.length))
+      throw new DomainError('Такого варианта у вопроса нет', 400);
+    const text = input.text?.trim();
+    if (!text && choice === undefined)
+      throw new DomainError('Введите ответ или выберите вариант', 400);
     new Preparation(ctx.store, 'operator').answer({
       changeId: b.changeId,
       questionId: b.questionId,
-      text,
+      // Ответ ложится только на показанную редакцию вопроса: уточнение между
+      // проверкой карточки и записью отклоняет сама запись.
+      expectedVersion: b.version,
+      ...(text ? { text } : {}),
+      ...(choice !== undefined ? { choice } : {}),
     });
     return { result: { changeId: b.changeId, questionId: b.questionId } };
   },
@@ -2382,18 +2464,15 @@ prepQuestion.history = (ctx) =>
       .map((q): Resolved => ({
         sourceKey: `prep:q:${c.id}:${q.id}`,
         occurrenceId: q.id,
-        sourceVersion: d({ text: q.text, why: q.why, options: q.options }),
+        sourceVersion: questionVersion(q),
         source: 'prep-question',
         category: 'question',
         actor: 'operator',
+        section: sectionOf(q),
         title: `Вопрос ведущего агента по «${c.title}»`,
         reason: one(q.text),
         since: q.createdAt,
-        subject: {
-          kind: 'change',
-          id: c.id,
-          href: hrefs.preparation(c.id, q.stage, `questions-${q.stage}`),
-        },
+        subject: { kind: 'change', id: c.id, href: questionHref(c, q) },
         resolvedAt: q.answer?.at ?? null,
       })),
   );
@@ -2418,6 +2497,7 @@ prepAnswerPending.history = (ctx) =>
           source: 'prep-answer-pending',
           category: 'technical',
           actor: 'lead',
+          section: sectionOf(q),
           title: `Ответ оператора ждёт решения ведущего по «${c.title}»`,
           reason: one(record.statement),
           since: withdrawn ?? q.answer.at,
@@ -2798,8 +2878,7 @@ function boardsOf(state: Readonly<DevContourState>) {
 }
 
 /** Учётные данные в URL (`scheme://user:secret@host`) — маска до показа. */
-export const maskUrlCredentials = (text: string) =>
-  text.replace(/\b([a-z][a-z0-9+.-]*:\/\/)[^\s/?#@]+@/gi, '$1[REDACTED]@');
+export { maskUrlCredentials };
 
 /** Полный вопрос и варианты действия — под маской и в пределах договора. */
 function boundedAction(
@@ -2899,6 +2978,26 @@ function impactOf(
   };
 }
 
+const stageSections: Record<string, AttentionSection> = {
+  product: 'product',
+  architecture: 'architecture',
+  references: 'design',
+  concept: 'design',
+  design: 'design',
+};
+/**
+ * Раздел карточки: заданный источником, иначе этапы подготовки — по этапу
+ * ключа, быстрый маршрут — продукт, источники движка — разработка (вопрос
+ * исполнителя — разработка, пока ведущий не отнёс его к разделу).
+ */
+export function sectionOfCandidate(c: Pick<Candidate, 'section' | 'source' | 'sourceKey'>) {
+  if (c.section) return c.section;
+  if (c.source === 'prep-stage' || c.source === 'prep-rework')
+    return stageSections[c.sourceKey.split(':').at(-1) ?? ''] ?? 'product';
+  if (c.source === 'quick') return 'product';
+  return 'development';
+}
+
 export function toItem(
   c: Candidate,
   state: Readonly<DevContourState>,
@@ -2915,6 +3014,7 @@ export function toItem(
     source: c.source,
     category: c.category,
     actor: c.actor,
+    section: sectionOfCandidate(c),
     title: clip(one(redact(c.title)), ATTENTION_LIMITS.title),
     reason: clip(one(redact(c.reason)), ATTENTION_LIMITS.reason),
     impact: impactOf(c, state, boardByTask),
@@ -2979,6 +3079,11 @@ export interface AttentionView {
     /** Непрочитанные карточки оператора: значок панели. */
     unread: number;
     byActor: Record<AttentionActor, { active: number; unread: number }>;
+    /**
+     * По разделам панели — без фильтра раздела (прочие фильтры действуют):
+     * карточки оператора, ведущего и непрочитанные карточки оператора.
+     */
+    bySection: Record<AttentionSection, { operator: number; lead: number; unread: number }>;
   };
   items: AttentionItem[];
   truncated?: { count: number };
@@ -3043,7 +3148,7 @@ export class AttentionService {
    * вопросы и причины пишет ведущий агент, ошибки Git повторяют адрес
    * репозитория), известные секреты конфигурации — маской пакета передачи.
    */
-  private redactor(): (text: string) => string {
+  redactor(): (text: string) => string {
     if (!this.h) return maskUrlCredentials;
     const known = handoffRedactor(this.h.config, executionOf(this.h).engine.policy);
     return (text) => maskUrlCredentials(known(text));
@@ -3446,7 +3551,8 @@ export class AttentionService {
         .filter(
           (r) =>
             (!filter.actor || r.actor === filter.actor) &&
-            (!filter.category || r.category === filter.category),
+            (!filter.category || r.category === filter.category) &&
+            (!filter.section || sectionOfCandidate(r) === filter.section),
         )
         .sort(
           (a, b) =>
@@ -3517,12 +3623,26 @@ export class AttentionService {
       const all = this.candidates(ctx)
         .map((c) => toItem(c, ctx.state, boardByTask, marks, ctx.redact))
         .sort(compareItems);
-      const filtered = all.filter(
+      const scoped = all.filter(
         (i) =>
           (!filter.actor || i.actor === filter.actor) &&
           (!filter.category || i.category === filter.category) &&
           (!filter.component || this.inComponent(ctx, i, filter.component)),
       );
+      const filtered = filter.section ? scoped.filter((i) => i.section === filter.section) : scoped;
+      const bySection = Object.fromEntries(
+        attentionSections.map((section) => {
+          const own = scoped.filter((i) => i.section === section);
+          return [
+            section,
+            {
+              operator: own.filter((i) => i.actor === 'operator').length,
+              lead: own.filter((i) => i.actor === 'lead').length,
+              unread: own.filter((i) => i.actor === 'operator' && i.state.unread).length,
+            },
+          ];
+        }),
+      ) as AttentionView['counts']['bySection'];
       const items = filtered.slice(0, ATTENTION_LIMITS.active);
       const count = (actor: AttentionActor) => {
         const own = filtered.filter((i) => i.actor === actor);
@@ -3534,7 +3654,7 @@ export class AttentionService {
         generatedAt: new Date(now).toISOString(),
         engineConnected: Boolean(this.h),
         lead: this.lead(ctx),
-        counts: { active: filtered.length, unread: byActor.operator.unread, byActor },
+        counts: { active: filtered.length, unread: byActor.operator.unread, byActor, bySection },
         items,
         ...(filtered.length > items.length
           ? { truncated: { count: filtered.length - items.length } }
