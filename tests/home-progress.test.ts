@@ -1078,36 +1078,38 @@ test('Home progress: the current map release follows the map acceptance and star
         },
       ],
     } as unknown as DevContourState;
-    const coverage = (accepted: boolean, statuses: string[]) =>
-      coverageOf(
-        {
-          available: true,
-          releaseId: 'r1',
-          coverageComplete: false,
-          releaseAccepted: accepted,
-          issues: [],
-          unconfirmedScenarios: [],
-          deferredScenarios: [],
-          releases: [
-            { id: 'r1', title: 'Текущий' },
-            { id: 'r2', title: 'Принятый' },
-            { id: 'r3', title: 'Потом' },
-          ],
-          features: statuses.map((status, i) => ({ id: `F${i}`, status })),
-        } as unknown as ProductView,
-        at(0),
-        false,
-      )!;
-    const progress = (c: ReturnType<typeof coverage>) =>
+    const view = (
+      accepted: boolean,
+      features: { status: string; channels?: { covered?: boolean }[] }[],
+      releases = [
+        { id: 'r1', title: 'Текущий' },
+        { id: 'r2', title: 'Принятый' },
+        { id: 'r3', title: 'Потом' },
+      ],
+    ) =>
+      ({
+        available: true,
+        releaseId: 'r1',
+        coverageComplete: false,
+        releaseAccepted: accepted,
+        issues: [],
+        unconfirmedScenarios: [],
+        deferredScenarios: [],
+        releases,
+        features: features.map((x, i) => ({ id: `F${i}`, channels: [], checks: [], ...x })),
+      }) as unknown as ProductView;
+    // Медленный ярус из карты — как на сервере: покрытие и список всех релизов.
+    const progress = (product: ProductView) =>
       homeView({
         state,
         h: f.h,
         attention: emptyAttention,
         revision: 1,
         now: NOW,
-        slow: { ...homeSlowView({ state, now: NOW, preparation: false }), coverage: c },
+        slow: homeSlowView({ state, now: NOW, preparation: false, product }),
       }).progress!;
-    const stale = progress(coverage(false, ['awaiting-verification', 'in-progress']));
+    const s = (status: string) => ({ status });
+    const stale = progress(view(false, [s('awaiting-verification'), s('in-progress')]));
     assert.deepEqual(
       stale.releases.map((r) => [r.id, r.done, r.tasks, r.readiness]),
       [
@@ -1118,11 +1120,54 @@ test('Home progress: the current map release follows the map acceptance and star
     );
     assert.equal(stale.releasesDone, 1);
     assert.equal(stale.releasesTotal, 3);
-    const accepted = progress(coverage(true, ['accepted', 'accepted']));
+    const accepted = progress(view(true, [s('accepted'), s('accepted')]));
     assert.equal(accepted.releases[0].readiness, 'done');
     assert.equal(accepted.releasesDone, 2);
-    const fresh = progress(coverage(false, ['unplanned']));
+    // Все фичи доказаны, но карта релиз не приняла (покрытие неполно) — в работе.
+    const proven = progress(view(false, [s('verified'), s('verified')]));
+    assert.equal(proven.releases[0].readiness, 'in-progress');
+    assert.equal(proven.releases[0].done, 2);
+    assert.equal(proven.releasesDone, 1);
+    const fresh = progress(view(false, [s('unplanned')]));
     assert.equal(fresh.releases[0].readiness, 'unplanned');
+    // `unplanned` с покрытым каналом — работа начата.
+    const partly = progress(view(false, [{ status: 'unplanned', channels: [{ covered: true }] }]));
+    assert.equal(partly.releases[0].readiness, 'in-progress');
+    // Девять релизов: готовые считаются и за пределом показанных восьми.
+    const nine = Array.from({ length: 9 }, (_, i) => ({ id: `r${i + 1}`, title: `R${i + 1}` }));
+    const many = {
+      ...state,
+      changeSets: [
+        ...state.changeSets,
+        {
+          id: 'CS-9',
+          title: 'CS-9',
+          boardIds: [],
+          verifications: [],
+          createdAt: at(HOUR),
+          releaseId: 'r9',
+          acceptance: { at: at(HOUR) },
+        },
+      ],
+    } as unknown as DevContourState;
+    const wide = homeView({
+      state: many,
+      h: f.h,
+      attention: emptyAttention,
+      revision: 1,
+      now: NOW,
+      slow: homeSlowView({
+        state: many,
+        now: NOW,
+        preparation: false,
+        product: view(true, [s('accepted')], nine),
+      }),
+    }).progress!;
+    assert.equal(wide.releases.length, HOME_LIMITS.releases);
+    assert.equal(wide.releasesTotal, 9);
+    assert.equal(wide.releasesDone, 3, 'r1 by the map, r2 and r9 by acceptance');
+    // Список всех релизов карты — только серверу.
+    assert.ok(!JSON.stringify(wide).includes('mapReleases'));
   } finally {
     f.cleanup();
   }

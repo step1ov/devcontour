@@ -29,7 +29,7 @@ const agents = (n: number) => `${n} ${plural(n, 'агент', 'агента', '�
 const calls = (n: number) => `${n} ${plural(n, 'вызова', 'вызовов', 'вызовов')}`;
 const usd = (v: number) => '$' + (v >= 100 ? v.toFixed(0) : v.toFixed(2));
 
-type LegendItem = { label: string; color: string; dashed?: boolean };
+type LegendItem = { label: string; color: string; dashed?: boolean; outline?: string };
 function Legend({ items }: { items: readonly LegendItem[] }) {
   return (
     <ul className="m-0 flex list-none flex-wrap gap-x-3 gap-y-1 p-0 text-xs" aria-hidden="true">
@@ -41,7 +41,13 @@ function Legend({ items }: { items: readonly LegendItem[] }) {
               style={{ borderColor: i.color }}
             />
           ) : (
-            <span className="inline-block size-2.5 rounded-sm" style={{ background: i.color }} />
+            <span
+              className="inline-block size-2.5 rounded-sm"
+              style={{
+                background: i.color,
+                ...(i.outline ? { border: `1px solid ${i.outline}` } : {}),
+              }}
+            />
           )}
           {i.label}
         </li>
@@ -114,9 +120,12 @@ function Stacked({
   titles,
   limit,
   fill = 0.7,
+  strokes,
 }: {
   rows: number[][];
   colors: readonly string[];
+  /** Контур сегмента по его номеру (светлая заливка). */
+  strokes?: readonly (string | undefined)[];
   max: number;
   titles: string[];
   limit?: number;
@@ -162,6 +171,14 @@ function Stacked({
                   // Зазор цвета листа между сегментами стека.
                   height={Math.max(h - 1.5, 1)}
                   fill={colors[k]}
+                  // Светлый сегмент — с контуром: край виден и без заливки.
+                  {...(strokes?.[k]
+                    ? {
+                        stroke: strokes[k],
+                        strokeWidth: 1,
+                        vectorEffect: 'non-scaling-stroke' as const,
+                      }
+                    : {})}
                 />
               );
             })}
@@ -443,11 +460,11 @@ export function SpendChart({ spend, estimate }: { spend: HomeSpend; estimate: st
   const total = running;
   const top = Math.max(...rows.map((r) => r.reduce((a, b) => a + b, 0)), limit ?? 0, 0.01);
   const colors =
-    limit !== undefined ? ['var(--canvas-edge)', 'var(--data-accent)'] : ['var(--data-accent)'];
+    limit !== undefined ? ['var(--data-accent-bg)', 'var(--data-accent)'] : ['var(--data-accent)'];
   const items: LegendItem[] =
     limit !== undefined
       ? [
-          { label: 'раньше', color: colors[0] },
+          { label: 'раньше', color: colors[0], outline: 'var(--data-accent)' },
           { label: 'за день', color: colors[1] },
           { label: 'предел workspace', color: 'var(--text-secondary)', dashed: true },
         ]
@@ -496,7 +513,15 @@ export function SpendChart({ spend, estimate }: { spend: HomeSpend; estimate: st
       }
     >
       <div className="relative mt-2">
-        <Stacked rows={rows} colors={colors} max={top} titles={titles} limit={limit} fill={0.55} />
+        <Stacked
+          rows={rows}
+          colors={colors}
+          strokes={limit !== undefined ? ['var(--data-accent)'] : undefined}
+          max={top}
+          titles={titles}
+          limit={limit}
+          fill={0.55}
+        />
         {(limit !== undefined || week > 0) && (
           <Mark value={limit ?? top} max={top}>
             {limit !== undefined ? `предел ${usd(limit)}` : usd(top)}

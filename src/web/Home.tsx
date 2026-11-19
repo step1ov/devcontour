@@ -982,6 +982,9 @@ function SectionTiles({
   const compact = (t: (typeof tiles)[number]) =>
     t.section.questions.open === 0 &&
     !t.section.questions.more &&
+    // Ответы без решения ведущего и удержанные черновики — работа раздела.
+    t.section.questions.answeredPendingLead === 0 &&
+    t.section.questions.blockedTasks === 0 &&
     (t.section.state === 'not-applicable' || (t.section.state === 'absent' && !t.keep));
   const full = tiles.filter((t) => !compact(t));
   const rest = tiles.filter(compact);

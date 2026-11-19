@@ -47,6 +47,8 @@ export const HOME_LIMITS = {
   failureKinds: 8,
   /** Интервалов графика нагрузки: сутки по 15 минут. */
   loadBuckets: 96,
+  /** Релизов карты для подсчёта готовых (в ответ не входят). */
+  mapReleaseIds: 200,
   /** Дней графика расхода. */
   spendDays: 7,
   title: 160,
@@ -385,6 +387,11 @@ export interface HomeSlow {
    * последних записей), поэтому в медленном ярусе.
    */
   gaps?: { loopStalls1h: number; clockJumps1h: number };
+  /**
+   * Все релизы карты (до `HOME_LIMITS.mapReleaseIds`) и текущий — для числа
+   * готовых. Только сервер: в ответ не входит.
+   */
+  mapReleases?: { ids: string[]; current: string };
 }
 
 export interface HomeContext {
@@ -836,7 +843,9 @@ function progressOf(
     releases: prepared.length ? prepared : mapped,
     releasesDone: prepared.length
       ? releases.filter((r) => r.readiness === 'done').length
-      : mapped.filter((r) => r.readiness === 'done').length,
+      : mapped.length
+        ? mapDone(ctx.slow?.mapReleases, coverage?.available ? coverage.accepted : false, state)
+        : 0,
     releasesTotal: prepared.length
       ? releases.length
       : mapped.length
@@ -905,14 +914,28 @@ function mapReleases(
       ...base,
       tasks: r.features,
       done,
-      readiness:
-        currentAccepted || (r.features > 0 && done === r.features)
-          ? ('done' as const)
-          : done > 0 || (r.started ?? 0) > 0
-            ? ('in-progress' as const)
-            : ('unplanned' as const),
+      // Готов — только принятый по карте: доказанные фичи без приёмки (покрытие
+      // неполно, приёмка снята) — ещё в работе.
+      readiness: currentAccepted
+        ? ('done' as const)
+        : done > 0 || (r.started ?? 0) > 0
+          ? ('in-progress' as const)
+          : ('unplanned' as const),
     };
   });
+}
+
+/** Принятые релизы карты среди всех, а не только показанных. */
+function mapDone(
+  all: HomeSlow['mapReleases'],
+  currentAccepted: boolean,
+  state: Readonly<DevContourState>,
+) {
+  if (!all) return 0;
+  const accepted = new Set(
+    state.changeSets.flatMap((c) => (c.acceptance && c.releaseId ? [c.releaseId] : [])),
+  );
+  return all.ids.filter((id) => (id === all.current ? currentAccepted : accepted.has(id))).length;
 }
 
 /** Число событий типа за последний час (окно — недавний журнал). */
@@ -1265,7 +1288,14 @@ export function coverageOf(
               title: clip(r.title),
               features: scoped.length,
               done: scoped.filter((f) => f.status === 'verified' || f.status === 'accepted').length,
-              started: scoped.filter((f) => f.status !== 'unplanned').length,
+              // Начата — есть работа хоть по одному каналу или сценарию:
+              // `unplanned` значит лишь, что у части фичи ещё нет задач.
+              started: scoped.filter(
+                (f) =>
+                  f.status !== 'unplanned' ||
+                  (f.channels ?? []).some((c) => c.covered || c.planned) ||
+                  (f.checks ?? []).some((c) => c.passed),
+              ).length,
             };
           }),
           releasesTotal: view.releases.length,
@@ -1296,11 +1326,23 @@ export function homeSlowView(input: {
   const asOf = new Date(input.now).toISOString();
   const coverage = coverageOf(input.product, asOf, input.preparation);
   const budget = budgetOf(input.budgets, asOf);
+  const map =
+    input.product && !('error' in input.product) && input.product.available
+      ? input.product
+      : undefined;
   const limitUsd = input.budgets?.budgets.find((b) => b.scope.kind === 'workspace')?.limit.usd;
   return {
     asOf,
     load: { ...loadOf(input.state.runs, input.now), asOf },
     gateTrend: { ...gateTrendOf(input.state.runs, input.now), asOf },
+    ...(map?.releases?.length
+      ? {
+          mapReleases: {
+            ids: map.releases.slice(0, HOME_LIMITS.mapReleaseIds).map((r) => r.id),
+            current: map.releaseId,
+          },
+        }
+      : {}),
     ...(input.usageRecords
       ? { spend: { ...spendOf(input.usageRecords, input.now, limitUsd), asOf } }
       : {}),

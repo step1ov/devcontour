@@ -546,3 +546,32 @@ test('Rings and compact tiles: preparation tiles with rings and a one-line not-a
   expect(await noHorizontalScroll(page)).toBe(true);
   await axeClean(page);
 });
+
+test.describe('A browser in another time zone', () => {
+  test.use({ timezoneId: 'America/Los_Angeles' });
+  test('Spend days keep the server calendar date', async ({ page }) => {
+    await page.route('**/api/home*', async (route) => {
+      const response = await route.fetch({ url: route.request().url().replace(/\?.*$/, '') });
+      const home = (await response.json()) as HomeView & { etag: string };
+      home.etag = 'zone';
+      // Полночь сервера в Москве (UTC+3): в Лос-Анджелесе это ещё 12 ноября.
+      home.harness!.spend = {
+        days: Array.from({ length: 7 }, (_, i) => ({
+          start: new Date(Date.parse('2026-11-12T21:00:00.000Z') + i * 86_400_000).toISOString(),
+          date: `2026-11-${13 + i}`,
+          usd: 1,
+          calls: 1,
+          unknown: 0,
+        })),
+        beforeUsd: 0,
+        beforeUnknown: 0,
+        asOf: home.generatedAt,
+      };
+      await route.fulfill({ json: home });
+    });
+    await page.goto('/');
+    const spend = page.getByRole('figure', { name: /Расход по дням/ });
+    await expect(spend.locator('table tbody tr').first().locator('th')).toHaveText('пт, 13');
+    await expect(spend.locator('table tbody tr').last().locator('th')).toHaveText('чт, 19');
+  });
+});
