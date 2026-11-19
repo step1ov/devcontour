@@ -29,10 +29,15 @@ export function queueStopOf(
   state: Readonly<DevContourState> = h.store.view(),
   events: AuditEvent[] = h.store.events(),
 ) {
+  // Кто проверит перенесённую базу — только при ожидании проверки базы.
+  const baseWait = state.paused && state.waits?.some((w) => w.kind === 'base-check');
   const view = queueStopView(state, events, {
     approvalMode: h.config.approvalMode,
     // Работа ведущего нужна только для подсказки остановленной очереди.
     workflowActive: state.paused && workflowActive(h),
+    ...(baseWait
+      ? { baseRange: Boolean(baseMovesOf(state)), boardActive: boardWorkflowActive(h) }
+      : {}),
   });
   // Вопрос исполнителя очередь не останавливает (`needs-input` не держит
   // выдачу): рядом с её состоянием — сколько задач ждут ответа.

@@ -8,7 +8,8 @@ import { mkdtemp, mkdir, writeFile, rm, realpath } from 'node:fs/promises';
 import { join } from 'node:path';
 import { tmpdir } from 'node:os';
 import { config, fixture, input } from './helpers.ts';
-import { DevContour } from '../src/core/service.ts';
+import { DevContour, baseMovesOf } from '../src/core/service.ts';
+import { checkBase } from '../src/runner/base-check.ts';
 import { Store } from '../src/core/store.ts';
 import { AgentService } from '../src/application/agent.ts';
 import { AttentionService } from '../src/application/attention.ts';
@@ -216,6 +217,13 @@ async function operatorActs(h: DevContour, agent: AgentService, name: string) {
       `${name}, ${phase}`,
     );
     assert.match(queue.hint ?? '', /Проверьте базу gates и запустите очередь/, `${name}, ${phase}`);
+    // Карточка паузы не обещает проверки, которой цикл не сделает.
+    for (const item of attention.items)
+      assert.doesNotMatch(
+        item.reason,
+        /Цикл ведущего проверит базу/,
+        `${name}, ${phase}: ${item.sourceKey}`,
+      );
   }
 }
 
@@ -231,7 +239,12 @@ test('F93: without a current base-move range the loop cannot check the base — 
   ] as const)
     await withRepo(async ({ h, data }) => {
       const agent = await leadPauseOverMove(h, data, 'board', edit);
+      assert.equal(baseMovesOf(h.store.read()), undefined, name);
       await operatorActs(h, agent, name);
+      // Пауза ведущего снята, очередь на ожидании: сам цикл эту базу не проверит.
+      assert.equal(h.store.read().pauseReason, 'base-check', name);
+      assert.equal(await checkBase(h, { data, state: data }, () => {}), false, name);
+      assert.equal(h.store.read().pauseReason, 'base-check', name);
     });
 });
 
