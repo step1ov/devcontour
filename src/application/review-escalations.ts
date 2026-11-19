@@ -57,8 +57,11 @@ const cache = new WeakMap<Store, { revision: number; value: readonly ReviewEscal
  * Старые первыми.
  */
 export function reviewEscalations(h: DevContour): readonly ReviewEscalation[] {
+  // Внутри транзакции записи кэш не читается и не пишется: откат вернул бы
+  // номер ревизии, под которым запомнено несуществующее.
+  const shared = !h.store.inTransaction;
   const revision = h.store.version().revision;
-  const hit = cache.get(h.store);
+  const hit = shared ? cache.get(h.store) : undefined;
   if (hit && hit.revision === revision) return hit.value;
   const last = new Map<string, ReviewRecord>();
   for (const { value: r } of executionOf(h).engine.read((v) =>
@@ -79,6 +82,12 @@ export function reviewEscalations(h: DevContour): readonly ReviewEscalation[] {
     );
     const open = waiting.filter((f) => !decided.has(f.id));
     if (!open.length) continue;
+    const requestId =
+      r.kind === 'plan' && r.subject.startsWith(INPUT_PREFIX)
+        ? r.subject.slice(INPUT_PREFIX.length)
+        : undefined;
+    // Ответ снятого или применённого вопроса больше не ревьюируют: решать нечего.
+    if (requestId && settledRequest(h, requestId)) continue;
     const title =
       r.kind === 'contract'
         ? (attempts ??= h.store.read().contractAttempts ?? []).find(
@@ -97,15 +106,23 @@ export function reviewEscalations(h: DevContour): readonly ReviewEscalation[] {
         rounds: openRounds(f, r.round),
       })),
       more: Math.max(0, open.length - ESCALATION_FINDINGS),
-      ...(r.kind === 'plan' && r.subject.startsWith(INPUT_PREFIX)
-        ? { requestId: r.subject.slice(INPUT_PREFIX.length) }
-        : {}),
+      ...(requestId ? { requestId } : {}),
       ...(title ? { title } : {}),
     });
   }
   value.sort((a, b) => a.at.localeCompare(b.at) || a.subject.localeCompare(b.subject));
-  cache.set(h.store, { revision, value });
+  if (shared) cache.set(h.store, { revision, value });
   return value;
+}
+
+/** Вопрос снят или его ответ применён: ревью ответа больше не нужно. */
+function settledRequest(h: DevContour, requestId: string) {
+  try {
+    const { lifecycle } = executionOf(h).engine.inputRequest(requestId);
+    return lifecycle === 'cancelled' || lifecycle === 'applied';
+  } catch {
+    return false;
+  }
 }
 
 /** Что ревьюировали — словами владельца. */

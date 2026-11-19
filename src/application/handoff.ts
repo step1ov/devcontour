@@ -1801,13 +1801,16 @@ function hostNext(ctx: HostContext): HandoffHostNext | undefined {
   // Ревью, остановленное эскалацией, ждёт решения владельца в карточке
   // центра внимания: повтор ревью, его задание или решение о плане ведущий
   // не продвинет. Другие решения и вопросы (`rank` 0) — раньше, кроме шага
-  // того же вопроса исполнителя, ответ на который и остановлен.
+  // того же вопроса исполнителя, ответ на который и остановлен, и общего
+  // шага режима operator.
   const escalated = escalationStep(ctx);
   if (
     escalated &&
     !(
       step &&
       rank(step) === 0 &&
+      // Общий шаг режима operator конкретного решения не называет.
+      step.code !== 'operator' &&
       !(escalated.input && step.input?.requestId === escalated.input.requestId)
     )
   )

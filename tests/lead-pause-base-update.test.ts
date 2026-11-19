@@ -529,7 +529,7 @@ test('host.next names the way out of a failed base check whose retries are used 
           assert.equal(next.code, 'base-exhausted', name);
           assert.deepEqual(next.params, { failures: ['main/test'] }, name);
           assert.match(next.detail, /devcontour base-update --by host/, name);
-          assert.match(next.detail, /confirm-and-start/, name);
+          assert.match(next.detail, /ask the user to lift the wait without gates/, name);
           assert.doesNotMatch(next.detail, /the board workflow checks the base/, name);
         } else assert.equal(next.code, 'pause-operator', `${name}: ${JSON.stringify(next)}`);
       await agent.run({ operation: 'queue_set', input: { paused: false } });
@@ -558,7 +558,20 @@ test('host.next names the way out of a failed base check whose retries are used 
         assert.equal(card?.actor, 'lead', name);
         assert.equal(card?.title, 'Проверка перенесённой базы не пройдена', name);
       }
-      if (!spent) return;
+      if (!spent) {
+        // Повтор есть (или запись другого договора): проверка действительно
+        // исполняет gates, а после исчерпания повторов шаг — тот же выход.
+        assert.equal(await checkBase(h, { data, state: data }, () => {}), false, name);
+        assert.ok(
+          h.store.events().some((e) => e.type === 'base.check.started'),
+          `${name}: the check ran`,
+        );
+        const after = h.store.localRecord<BaseCheck>(BASE_CHECK, 'main', sha)!;
+        assert.notEqual(after.runId, 'BK-seeded', name);
+        assert.equal(after.tries, 2, name);
+        assert.equal(devcontourHandoff(h, {}).host.next!.code, 'base-exhausted', name);
+        return;
+      }
       // Реальная проверка: gates не запускаются, запись прежняя, ожидание стоит.
       assert.equal(await checkBase(h, { data, state: data }, () => {}), false, name);
       const record = h.store.localRecord<BaseCheck>(BASE_CHECK, 'main', sha)!;

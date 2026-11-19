@@ -754,7 +754,7 @@ test('Подсказки шага: новая конфигурация setup п�
  * владельца в карточке центра внимания), образец pause-operator с base:
  * exhausted; тексты прежних образцов байтово прежние.
  */
-const ENGLISH_SAMPLES_SHA256 = '7ce5f271ecdda74a337069b0f4aa8a4fc2524cc13b164c9a1e9089cca5da02a4';
+const ENGLISH_SAMPLES_SHA256 = 'd9b6359589a847abac26c754f7e3c09c56600da8e2f4f2acf63cb367009716aa';
 
 test('Подсказки шага: английские тексты образцов закреплены', () => {
   assert.equal(

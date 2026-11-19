@@ -302,3 +302,133 @@ test('escalated contract review: an operator card in the architecture section, a
     f.cleanup();
   }
 });
+
+test('a cancelled question drops the escalation card and the owner step: its answer is no longer reviewed', async () => {
+  const prompts: string[] = [];
+  const runtimes = controlled({ verdict: { approve: false }, prompts });
+  const f = await inputFixture(runtimes);
+  try {
+    const { boardId, taskId } = f.askingTask('Cancelled asking task');
+    await untilQuestion(f, boardId);
+    const [request] = f.service.list({ taskId }).requests;
+    f.service.answer(
+      {
+        requestId: request.requestId,
+        text: 'Use JSON as now.',
+        optionId: 'json',
+        reason: 'The checks read JSON today.',
+        expectedVersion: request.version,
+      },
+      'lead',
+    );
+    const { contextDigest } = await f.service.context({ requestId: request.requestId });
+    for (let i = 0; i < 3; i++)
+      await f.service.review({
+        requestId: request.requestId,
+        contextDigest,
+        authorRuntime: 'codex',
+      });
+    const attention = new AttentionService(f.store, f.h);
+    const cards = async () => (await attention.active()).items.filter((i) => i.source === 'review');
+    assert.equal((await cards()).length, 1);
+    assert.equal(devcontourHandoff(f.h, {}).host.next?.code, 'review-escalated');
+    const [current] = f.service.list({ taskId }).requests;
+    f.service.cancel(
+      {
+        requestId: request.requestId,
+        reason: 'The owner dropped the question.',
+        expectedVersion: current.version,
+      },
+      'operator',
+    );
+    assert.deepEqual(await cards(), []);
+    assert.notEqual(devcontourHandoff(f.h, {}).host.next?.code, 'review-escalated');
+  } finally {
+    await f.cleanup();
+  }
+});
+
+test('long findings: the card decides only the findings it shows in full, a stale card is refused, operator mode still names the owner step, and accept-limitation withdraws the findings', async () => {
+  const f = fixture();
+  try {
+    f.h.config.mode = 'local';
+    let calls = 0;
+    const long = (n: number) => `Finding ${n}: ` + 'missing error state detail '.repeat(45);
+    const make = (name: 'codex' | 'claude'): AgentAdapter => ({
+      name,
+      execute(r) {
+        calls++;
+        const done = calls > 3;
+        return Promise.resolve({
+          data: {
+            approved: done,
+            summary: 'Explicit test fixture',
+            findings: done ? [] : [1, 2].map((n) => ({ severity: 'blocking', message: long(n) })),
+            previous: done ? closePrevious(r.prompt) : [],
+          },
+          log: 'Fixture only; no provider called',
+          command: ['fixture'],
+        });
+      },
+    });
+    const runtimes = { codex: make('codex'), claude: make('claude') };
+    const proposal = { title: 'Orders API v1', content: 'POST /orders creates an order.' };
+    for (let i = 0; i < 3; i++)
+      await assert.rejects(reviewContract(f.h, f.root, proposal, 'codex', runtimes));
+    const attention = new AttentionService(f.store, f.h);
+    const card = async () => (await attention.active()).items.find((i) => i.source === 'review');
+    const first = (await card())!;
+    const prompt = first.actions.find((a) => a.kind === 'domain' && a.prompt)!;
+    assert.ok(prompt.kind === 'domain');
+    // Вторая находка в предел текста не вошла: о ней — числом, решения по ней нет.
+    assert.ok(prompt.prompt!.includes(long(1).trim()), 'the first finding is shown in full');
+    assert.ok(!prompt.prompt!.includes('Finding 2:'), prompt.prompt);
+    assert.match(prompt.prompt!, /ещё находок: 1 — решение по ним предложит следующая карточка/);
+    assert.ok(prompt.prompt!.length <= 2000);
+    // Режим operator: общий шаг не прячет решение владельца.
+    f.h.config.approvalMode = 'operator';
+    assert.equal(devcontourHandoff(f.h, {}).host.next?.code, 'review-escalated');
+    f.h.config.approvalMode = 'agent';
+    const act = (c: typeof first, action: string, text: string) =>
+      attention.act({
+        sourceKey: c.sourceKey,
+        occurrenceId: c.occurrenceId,
+        expectedVersion: c.sourceVersion,
+        action,
+        input: { text },
+      });
+    await act(first, 'accept-limitation', 'The owner accepts the first finding.');
+    const subject = first.subject.id.split(':')[1];
+    const last = () => executionOf(f.h).engine.reviews('contract', subject).at(-1)!;
+    const [one, two] = last().findings;
+    assert.deepEqual(
+      pendingReviewDecisions(f.store, 'contract', subject, last()).map((d) => d.finding),
+      [one.id],
+    );
+    // Вторая находка — следующее появление карточки; прежняя карточка устарела.
+    const second = (await card())!;
+    assert.notEqual(second.occurrenceId, first.occurrenceId);
+    assert.ok(second.actions.some((a) => a.kind === 'domain' && a.prompt?.includes('Finding 2:')));
+    await assert.rejects(
+      act(first, 'accept-limitation', 'A stale decision.'),
+      (e: DomainError) => e.status === 409,
+    );
+    assert.equal(
+      pendingReviewDecisions(f.store, 'contract', subject, last()).length,
+      1,
+      'the stale card wrote nothing',
+    );
+    await act(second, 'accept-limitation', 'The owner accepts the second finding.');
+    assert.equal(await card(), undefined);
+    const r = await reviewContract(f.h, f.root, proposal, 'codex', runtimes);
+    assert.equal(r.status, 'approved');
+    for (const id of [one.id, two.id]) {
+      const x = last().findings.find((y) => y.id === id)!;
+      assert.equal(x.status, 'withdrawn');
+      assert.equal(x.disposition?.decision, 'accepted-limitation');
+      assert.equal(x.disposition?.by, 'operator');
+    }
+  } finally {
+    f.cleanup();
+  }
+});

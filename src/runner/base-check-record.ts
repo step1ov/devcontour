@@ -68,6 +68,27 @@ export const targetSha = (path: string, branch: string) =>
 /** Начала причин ожидания, которые `checkBase` пишет после непрошедшей проверки. */
 const SPENT_DETAILS = ['Проверка базы не пройдена', 'Проверка базы прервана'];
 
+/** Срок, в течение которого опрос тех же фактов не перечитывает ветки. */
+const SHAS_TTL_MS = 10_000;
+const shaCache = new WeakMap<DevContour, { key: string; at: number; bases: BaseSha[] }>();
+
+/**
+ * SHA целевых веток компонентов: повторный опрос той же ревизии данных и
+ * того же ожидания в пределах 10 с git не запускает (сдвиг ветки снаружи
+ * заметен не позже срока; проверка базы сама сверяет SHA в транзакции).
+ */
+function targetShas(h: DevContour, key: string | undefined): BaseSha[] {
+  const now = Date.now();
+  const hit = key === undefined ? undefined : shaCache.get(h);
+  if (hit && hit.key === key && now - hit.at < SHAS_TTL_MS) return hit.bases;
+  const bases = repositories(h.config).map((r) => ({
+    repositoryId: r.id,
+    sha: targetSha(r.path, r.targetBranch),
+  }));
+  if (key !== undefined) shaCache.set(h, { key, at: now, bases });
+  return bases;
+}
+
 /**
  * Повторы проверки базы исчерпаны: `checkBase` не исполнит ни одного gate и
  * оставит ожидание провалом (`failed`). Те же условия, что у неё: режим
@@ -78,8 +99,11 @@ const SPENT_DETAILS = ['Проверка базы не пройдена', 'Пр�
  *
  * Git читается (rev-parse целевых веток), только когда ожидание уже названо
  * непрошедшей проверкой или перенесённая база компонента уже исчерпала
- * повторы (перенос вернул базу на проверенный SHA): иначе цикл ещё
- * проверит базу, и опрос подсказок не запускает git.
+ * повторы (перенос вернул базу на проверенный SHA), и не чаще раза в 10 с
+ * для тех же фактов: иначе цикл ещё проверит базу, и опрос подсказок не
+ * запускает git. Ограничение: свежее ожидание, у которого исчерпана только
+ * запись неперенесённого компонента, до первого такта цикла не распознаётся
+ * — такт сам назовёт провал в ожидании, и решение станет тем же.
  */
 export function baseCheckSpent(
   h: DevContour,
@@ -97,10 +121,13 @@ export function baseCheckSpent(
   if (!named && !spentMove) return undefined;
   let bases: BaseSha[];
   try {
-    bases = repositories(h.config).map((r) => ({
-      repositoryId: r.id,
-      sha: targetSha(r.path, r.targetBranch),
-    }));
+    // Внутри транзакции записи — без кэша: ревизия ещё не зафиксирована.
+    bases = targetShas(
+      h,
+      h.store.inTransaction
+        ? undefined
+        : JSON.stringify([h.store.version().revision, wait.at, state.baseMoves?.at ?? null]),
+    );
   } catch {
     // Базу не прочитать — цикл тоже не проверит её сейчас; подсказка прежняя.
     return undefined;

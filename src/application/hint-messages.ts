@@ -251,9 +251,9 @@ export type HintCode = keyof HintParamMap;
 /** Раундов до эскалации ревью. */
 const REVIEW_ROUNDS = REVIEW_ESCALATION_ROUNDS;
 const EXHAUSTED_WAY_EN =
-  'The way out: fix the base and run devcontour base-update --by host (the new base gets a fresh check that the board workflow runs), or, once the failure is understood, ask the user to lift the wait with the confirm-and-start action of the base move card in the attention center.';
+  'The way out: fix the base and run devcontour base-update --by host (the new base gets a fresh check that the board workflow runs), or, once the failure is understood, ask the user to lift the wait without gates (the user starts the queue; the lead does not).';
 const EXHAUSTED_WAY_RU =
-  'Выход: исправьте базу и выполните devcontour base-update --by host (новую базу workflow доски проверит заново) или, когда провал понятен, попросите пользователя снять ожидание кнопкой «Подтвердить и запустить» в карточке переноса во «Внимании».';
+  'Выход: исправьте базу и выполните devcontour base-update --by host (новую базу workflow доски проверит заново) или, когда провал понятен, попросите пользователя снять ожидание без gates (очередь запускает пользователь, не ведущий).';
 
 /** Поля шага, из которых текст берёт доску, задание, цикл, план и вопрос. */
 export interface HintSubject {

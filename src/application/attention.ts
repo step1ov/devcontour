@@ -872,15 +872,34 @@ const reviewSource: AttentionSourceRule = {
       const what =
         escalationSubjectText(e, board?.title) +
         (taskId ? ` по задаче «${taskTitle(ctx, taskId)}»` : '');
-      const ids = e.findings.map((f) => f.id);
-      const count = e.findings.length + e.more;
-      const list =
-        e.findings
-          .map((f, i) => `${i + 1}. ${one(f.message)} (открыта раундов: ${f.rounds})`)
-          .join('\n') + (e.more ? `\n… и ещё находок: ${e.more}` : '');
-      const prompt =
-        `Находки, которые ревью ${what} не снимает (раунд ${e.round}):\n${list}` +
+      // Решение — только по находкам, показанным в тексте действия целиком
+      // (предел текста 2000 знаков): остальные ждут следующей карточки.
+      const intro = `Находки, которые ревью ${what} не снимает (раунд ${e.round}):`;
+      const outro =
         '\n\n«Принять как ограничение» — находки остаются известным ограничением, ревью их больше не держит. «Продолжить исправлять» — ведущий получит ещё раунды на исправление. Основание обязательно: оно записывается вместе с решением.';
+      const shown: typeof e.findings = [];
+      let list = '';
+      for (const f of e.findings) {
+        // Первая находка длиннее всего предела усекается (остальное — по
+        // ссылке на предмет); следующие входят только целиком.
+        const room = ATTENTION_LIMITS.prompt - intro.length - outro.length - 160;
+        const line = `\n${shown.length + 1}. ${clip(one(ctx.redact(f.message)), room)} (открыта раундов: ${f.rounds})`;
+        if (
+          shown.length &&
+          (intro + list + line).length + outro.length + 80 > ATTENTION_LIMITS.prompt
+        )
+          break;
+        shown.push(f);
+        list += line;
+      }
+      const ids = shown.map((f) => f.id);
+      const count = e.findings.length + e.more;
+      const rest = count - shown.length;
+      const prompt =
+        intro +
+        list +
+        (rest ? `\n… и ещё находок: ${rest} — решение по ним предложит следующая карточка.` : '') +
+        outro;
       const href = taskId ? hrefs.input(taskId) : board ? hrefs.board(board.id) : hrefs.contracts();
       const action = (id: string, label: string, withPrompt: boolean): AttentionAction => ({
         id,
@@ -892,7 +911,7 @@ const reviewSource: AttentionSourceRule = {
       return {
         sourceKey: `review:${e.kind}:${safeKey(e.subject)}`,
         occurrenceId: d({ kind: e.kind, subject: e.subject, findings: [...ids].sort() }),
-        sourceVersion: `${e.round}:${count}`,
+        sourceVersion: `${e.round}:${count}:${d(ids)}`,
         source: 'review',
         category: 'decision',
         actor: 'operator',
