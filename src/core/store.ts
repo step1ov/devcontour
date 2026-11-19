@@ -1317,8 +1317,9 @@ export class Store {
     // каждом чтении. Строки аренды попыток — тоже счётчик сроков.
     // Продление под видом heartbeat выдачу не меняет (F79): для шлюза
     // простоя — нейтральная запись этого процесса.
-    if (documentChanged) this.bump(type === 'heartbeat' ? 'lease' : 'data', type === 'heartbeat');
-    else if (type !== 'heartbeat' || leasesChanged) this.bump('lease', type === 'heartbeat');
+    if (documentChanged)
+      this.bumpAs(type === 'heartbeat' ? 'lease' : 'data', type === 'heartbeat');
+    else if (type !== 'heartbeat' || leasesChanged) this.bumpAs('lease', type === 'heartbeat');
     if (type !== 'heartbeat') {
       const at = new Date().toISOString();
       const inserted = this.db
@@ -1514,7 +1515,7 @@ export class Store {
     this.db
       .prepare(`INSERT OR REPLACE INTO ${schema}.local_workflow VALUES(?,?,?,?)`)
       .run(namespace, owner ?? '@workspace', key, JSON.stringify(value));
-    this.bump(revision, idleNeutral);
+    this.bumpAs(revision, idleNeutral);
   }
   /**
    * Обсуждения задач — локальная таблица владельца задачи: не документ
@@ -1848,11 +1849,10 @@ export class Store {
       .run(namespace, owner ?? '@workspace', key);
     if (removed.changes) this.bump('data');
   }
-  private bump(kind: 'data' | 'lease', idleNeutral = false) {
+  private bump(kind: 'data' | 'lease') {
     this.db
       .prepare(`UPDATE main.revision SET ${kind === 'data' ? 'n=n+1' : 'lease=lease+1'} WHERE id=1`)
       .run();
-    if (idleNeutral) this.idleNeutral[kind === 'data' ? 'revision' : 'lease']++;
   }
   /**
    * Подъёмы счётчиков записями этого процесса, которые выдачу очереди не
@@ -1875,6 +1875,11 @@ export class Store {
       revision: v.revision - this.idleNeutral.revision,
       lease: v.lease - this.idleNeutral.lease,
     };
+  }
+  /** `bump`; `idleNeutral` — запись не меняет выдачу (учёт для `idleVersion`). */
+  private bumpAs(kind: 'data' | 'lease', idleNeutral: boolean) {
+    this.bump(kind);
+    if (idleNeutral) this.idleNeutral[kind === 'data' ? 'revision' : 'lease']++;
   }
   /**
    * Ревизия данных: растёт при каждой записи состояния и каждой локальной
