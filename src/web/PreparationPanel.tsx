@@ -20,6 +20,7 @@ import { ReferencesBriefView } from './ReferencesBrief.tsx';
 import { ConceptBriefView } from './ConceptBrief.tsx';
 import { StageBoundary } from './StageBoundary.tsx';
 import { WorkerCards, type Worker } from './Workers.tsx';
+import { useNow } from './now.ts';
 import { Alert, AlertDescription, AlertTitle } from '@/ui/alert.tsx';
 import { Badge } from '@/ui/badge.tsx';
 import { Button } from '@/ui/button.tsx';
@@ -758,8 +759,18 @@ function BoardPhases({
   );
 }
 
+/** Опрос экрана этапа: интервал при переменах и предел без них (F88). */
+const PREPARATION_POLL_MS = 1500;
+const PREPARATION_POLL_MAX_MS = 6000;
+/** Полный ответ с меткой или «без изменений» с той же меткой. */
+type PreparationPoll =
+  (View & { etag: string; unchanged?: undefined }) | { unchanged: true; etag: string };
+
 export function PreparationPanel() {
   const [view, setView] = useState<View>();
+  // Опрос без перемен больше не перерисовывает экран (F88): подписи «N с
+  // назад» и время исполнителей обновляют часы панели.
+  useNow(Boolean(view?.enabled));
   const [selected, setSelected] = useState(() => readLocation().change);
   const [tab, setTab] = useState<Stage>(() => readLocation().tab);
   const [error, setError] = useState('');
@@ -824,34 +835,82 @@ export function PreparationPanel() {
     window.addEventListener('popstate', restore);
     return () => window.removeEventListener('popstate', restore);
   }, []);
+  // Метка последнего полного ответа экрана (F88): опрос с ней получает
+  // «без изменений» вместо всего тела. `wake` возвращает частый опрос после
+  // действия оператора.
+  const etag = useRef<string | undefined>(undefined);
+  const wake = useRef<() => void>(() => {});
+  const path = 'preparation' + (selected ? '?change=' + encodeURIComponent(selected) : '');
   const reload = useCallback(async () => {
-    setView(
-      await request<View>(
-        'preparation' + (selected ? '?change=' + encodeURIComponent(selected) : ''),
-      ),
-    );
-  }, [selected]);
+    const next = await request<PreparationPoll>(path);
+    if (!next.unchanged) {
+      etag.current = next.etag;
+      setView(next);
+    }
+    wake.current();
+  }, [path]);
+  // Опрос, пока вкладка видна: скрытая не опрашивает и догоняет при показе.
+  // Без перемен интервал растёт до PREPARATION_POLL_MAX_MS; перемена или
+  // действие возвращают PREPARATION_POLL_MS.
   useEffect(() => {
     let disposed = false;
+    let timer: ReturnType<typeof setTimeout> | undefined;
+    let delay = PREPARATION_POLL_MS;
+    let inflight = false;
+    etag.current = undefined;
+    const schedule = () => {
+      if (timer) clearTimeout(timer);
+      timer = undefined;
+      if (!disposed && !document.hidden) timer = setTimeout(() => void refresh(), delay);
+    };
     const refresh = async () => {
+      timer = undefined;
+      if (inflight) return;
+      inflight = true;
       try {
-        const next = await request<View>(
-          'preparation' + (selected ? '?change=' + encodeURIComponent(selected) : ''),
+        const known = etag.current;
+        const next = await request<PreparationPoll>(
+          path +
+            (known ? (path.includes('?') ? '&' : '?') + 'etag=' + encodeURIComponent(known) : ''),
         );
-        if (!disposed) setView(next);
+        if (disposed) return;
+        if (next.unchanged) delay = Math.min(delay * 2, PREPARATION_POLL_MAX_MS);
+        else {
+          delay = PREPARATION_POLL_MS;
+          etag.current = next.etag;
+          setView(next);
+        }
       } catch (e) {
         if (!disposed) setError((e as Error).message);
+      } finally {
+        inflight = false;
+      }
+      schedule();
+    };
+    wake.current = () => {
+      delay = PREPARATION_POLL_MS;
+      schedule();
+    };
+    const visibility = () => {
+      if (document.hidden) {
+        if (timer) clearTimeout(timer);
+        timer = undefined;
+      } else {
+        delay = PREPARATION_POLL_MS;
+        if (timer) clearTimeout(timer);
+        // Опрос в пути сам назначит следующий: вкладка уже видна.
+        void refresh();
       }
     };
     void refresh();
-    const timer = setInterval(() => {
-      void refresh();
-    }, 1500);
+    document.addEventListener('visibilitychange', visibility);
     return () => {
       disposed = true;
-      clearInterval(timer);
+      if (timer) clearTimeout(timer);
+      wake.current = () => {};
+      document.removeEventListener('visibilitychange', visibility);
     };
-  }, [selected]);
+  }, [path]);
   const run = async (action: () => Promise<unknown>) => {
     setBusy(true);
     setError('');

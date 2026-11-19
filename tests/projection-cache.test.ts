@@ -135,8 +135,14 @@ test('F60: опрос обзора, центра внимания, сводки 
     });
     await get('/api/attention');
     assert.equal(attentions.computations, 1);
-    await get('/api/preparation');
-    await get('/api/preparation');
+    // Экран этапа (F88): метка, «без изменений» с ней, метка — не часть области.
+    const preparation = await get('/api/preparation');
+    assert.equal(typeof preparation.etag, 'string');
+    assert.deepEqual(await get('/api/preparation'), preparation);
+    assert.deepEqual(await get('/api/preparation?etag=' + preparation.etag), {
+      unchanged: true,
+      etag: preparation.etag,
+    });
     assert.equal(preparations.computations, 1);
 
     // Сводка: вторая вкладка без номера получает посчитанный ответ.
@@ -152,6 +158,13 @@ test('F60: опрос обзора, центра внимания, сводки 
       etag: overview.etag,
     });
     assert.equal(overviews.computations, 2);
+
+    // Запись без перемены экрана этапа: пересчёт, метка прежняя.
+    assert.deepEqual(await get('/api/preparation?etag=' + preparation.etag), {
+      unchanged: true,
+      etag: preparation.etag,
+    });
+    assert.equal(preparations.computations, 2);
 
     // Настоящая перемена — новый ответ и новая метка.
     f.h.createBoard('Новое изменение', '', 'main');
