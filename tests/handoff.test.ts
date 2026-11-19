@@ -562,8 +562,9 @@ test('session_handoff: host.next по состоянию — сервер, за�
         /Подтвердить и запустить/,
       );
       assert.equal(f.store.read().paused, true, 'пауза ведущего не снята при удержании');
-      // Обычное ожидание переноса базы (не удержанное) под паузой ведущего —
-      // тоже решение человека: снятие паузы сняло бы его без проверки базы.
+      // Обычное ожидание переноса базы (не удержанное) под паузой ведущего:
+      // пауза остаётся паузой ведущего (F89) — её снятие снимает только
+      // паузу, ожидание проверит цикл задания (`leadResumeOf`).
       f.store.change('fixture', (s) => {
         s.waits = [
           {
@@ -576,8 +577,14 @@ test('session_handoff: host.next по состоянию — сервер, за�
       });
       const plain = at().host.next;
       assert.equal(plain?.code, 'pause-operator');
-      assert.deepEqual(plain?.params, {});
-      assert.match(plain?.detail ?? '', /only on the user's decision/);
+      assert.deepEqual(plain?.params, { by: 'lead' });
+      assert.match(plain?.detail ?? '', /paused by the lead/);
+      assert.match(plain?.detail ?? '', /Over a base-check wait this lifts only the pause/);
+      await new AgentService(f.h, f.root).run({
+        operation: 'queue_set',
+        input: { paused: false },
+      });
+      assert.equal(f.store.read().pauseReason, 'base-check', 'ожидание проверки базы осталось');
     } finally {
       f.cleanup();
     }

@@ -9,6 +9,7 @@ import { checkoutRootFor, checkoutRootOption } from './checkout-root.ts';
 import { holdSensitiveBaseMove } from './base-check.ts';
 import { BASE_WAIT_ACTION, HELD_BASE_ACTION } from '../core/work-status.ts';
 import { handoffRedactor } from '../application/handoff.ts';
+import { queueStopOf } from '../application/queue-stop.ts';
 
 /**
  * Начало остановки такта «база прогонов отстала» (`Scheduler.assertBaseCurrent`):
@@ -173,6 +174,20 @@ export async function baseUpdateOperation(
     }
     if (paths.length)
       return { ...base, baseHeld: { paths }, next: redactOf(h)(heldNext(paths, by)) };
+    // Пауза поверх ожидания (ведущего или человека) осталась паузой своего
+    // актёра (F89): шаг — тот же, что у остановки очереди и пакета ведущего
+    // (`leadResumeOf`), а не «queue_set откажет».
+    const state = h.store.read();
+    if (h.config.approvalMode === 'agent' && state.paused && state.pauseReason === 'operator') {
+      const action = queueStopOf(h).action;
+      if (action)
+        return {
+          ...base,
+          next: redactOf(h)(
+            'База обновлена; очередь ждёт проверки базы (base-check) под паузой. ' + action + '.',
+          ),
+        };
+    }
   } else if (held && !liftHold(h))
     throw new DomainError(
       'Переносить базу не пришлось, но очередь не продолжена: ' +
