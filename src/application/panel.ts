@@ -685,7 +685,7 @@ function buildSummary(
     queue: queueStopOf(h, state, recent),
     journalError: short(h.store.projectionError, DIAGNOSTIC),
     workflows: new LeadWorkflow(h)
-      .view()
+      .view(state)
       .map((w) => clip({ ...w, history: (w.history ?? []).slice(-5) })),
     dataRoot: resolve(root),
     ready,

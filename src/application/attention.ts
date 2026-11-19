@@ -495,7 +495,7 @@ function engineOf(ctx: AttentionContext): EngineReads {
       h,
       harness: harnessOf(h),
       holds: inputHolds(h),
-      jobs: new LeadWorkflow(h).view(),
+      jobs: new LeadWorkflow(h).view(ctx.state),
       boardByTask: boardsOf(ctx.state),
     };
     engineCache.set(ctx, reads);
@@ -2961,7 +2961,8 @@ export class AttentionService {
     const quick = new Map<string, QuickPrerequisites>();
     const root = this.options.root;
     if (!root || !this.options.cachedFacts) return quick;
-    const state = this.store.read();
+    // Замороженный снимок версии: опрос не разбирает документ заново.
+    const state = this.store.view();
     const change = state.preparation?.changes.find(
       (c) => c.id === state.preparation?.activeChangeId,
     );
@@ -2984,7 +2985,7 @@ export class AttentionService {
     return {
       store: this.store,
       h: this.h,
-      state: this.store.read(),
+      state: this.store.view(),
       root: this.options.root,
       now,
       quick,

@@ -25,7 +25,7 @@ import {
  */
 export function queueStopOf(
   h: DevContour,
-  state: DevContourState = h.store.read(),
+  state: Readonly<DevContourState> = h.store.view(),
   events: AuditEvent[] = h.store.events(),
 ) {
   const view = queueStopView(state, events, {
@@ -48,7 +48,7 @@ export function queueStopOf(
  * провалена — те же правила, что у `queueStopView`. Иначе ожидание висит до
  * действия человека: на ручном маршруте его не снимет никто другой.
  */
-export function baseWaitOf(h: DevContour | undefined, state: DevContourState) {
+export function baseWaitOf(h: DevContour | undefined, state: Readonly<DevContourState>) {
   const wait = state.waits?.find((w) => w.kind === 'base-check');
   if (!wait) return undefined;
   const held = heldBaseWait(wait.detail);

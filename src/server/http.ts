@@ -161,6 +161,11 @@ const scopeOf = (url: URL, ...ignored: string[]) =>
  * реже этого. С фактами Git быстрого маршрута — срок их кэша.
  */
 const PROJECTION_MAX_AGE_MS = 30_000;
+/**
+ * Медленные проекции (карта продукта читает карты историй в Git и обходит
+ * всю историю): один расчёт не чаще этого и при частых записях.
+ */
+const SLOW_TIER_MS = 30_000;
 const QUICK_FACTS_MAX_AGE_MS = 10_000;
 async function body(req: IncomingMessage) {
   let text = '';
@@ -207,6 +212,10 @@ export async function serve(
     maxAgeMs: PROJECTION_MAX_AGE_MS,
   });
   const preparations = new ProjectionCache<string>({ maxAgeMs: QUICK_FACTS_MAX_AGE_MS });
+  const products = new ProjectionCache<string>({
+    maxAgeMs: SLOW_TIER_MS,
+    minAgeMs: SLOW_TIER_MS,
+  });
   const attentionOf = (store: Store) =>
     new AttentionService(store, h, {
       root: h?.config.workspaceRoot ?? options.bootstrap?.workspace,
@@ -250,12 +259,15 @@ export async function serve(
     : undefined;
   /** Экран этапа подготовки: статус, настройка, исполнители и остановка очереди. */
   const preparationView = (store: Store, change: string | undefined) => {
-    const view = new Preparation(store).status(change);
+    // Замороженный снимок версии (`Store.view`), а не разбор документа на
+    // каждый пересчёт: та же база до setup и после него — один снимок.
+    const state = store.view();
+    const view = Preparation.statusOf(state, change);
     const root = h?.config.workspaceRoot ?? options.bootstrap?.workspace;
     // Setting a contour up is work with a result, so the stage that
     // waits on it reports how far it got and who is busy right now,
     // instead of a task count that stays at zero for the whole of setup.
-    const engine = h?.store.read();
+    const engine = h ? (h.store === store ? state : h.store.view()) : undefined;
     return {
       ...view,
       engineConnected: Boolean(h),
@@ -636,7 +648,7 @@ export async function serve(
             String(engine.store.revision()),
             [engine, configKey(engine)],
             (previous) => ({
-              value: etagged({ ...authorOverview(engine) }, previous),
+              value: etagged({ ...authorOverview(engine, engine.store.view()) }, previous),
               until: overviewUntil(engine),
             }),
           );
@@ -748,7 +760,7 @@ export async function serve(
             })),
             events,
             journalError: h.store.projectionError,
-            workflows: new LeadWorkflow(h).view(),
+            workflows: new LeadWorkflow(h).view(state),
             dataRoot: resolve(scheduler.root),
             ready: readyTasks(state, inputs).map((t) => t.id),
             config: {
@@ -774,11 +786,27 @@ export async function serve(
               packs: h.config.packs,
             },
           };
-        } else if (req.method === 'GET' && path === '/api/product')
-          result = new IntentService(h).productView({
-            releaseId: url.searchParams.get('release') ?? undefined,
-          });
-        else if (req.method === 'GET' && parts[1] === 'changesets' && parts[3] === 'journal')
+        } else if (req.method === 'GET' && path === '/api/product') {
+          // Карта продукта стоит сотни миллисекунд (Git и вся история), а
+          // вкладка опрашивает её каждые 10 с: расчёт не чаще `SLOW_TIER_MS`.
+          const engine = h;
+          jsonText(
+            res,
+            products.get(
+              scopeOf(url),
+              String(engine.store.revision()),
+              [engine, configKey(engine)],
+              () => ({
+                value: JSON.stringify(
+                  new IntentService(engine).productView({
+                    releaseId: url.searchParams.get('release') ?? undefined,
+                  }),
+                ),
+              }),
+            ),
+          );
+          return;
+        } else if (req.method === 'GET' && parts[1] === 'changesets' && parts[3] === 'journal')
           result = { content: renderJournal(h.store.read(), parts[2], h.store.allEvents()) };
         else if (req.method === 'GET' && parts[1] === 'changesets' && parts[3] === 'evidence') {
           const e = h.store
@@ -1071,7 +1099,7 @@ export async function serve(
     server,
     url: origin,
     /** Кэши проекций опроса панели: счётчики вычислений для диагностики и тестов. */
-    projections: { summaries, overviews, attentions, preparations },
+    projections: { summaries, overviews, attentions, preparations, products },
     close: async () => {
       stopping = true;
       // Ведущий цикл прерывается первым — до отметки остановки: его стадия не
