@@ -1075,8 +1075,7 @@ export class Store {
       // Счётчики для проверки задержки (F74) — до COMMIT, под локом записи:
       // прочитанные после него захватили бы чужую запись, сделанную, пока
       // этот процесс стоял между COMMIT и отметкой.
-      seenAtCommit =
-        !outer && this.leaseWatch && this.hasRevision ? this.counters() : undefined;
+      seenAtCommit = !outer && this.leaseWatch && this.hasRevision ? this.counters() : undefined;
       this.db.exec(outer ? `RELEASE ${point}` : 'COMMIT');
       if (key && this.written) this.committed = { key, ...this.written };
       // На месте: замыкание `frozen()`, полученное в транзакции, заполняет тот же объект.
@@ -1841,6 +1840,14 @@ export class Store {
       .prepare(`DELETE FROM ${schema}.local_workflow WHERE namespace=? AND owner=? AND key=?`)
       .run(namespace, owner ?? '@workspace', key);
     if (removed.changes) this.bump('data');
+  }
+  /**
+   * Поднять ревизию данных в открытой транзакции: изменение, которое Store
+   * по виду считает продлением сроков (`heartbeat`), изменило данные.
+   */
+  markDataChanged() {
+    if (!this.transaction) throw new Error('Store.markDataChanged требует открытой транзакции');
+    this.bump('data');
   }
   private bump(kind: 'data' | 'lease') {
     this.db
