@@ -270,6 +270,10 @@ export async function serve(
       product,
       ...(budgets ? { budgets } : {}),
       usage: usageTotals(records),
+      gapEvents: engine.store.eventsSince(
+        ['server.loop-stalled', 'server.clock-jump'],
+        new Date(Date.now() - 60 * 60 * 1000).toISOString(),
+      ),
     });
   };
   const startEngine = () => {
@@ -567,15 +571,9 @@ export async function serve(
                       ...(startupError ? { startupError } : {}),
                       ...(engine
                         ? {
-                            // Разрывы цикла — своим запросом: всплеск ошибок
-                            // очереди не вытесняет их из выборки.
-                            events: [
-                              ...engine.store.latestEvents(['scheduler.error'], 50),
-                              ...engine.store.latestEvents(
-                                ['server.loop-stalled', 'server.clock-jump'],
-                                500,
-                              ),
-                            ],
+                            // Разрывы цикла за час считает медленный ярус
+                            // (`eventsSince`, без окна последних записей).
+                            events: engine.store.latestEvents(['scheduler.error'], 50),
                             process: processHealth(engine),
                           }
                         : {}),

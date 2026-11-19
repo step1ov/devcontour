@@ -665,3 +665,67 @@ test('Home: unbounded strings from configuration and runs are clipped; a time-on
   assert.equal(time.limitUsd, undefined);
   assert.equal(time.reason, 'Бюджет времени workspace исчерпан');
 });
+
+test('Home windows: attempts, hourly, gates and current agree on [now - 24 h, now) and exact lease ends', () => {
+  const now = NOW + 7 * 60_000;
+  const ago = (ms: number) => new Date(now - ms).toISOString();
+  const runs = [
+    // Ровно сутки назад — в окне; ровно now — ещё нет.
+    run({
+      id: 'edge',
+      status: 'failed',
+      startedAt: ago(24 * HOUR),
+      finishedAt: ago(24 * HOUR - 60_000),
+      evidence: [evidence('g', false, { createdAt: ago(24 * HOUR) })],
+    }),
+    run({
+      id: 'now',
+      status: 'active',
+      startedAt: ago(0),
+      leaseUntil: now + HOUR,
+      evidence: [evidence('g', true, { createdAt: ago(0) })],
+    }),
+    // Аренда истекает ровно в now — уже не идёт; начатая ровно в now — тоже не «сейчас».
+    run({ id: 'lease', status: 'active', startedAt: ago(10 * 60_000), leaseUntil: now }),
+    run({ id: 'live', status: 'active', startedAt: ago(60_000), leaseUntil: now + 1 }),
+  ];
+  const attempts = attemptsOf(runs, now);
+  const load = loadOf(runs, now);
+  const hourlyTotal = load.hourly.reduce((n, [t]) => n + t, 0);
+  assert.equal(attempts.total, 3, 'edge, lease, live; not the one starting at now');
+  assert.equal(hourlyTotal, attempts.total, 'hourly totals agree with attempts of the day');
+  assert.equal(
+    load.hourly.reduce((n, [, f]) => n + f, 0),
+    attempts.failed,
+  );
+  assert.deepEqual(gatesOf(runs, now).failing, [{ gate: 'g', failed: 1, passed: 0 }]);
+  assert.equal(load.current, 2, 'live and the one starting at now; not the expired lease');
+});
+
+test('Home health: exact loop-stall counts come from the slow tier when present', () => {
+  const f = fixture();
+  try {
+    const gapEvents = Array.from({ length: 600 }, (_, i) => ({
+      id: i,
+      at: at(i * 1000),
+      type: i % 2 ? 'server.clock-jump' : 'server.loop-stalled',
+      data: null,
+    })) as AuditEvent[];
+    const slow = homeSlowView({ state: f.store.view(), now: NOW, preparation: false, gapEvents });
+    assert.deepEqual(slow.gaps, { loopStalls1h: 300, clockJumps1h: 300 });
+    const home = homeView({
+      state: f.store.view(),
+      h: f.h,
+      attention: emptyAttention,
+      revision: 1,
+      now: NOW,
+      slow,
+      // Окно последних событий пустое — счёт всё равно из медленного яруса.
+      events: [],
+    });
+    assert.equal(home.harness!.health.loopStalls1h, 300);
+    assert.equal(home.harness!.health.clockJumps1h, 300);
+  } finally {
+    f.cleanup();
+  }
+});

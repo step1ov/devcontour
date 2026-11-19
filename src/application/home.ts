@@ -326,6 +326,11 @@ export interface HomeSlow {
   gates: NonNullable<HomeHarness['gates']>;
   budget?: HomeHarness['budget'];
   usage?: HomeHarness['usage'];
+  /**
+   * Разрывы цикла за час — точным подсчётом по времени журнала (без окна
+   * последних записей), поэтому в медленном ярусе.
+   */
+  gaps?: { loopStalls1h: number; clockJumps1h: number };
 }
 
 export interface HomeContext {
@@ -758,12 +763,12 @@ function progressOf(
 const lastHour = (events: readonly AuditEvent[], type: string, now: number) =>
   events.filter((e) => e.type === type && now - Date.parse(e.at) < HOUR_MS).length;
 
+/** Момент в окне суток `[now − 24 ч, now)` — одно правило для всех рядов главной. */
+const inDay = (at: number, now: number) => at >= now - DAY_MS && at < now;
+
 /** Попытки за сутки по классу отказа: первые `failureKinds` классов, остальные — `other`. */
 export function attemptsOf(runs: DevContourState['runs'], now: number) {
-  const recent = runs.filter((r) => {
-    const age = now - Date.parse(r.startedAt);
-    return age >= 0 && age < DAY_MS;
-  });
+  const recent = runs.filter((r) => inDay(Date.parse(r.startedAt), now));
   const failed = recent.filter((r) => r.status === 'failed' || r.status === 'expired');
   const counts = new Map<string, number>();
   for (const r of failed) {
@@ -819,8 +824,10 @@ function harnessOf(
         ? { configDrift: clip(proc.configDrift, HOME_LIMITS.startupError) }
         : {}),
       ...(configPending ? { configPending } : {}),
-      loopStalls1h: lastHour(events, 'server.loop-stalled', now),
-      clockJumps1h: lastHour(events, 'server.clock-jump', now),
+      ...(ctx.slow?.gaps ?? {
+        loopStalls1h: lastHour(events, 'server.loop-stalled', now),
+        clockJumps1h: lastHour(events, 'server.clock-jump', now),
+      }),
       lead: leadPresence(change, state, now, ctx.leadMark ?? null),
     },
     href: devHref(preparation, 'settings'),
@@ -853,14 +860,14 @@ export function loadOf(runs: DevContourState['runs'], now: number): Omit<HomeLoa
   const from = to - buckets * LOAD_BUCKET_MS;
   const spans = runs.flatMap((r) => {
     const start = Date.parse(r.startedAt);
-    if (!Number.isFinite(start) || start >= now) return [];
+    if (!Number.isFinite(start) || start > now) return [];
     const finished = r.finishedAt ? Date.parse(r.finishedAt) : NaN;
     // Без записанного конца — до срока аренды (и у «идущей» попытки упавшего
-    // controller), не дальше now.
-    const lease = r.leaseUntil > 0 ? r.leaseUntil : r.status === 'active' ? now : start;
-    const end = Math.min(now, Number.isFinite(finished) ? finished : lease);
-    if (end <= from || end <= start) return [];
-    return [{ start, end, outcome: outcomeOf(r) }];
+    // controller); `until` — настоящий конец, `end` — он же, но не дальше now.
+    const lease = r.leaseUntil > 0 ? r.leaseUntil : r.status === 'active' ? Infinity : start;
+    const until = Number.isFinite(finished) ? finished : lease;
+    const end = Math.min(now, until);
+    return [{ start, end, until, outcome: outcomeOf(r) }];
   });
   const peaks: HomeLoad['peaks'] = [];
   for (let b = 0; b < buckets; b++) {
@@ -886,13 +893,14 @@ export function loadOf(runs: DevContourState['runs'], now: number): Omit<HomeLoa
   const hourly: HomeLoad['hourly'] = Array.from({ length: 24 }, () => [0, 0]);
   for (const r of runs) {
     const start = Date.parse(r.startedAt);
-    if (!(start >= from && start < to)) continue; // окно [now − 24 ч, now)
+    if (!inDay(start, now)) continue;
     const hour = Math.floor((start - from) / (4 * LOAD_BUCKET_MS));
     hourly[hour][0]++;
     if (r.status === 'failed' || r.status === 'expired') hourly[hour][1]++;
   }
+  // Идут в момент now: начаты не позже и кончатся (истечёт аренда) позже.
   const current = [0, 0, 0, 0] as [number, number, number, number];
-  for (const x of spans) if (x.start <= now && x.end >= now) current[x.outcome]++;
+  for (const x of spans) if (x.start <= now && x.until > now) current[x.outcome]++;
   return {
     from: new Date(from).toISOString(),
     to: new Date(to).toISOString(),
@@ -909,11 +917,10 @@ export function gatesOf(runs: DevContourState['runs'], now: number) {
   const rows = new Map<string, { gate: string; failed: number; passed: number }>();
   for (const run of runs) {
     // Попытка, кончившаяся раньше суток назад, свежих записей не несёт.
-    if (run.finishedAt && now - Date.parse(run.finishedAt) >= DAY_MS) continue;
+    if (run.finishedAt && Date.parse(run.finishedAt) < now - DAY_MS) continue;
     for (const e of run.evidence) {
       // Окно — по времени записи проверки, а не начала попытки.
-      const age = now - Date.parse(e.createdAt);
-      if (!(age >= 0 && age < DAY_MS)) continue;
+      if (!inDay(Date.parse(e.createdAt), now)) continue;
       // Взятая из кандидата запись — не запуск; неприменимый gate — не результат.
       if (e.kind !== 'test' || e.reusedEvidence) continue;
       const row = rows.get(e.gate) ?? { gate: clip(e.gate), failed: 0, passed: 0 };
@@ -1008,6 +1015,8 @@ export function homeSlowView(input: {
   product?: ProductView | { error: string };
   budgets?: Budgets;
   usage?: { calls: number; knownCostUsd: number; unknownCalls: number };
+  /** События разрывов цикла не старше часа (`Store.eventsSince`). */
+  gapEvents?: readonly AuditEvent[];
 }): HomeSlow {
   const asOf = new Date(input.now).toISOString();
   const coverage = coverageOf(input.product, asOf, input.preparation);
@@ -1018,6 +1027,14 @@ export function homeSlowView(input: {
     ...(coverage ? { coverage } : {}),
     gates: { ...gatesOf(input.state.runs, input.now), asOf },
     ...(budget ? { budget } : {}),
+    ...(input.gapEvents
+      ? {
+          gaps: {
+            loopStalls1h: lastHour(input.gapEvents, 'server.loop-stalled', input.now),
+            clockJumps1h: lastHour(input.gapEvents, 'server.clock-jump', input.now),
+          },
+        }
+      : {}),
     ...(input.usage
       ? {
           usage: {

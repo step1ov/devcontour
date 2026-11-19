@@ -82,7 +82,7 @@ test('A tile link opens its section; «Назад» returns home; «Главна
   // «Назад» строки пути — по записи самой панели: к главной.
   // Фокус не теряется на body: экран доски получил его на заголовке.
   await expect.poll(() => page.evaluate(() => document.activeElement !== document.body)).toBe(true);
-  expect(await page.title()).not.toBe('DevContour · Главная');
+  expect(await page.title()).toBe('DevContour — рабочий граф');
   await page.getByRole('button', { name: 'Назад', exact: true }).click();
   await expect(page.getByRole('heading', { level: 1, name: 'Главная' })).toBeVisible();
   await expect(page).toHaveURL(/\/$/);
@@ -209,6 +209,9 @@ test('Route fixtures: exhausted budget, failing gate, startupError and long titl
       state: 'exceeded',
       scope: 'workspace',
       limitUsd: 5,
+      limitMs: 3_600_000,
+      spentMs: 4_200_000,
+      reason: 'Бюджет workspace исчерпан: время и сумма',
       spentUsd: 7.25,
       unknownCalls: 2,
       complete: false,
@@ -229,6 +232,8 @@ test('Route fixtures: exhausted budget, failing gate, startupError and long titl
   const harness = page.getByRole('region', { name: 'Исполнение' });
   await expect(harness).toContainText('исчерпан');
   await expect(harness).toContainText('$7.25 из $5.00');
+  await expect(harness).toContainText('время 70 мин из 60 мин');
+  await expect(harness).toContainText('Бюджет workspace исчерпан: время и сумма');
   await expect(harness.getByRole('list', { name: 'Проверки с отказами' })).toContainText(
     'отказов 3',
   );
@@ -254,7 +259,7 @@ test('Charts: overall progress, agent load and hourly attempts render from route
     const to = Date.parse('2026-11-19T12:00:00.000Z');
     const peaks = Array.from({ length: 96 }, (): [number, number, number, number] => [0, 0, 0, 0]);
     peaks[56] = [0, 2, 1, 0]; // 14:00 предыдущих суток: пик 3
-    peaks[95] = [1, 0, 0, 0]; // сейчас 1
+    peaks[95] = [2, 1, 0, 0]; // пик последнего интервала — не «сейчас»
     const hourly = Array.from({ length: 24 }, (): [number, number] => [0, 0]);
     hourly[14] = [5, 2];
     harness.concurrency = 2;

@@ -43,10 +43,24 @@ function Root() {
 /**
  * Фокус на заголовке открывшегося экрана. Оболочка сначала рисует
  * заглушку загрузки, потом экран: пока фокус на body (заголовок заглушки
- * исчез), он переносится на текущий заголовок — не дольше 5 с.
+ * исчез), он переносится на текущий заголовок. Ожидание кончается, когда
+ * человек сам нажмёт клавишу или кнопку мыши, при следующем переходе или
+ * через 60 с.
  */
+let pendingFocus: (() => void) | undefined;
 function focusHeading() {
+  pendingFocus?.();
   const started = Date.now();
+  let frame = 0;
+  const stop = () => {
+    cancelAnimationFrame(frame);
+    window.removeEventListener('pointerdown', stop, true);
+    window.removeEventListener('keydown', stop, true);
+    if (pendingFocus === stop) pendingFocus = undefined;
+  };
+  pendingFocus = stop;
+  window.addEventListener('pointerdown', stop, true);
+  window.addEventListener('keydown', stop, true);
   const attempt = () => {
     if (document.activeElement === document.body || !document.activeElement) {
       const heading = document.querySelector<HTMLElement>('main h1, main h2, h1, h2');
@@ -55,10 +69,12 @@ function focusHeading() {
         heading.focus({ preventScroll: true });
       }
     }
-    if (Date.now() - started < 5000) requestAnimationFrame(attempt);
+    if (Date.now() - started < 60_000) frame = requestAnimationFrame(attempt);
+    else stop();
   };
-  requestAnimationFrame(attempt);
+  frame = requestAnimationFrame(attempt);
 }
+
 // Один источник всплывающих уведомлений на обе оболочки: подготовка
 // показывает панель разработки внутри себя, и второй Toaster дублировал бы их.
 // Центр внимания — над обеими оболочками и главной: до setup и после на том

@@ -106,7 +106,13 @@ function writeLocation(
   else if (state.attention) params.set('view', 'attention');
   // Голый адрес — главная: этап «Продукт» без изменения назван явно, иначе
   // перезагрузка уводила бы с этапа на главную.
-  if (state.tab !== 'product' || !params.size) params.set('stage', state.tab);
+  // Без изменения, вида и экрана панели разработки адрес без этапа был бы
+  // главной (`isHome`), и посторонний параметр этого не меняет.
+  if (
+    state.tab !== 'product' ||
+    (!state.change && !state.boards && !state.attention && !params.has('tab'))
+  )
+    params.set('stage', state.tab);
   const search = params.toString();
   const next = window.location.pathname + (search ? '?' + search : '');
   // Тот же набор параметров в другом порядке — тот же адрес: панель
