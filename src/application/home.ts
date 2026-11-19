@@ -3,7 +3,7 @@ import type { DevContour } from '../core/service.ts';
 import type { ProductChange } from '../core/preparation-model.ts';
 import { Preparation } from '../core/preparation.ts';
 import { LeadWorkflow, type WorkflowJob } from '../core/lead-workflow.ts';
-import { boardPhase, type BoardPhase } from '../core/work-status.ts';
+import { boardPhase, heldBaseOf, type BoardPhase } from '../core/work-status.ts';
 import { readyTasks } from '../core/graph.ts';
 import { repositories } from '../core/repositories.ts';
 import {
@@ -284,6 +284,8 @@ export type BudgetState = 'within' | 'exceeded' | 'undetermined';
 export interface BudgetScope {
   state: BudgetState;
   scope: string;
+  /** Подпись области для человека: «workspace», «задачи «…»», «доски «…»». */
+  label?: string;
   limitUsd?: number;
   limitMs?: number;
   spentMs?: number;
@@ -314,6 +316,7 @@ export interface HomeHarness {
     state: BudgetState;
     /** Область, которая держит работу (или общая): workspace, доска, задача. */
     scope: string;
+    label?: string;
     limitUsd?: number;
     limitMs?: number;
     spentMs?: number;
@@ -616,68 +619,114 @@ function preparationSections(
   } satisfies Record<'product' | 'architecture' | 'design', PreparationSection>;
 }
 
-/** Имена операций и команд ведущего: в текстах оператора их нет. */
-export const LEAD_COMMAND = /queue_set|workflow_start|session_handoff|--by host|devcontour \w|[{}]/;
+/**
+ * Имена операций и команд ведущего: в текстах оператора о состоянии их нет.
+ * Команда CLI — `devcontour` с подкомандой или флагом (`devcontour queue`,
+ * `devcontour --workspace …`), операции — `queue_set`, `workflow_*`,
+ * `session_handoff`, JSON-аргументы — фигурные скобки.
+ */
+export const LEAD_COMMAND =
+  /queue_set|workflow_[a-z]+|session_handoff|--by host|\bdevcontour\s+(?:-{1,2}[a-z]|[a-z][a-z-]*)|[{}]/;
+
+/** Что знает главная об остановке очереди, кроме вида `queueStopView`. */
+export interface QueueFacts {
+  approvalMode?: 'agent' | 'operator';
+  /** Есть задание ведущего, которое продвинет цикл `serve` (queued/running). */
+  workflowActive: boolean;
+}
 
 /**
  * Остановка очереди словами оператора: причина без имён операций и что
- * делать ему — кнопкой панели или ничего («ведущий запустит сам»).
- * Подсказки ведущему (`queueStopView().action`) остаются в его ответах.
+ * делать ему — кнопкой панели или ничего, если очередь снимет тот, кто
+ * её действительно снимет (цикл ведущего, операция изменения контракта).
+ * Те же правила, что у `queueStopView`; подсказки ведущему остаются в его
+ * ответах (`queueStopView().action`, `session_handoff`).
  */
 export function operatorQueue(
   queue: { reason?: string; stopReason?: string; failed?: true; by?: 'lead' },
-  state: Pick<DevContourState, 'pauseFailures' | 'waits'>,
-  approvalMode: 'agent' | 'operator' | undefined,
+  state: Pick<DevContourState, 'pauseFailures' | 'waits' | 'paused'>,
+  facts: QueueFacts,
 ): { reason: string; hint: string } {
-  const agent = (approvalMode ?? 'agent') === 'agent';
-  const start = 'запустите её кнопкой «Запустить очередь» в панели разработки';
-  const lead = 'ведущий агент запустит её сам';
+  const agent = (facts.approvalMode ?? 'agent') === 'agent';
+  // Сам продолжит выдачу только цикл ведущего в режиме агента.
+  const byLead = agent && facts.workflowActive;
+  const start = 'запустите очередь кнопкой «Запустить очередь» в панели разработки';
   const attention = 'что сделать — в «Нужно действие»';
-  // Причина — своя, если в тексте движка есть команды ведущего.
+  // Кто продолжит после устранения причины.
+  const resume = byLead
+    ? 'ведущий агент продолжит выдачу сам'
+    : agent
+      ? `ведущий агент запустит очередь, когда вернётся к работе; сейчас — ${start}`
+      : start;
   const own = (fallback: string) =>
     queue.stopReason && !LEAD_COMMAND.test(queue.stopReason) ? queue.stopReason : fallback;
-  if (state.pauseFailures?.includes('provider-auth'))
-    return {
-      reason: own('Провайдер моделей отказал: нет кредитов, исчерпан лимит или CLI не авторизован'),
-      hint: `Авторизуйте CLI исполнителя, пополните баланс или дождитесь сброса лимита; затем ${agent ? lead : start}.`,
-    };
+  const sentence = (text: string) => text[0].toUpperCase() + text.slice(1) + '.';
+  const wait = state.waits?.find((w) => w.kind === 'base-check')?.detail;
+  const held = Boolean(heldBaseOf(state));
+  const checkFailed = Boolean(wait?.startsWith('Проверка базы не пройдена'));
   if (queue.reason === 'reconfigure')
     return {
       reason: 'Применяется новая конфигурация после изменения контракта',
       hint: 'Ничего не требуется: пауза снимется сама.',
     };
-  if (state.waits?.some((w) => w.kind === 'base-check') || queue.reason === 'base-check')
+  // Отказ провайдера — его устраняет человек, затем выдачу продолжают.
+  if (state.pauseFailures?.includes('provider-auth'))
+    return {
+      reason: own('Провайдер моделей отказал: нет кредитов, исчерпан лимит или CLI не авторизован'),
+      hint:
+        'Авторизуйте CLI исполнителя, пополните баланс или дождитесь сброса лимита; затем ' +
+        (wait ? 'проверьте базу gates и ' : '') +
+        resume +
+        '.',
+    };
+  if (wait || queue.reason === 'base-check') {
+    if (held)
+      return {
+        reason: own('Перенос базы ждёт вашего подтверждения'),
+        hint: `Подтвердите перенос базы: ${attention}.`,
+      };
+    if (checkFailed)
+      return {
+        reason: own('Проверка базы не пройдена'),
+        hint: `Базу нужно исправить до запуска очереди: ${attention}.`,
+      };
+    // Ожидание под паузой человека или сбоем — снимает не цикл ведущего.
+    const underPause = queue.reason === 'operator' || queue.failed;
     return {
       reason: own('Выдача ждёт проверки базы gates'),
-      hint: agent
-        ? `Ведущий агент проверит базу и продолжит выдачу; если проверка не пройдёт — ${attention}.`
-        : `Проверьте базу gates, затем ${start}.`,
+      hint:
+        byLead && !underPause && queue.reason === 'base-check'
+          ? 'Ведущий агент проверит базу и продолжит выдачу сам.'
+          : `Проверьте базу gates и запустите очередь: ${attention}.`,
     };
+  }
   if (queue.failed)
     return {
       reason: own('Выдача остановлена сбоем'),
-      hint: `Нужно устранить причину: ${attention}.`,
+      hint: `Нужно устранить причину остановки: ${attention}.`,
     };
   switch (queue.reason) {
     case 'operator':
-      return queue.by === 'lead'
-        ? { reason: 'Выдачу остановил ведущий агент', hint: 'Ведущий агент снимет свою паузу сам.' }
-        : {
-            reason: 'Выдача остановлена вами',
-            hint: `Когда будете готовы — ${start}; ведущий агент вашу паузу не снимает.`,
-          };
+      if (queue.by === 'lead')
+        return {
+          reason: 'Выдачу остановил ведущий агент',
+          hint: agent
+            ? `Свою паузу ведущий агент снимает сам; запустить раньше — ${start}.`
+            : sentence(start),
+        };
+      return {
+        reason: 'Выдача остановлена вами',
+        hint: `Когда будете готовы — ${start}; ведущий агент вашу паузу не снимает.`,
+      };
     case 'shutdown':
-      return {
-        reason: 'Очередь на паузе после остановки сервера',
-        hint: agent ? 'Ведущий агент запустит её сам.' : `Когда будете готовы — ${start}.`,
-      };
+      return { reason: 'Очередь на паузе после остановки сервера', hint: sentence(resume) };
     case 'not-started':
-      return {
-        reason: 'Очередь ещё не запущена',
-        hint: agent ? 'Ведущий агент запустит её сам.' : `Когда будете готовы — ${start}.`,
-      };
+      return { reason: 'Очередь ещё не запущена', hint: sentence(resume) };
     default:
-      return { reason: own('Выдача остановлена'), hint: `Нужно устранить причину: ${attention}.` };
+      return {
+        reason: own('Выдача остановлена'),
+        hint: `Нужно устранить причину остановки: ${attention}.`,
+      };
   }
 }
 
@@ -742,7 +791,12 @@ function development(
   // Тексты остановки очереди обращаются к ведущему (`queue_set`,
   // `workflow_start`): оператору главная говорит своими словами.
   const plainQueue =
-    h && queue?.paused ? operatorQueue(queue, state, h.config.approvalMode) : undefined;
+    h && queue?.paused
+      ? operatorQueue(queue, state, {
+          approvalMode: h.config.approvalMode,
+          workflowActive: jobs.some((j) => j.status === 'queued' || j.status === 'running'),
+        })
+      : undefined;
   const ready = h ? readyTasks(state, holds).length : 0;
   const active = state.runs.filter((r) => r.status === 'active');
   const roleTitle = (taskId: string) => {
@@ -1315,7 +1369,12 @@ type Budgets = {
   }[];
 };
 /** Бюджет плитки: исчерпанный или неопределённый — первым, иначе общий. */
-export function budgetOf(overview: Budgets | undefined, asOf: string): HomeSlow['budget'] {
+export function budgetOf(
+  overview: Budgets | undefined,
+  asOf: string,
+  /** Название задачи или доски по id: подпись строки вместо UUID. */
+  nameOf?: (kind: 'task' | 'board', id: string) => string | undefined,
+): HomeSlow['budget'] {
   if (!overview?.budgets.length) return undefined;
   const rank = (s: BudgetState) => (s === 'exceeded' ? 0 : s === 'undetermined' ? 1 : 2);
   const sorted = overview.budgets.toSorted(
@@ -1324,8 +1383,15 @@ export function budgetOf(overview: Budgets | undefined, asOf: string): HomeSlow[
       Number(y.scope.kind === 'workspace') - Number(x.scope.kind === 'workspace'),
   );
   const b = sorted[0];
+  const labelOf = (x: Budgets['budgets'][number]) => {
+    if (x.scope.kind === 'workspace' || !x.scope.id) return undefined;
+    const name = nameOf?.(x.scope.kind, x.scope.id);
+    const kind = x.scope.kind === 'task' ? 'задачи' : 'доски';
+    return clip(`${kind} «${name ? clip(name, 60) : x.scope.id}»`);
+  };
   const line = (x: Budgets['budgets'][number]): BudgetScope => ({
     state: x.state,
+    ...(labelOf(x) ? { label: labelOf(x)! } : {}),
     scope: clip(
       x.scope.kind === 'workspace' ? 'workspace' : `${x.scope.kind} ${x.scope.id ?? ''}`.trim(),
     ),
@@ -1439,7 +1505,11 @@ export function homeSlowView(input: {
 }): HomeSlow {
   const asOf = new Date(input.now).toISOString();
   const coverage = coverageOf(input.product, asOf, input.preparation);
-  const budget = budgetOf(input.budgets, asOf);
+  const titles = new Map<string, string>([
+    ...input.state.tasks.map((t) => [`task:${t.id}`, t.title] as const),
+    ...input.state.boards.map((b) => [`board:${b.id}`, b.title] as const),
+  ]);
+  const budget = budgetOf(input.budgets, asOf, (kind, id) => titles.get(`${kind}:${id}`));
   const map =
     input.product && !('error' in input.product) && input.product.available
       ? input.product

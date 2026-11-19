@@ -17,6 +17,8 @@ import {
   homeSlowView,
   spendOf,
   russianCounts,
+  operatorQueue,
+  LEAD_COMMAND,
   homeView,
   loadOf,
   type HomeView,
@@ -1174,7 +1176,10 @@ test('Home progress: the current map release follows the map acceptance and star
   }
 });
 
-test('Home strings never carry lead commands: queue stops in operator words for every pause kind', () => {
+const START = 'запустите очередь кнопкой «Запустить очередь» в панели разработки';
+const LATER = `Ведущий агент запустит очередь, когда вернётся к работе; сейчас — ${START}.`;
+
+test('Home strings never carry lead commands: each pause kind gets its operator reason and who resumes it', () => {
   const f = fixture();
   const board = f.h.createBoard('Доска', '', 'main');
   f.h.addTask(board.id, input('Задача'));
@@ -1182,42 +1187,77 @@ test('Home strings never carry lead commands: queue stops in operator words for 
   try {
     const base = f.store.view();
     const pausedAt = at(10 * 60_000);
-    const cases: [string, Partial<DevContourState>, AuditEvent[]?][] = [
-      ['shutdown', { paused: true, pauseReason: 'shutdown', pausedAt }],
-      ['not-started', { paused: true, pausedAt: undefined, pauseReason: undefined }],
-      ['human', { paused: true, pauseReason: 'operator', pausedAt }],
+    const held = 'Перенос базы меняет приёмку или настройку контура (main:a): подтвердите';
+    // Режим агента, заданий ведущего нет: штатную паузу никто сам не снимет.
+    const cases: [string, Partial<DevContourState>, string, string, AuditEvent[]?][] = [
+      ['shutdown', { pauseReason: 'shutdown' }, 'Очередь на паузе после остановки сервера', LATER],
+      [
+        'not-started',
+        { pausedAt: undefined, pauseReason: undefined },
+        'Очередь ещё не запущена',
+        LATER,
+      ],
+      [
+        'human',
+        { pauseReason: 'operator' },
+        'Выдача остановлена вами',
+        `Когда будете готовы — ${START}; ведущий агент вашу паузу не снимает.`,
+      ],
       [
         'lead',
-        {
-          paused: true,
-          pauseReason: 'operator',
-          pausedAt,
-          pauseActor: { by: 'lead', at: pausedAt, reason: 'жду ревью' },
-        },
+        { pauseReason: 'operator', pauseActor: { by: 'lead', at: pausedAt, reason: 'ревью' } },
+        'Выдачу остановил ведущий агент',
+        `Свою паузу ведущий агент снимает сам; запустить раньше — ${START}.`,
       ],
       [
         'base-check',
         {
-          paused: true,
           pauseReason: 'base-check',
-          pausedAt,
           waits: [{ kind: 'base-check', detail: 'База перенесена: проверьте gates' }],
         } as Partial<DevContourState>,
+        'База перенесена: проверьте gates',
+        'Проверьте базу gates и запустите очередь: что сделать — в «Нужно действие».',
+      ],
+      [
+        'held',
+        {
+          pauseReason: 'base-check',
+          waits: [{ kind: 'base-check', detail: held }],
+        } as Partial<DevContourState>,
+        held,
+        'Подтвердите перенос базы: что сделать — в «Нужно действие».',
+      ],
+      [
+        'check-failed',
+        {
+          pauseReason: 'base-check',
+          waits: [{ kind: 'base-check', detail: 'Проверка базы не пройдена: unit' }],
+        } as Partial<DevContourState>,
+        'Проверка базы не пройдена: unit',
+        'Базу нужно исправить до запуска очереди: что сделать — в «Нужно действие».',
       ],
       [
         'provider-auth',
-        { paused: true, pauseReason: 'runtime', pausedAt, pauseFailures: ['provider-auth'] },
+        { pauseReason: 'runtime', pauseFailures: ['provider-auth'] },
+        // Причина движка без команд ведущего — как есть.
+        'Провайдер моделей отказал: нет кредитов, исчерпан лимит или runtime не авторизован',
+        'Авторизуйте CLI исполнителя, пополните баланс или дождитесь сброса лимита; затем ' +
+          LATER[0].toLowerCase() +
+          LATER.slice(1),
       ],
       [
         'runtime',
-        { paused: true, pauseReason: 'runtime', pausedAt },
+        { pauseReason: 'runtime' },
+        // Причина движка с командой ведущего заменяется общей.
+        'Выдача остановлена сбоем',
+        'Нужно устранить причину остановки: что сделать — в «Нужно действие».',
         [
           {
             id: 1,
             at: at(60_000),
             type: 'scheduler.error',
-            data: { error: 'нужен devcontour base-update --by host' },
-          },
+            data: { error: 'нужен devcontour --workspace /p base-update --by host' },
+          } as AuditEvent,
         ],
       ],
     ];
@@ -1231,10 +1271,8 @@ test('Home strings never carry lead commands: queue stops in operator words for 
           : value && typeof value === 'object'
             ? Object.entries(value).flatMap(([k, v]) => strings(v, k))
             : [];
-    const raw = /queue_set|workflow_start|session_handoff|--by host|devcontour \w|[{}]/;
-    const seen = new Set<string>();
-    for (const [name, over, events] of cases) {
-      const state = { ...base, ...over } as DevContourState;
+    for (const [name, over, reason, hint, events] of cases) {
+      const state = { ...base, paused: true, pausedAt, ...over } as DevContourState;
       const home = homeView({
         state,
         h: f.h,
@@ -1244,27 +1282,60 @@ test('Home strings never carry lead commands: queue stops in operator words for 
         events: events ?? [],
       });
       const dev = home.sections.development;
-      assert.ok(dev.queue.paused, name);
-      assert.ok(dev.queue.reason && dev.queue.hint, `${name}: operator reason and hint`);
-      seen.add(dev.queue.hint);
+      assert.equal(dev.queue.reason, reason, name);
+      assert.equal(dev.queue.hint, hint, name);
       for (const text of strings(home))
-        assert.doesNotMatch(text, raw, `${name}: «${text}» names a lead command`);
+        assert.doesNotMatch(text, LEAD_COMMAND, `${name}: «${text}» names a lead command`);
     }
-    // Разные остановки — разные подсказки; штатная остановка — «ведущий сам».
-    assert.ok(seen.size >= 5);
-    const shutdown = homeView({
-      state: { ...base, paused: true, pauseReason: 'shutdown', pausedAt },
-      h: f.h,
-      attention: emptyAttention,
-      revision: 1,
-      now: NOW,
-    }).sections.development;
-    assert.equal(shutdown.queue.reason, 'Очередь на паузе после остановки сервера');
-    assert.equal(shutdown.queue.hint, 'Ведущий агент запустит её сам.');
-    assert.equal(shutdown.blocker, 'Очередь на паузе после остановки сервера');
   } finally {
     f.cleanup();
   }
+});
+
+test('Home queue text: who resumes depends on the lead workflow and the approval mode', () => {
+  const q = (reason: string, extra: Record<string, unknown> = {}) =>
+    ({ reason, stopReason: 'x', ...extra }) as Parameters<typeof operatorQueue>[0];
+  const none = { paused: true } as const;
+  const wait = {
+    paused: true,
+    waits: [{ kind: 'base-check' as const, detail: 'База перенесена' }],
+  } as unknown as Parameters<typeof operatorQueue>[1];
+  const agentLive = { approvalMode: 'agent' as const, workflowActive: true };
+  const operator = { approvalMode: 'operator' as const, workflowActive: true };
+  assert.equal(
+    operatorQueue(q('shutdown'), none, agentLive).hint,
+    'Ведущий агент продолжит выдачу сам.',
+  );
+  // В режиме оператора цикла ведущего нет: запускает человек.
+  assert.equal(
+    operatorQueue(q('shutdown'), none, operator).hint,
+    START[0].toUpperCase() + START.slice(1) + '.',
+  );
+  assert.equal(
+    operatorQueue(q('operator', { by: 'lead' }), none, operator).hint,
+    START[0].toUpperCase() + START.slice(1) + '.',
+  );
+  // Ожидание базы снимает цикл ведущего только при паузе base-check.
+  assert.equal(
+    operatorQueue(q('base-check'), wait, agentLive).hint,
+    'Ведущий агент проверит базу и продолжит выдачу сам.',
+  );
+  assert.match(operatorQueue(q('operator'), wait, agentLive).hint, /Проверьте базу gates/);
+  assert.equal(
+    operatorQueue(q('reconfigure'), wait, agentLive).hint,
+    'Ничего не требуется: пауза снимется сама.',
+  );
+  // Фильтр команд ведущего.
+  for (const text of [
+    'queue_set {"paused": false}',
+    'workflow_retry',
+    'devcontour --workspace /p queue --start',
+    'devcontour queue --start --by host',
+    'session_handoff',
+  ])
+    assert.match(text, LEAD_COMMAND, text);
+  for (const text of ['Ведущий агент DevContour запустит очередь', 'Очередь на паузе'])
+    assert.doesNotMatch(text, LEAD_COMMAND, text);
 });
 
 test('Home budget: a line per scope, holding first; engine text gets Russian counts', () => {
@@ -1310,5 +1381,22 @@ test('Home budget: a line per scope, holding first; engine text gets Russian cou
   assert.equal(budget.scopes.length, HOME_LIMITS.budgetScopes);
   assert.equal(budget.total, 5);
   assert.equal(budget.scopes[1].reason, 'у 1 попытки вызовы не записаны');
+  // Подпись — название задачи или доски, а не UUID; без названия — id.
+  assert.equal(budget.scopes[1].label, undefined, 'workspace has no title');
+  const named = budgetOf(
+    {
+      budgets: [
+        b('board', 'exceeded', 'B-1'),
+        b('task', 'within', 'T-1'),
+        b('workspace', 'within'),
+      ],
+    },
+    at(0),
+    (kind, id) => (kind === 'board' && id === 'B-1' ? 'Доска один' : undefined),
+  )!;
+  assert.deepEqual(
+    named.scopes.map((s) => s.label),
+    ['доски «Доска один»', undefined, 'задачи «T-1»'],
+  );
   assert.equal(budget.reason, 'у 1 попытки вызовы не записаны');
 });

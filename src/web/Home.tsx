@@ -742,7 +742,13 @@ const kindNames: Record<string, string> = {
 };
 
 const money = (v: number) => '~$' + (v >= 100 ? v.toFixed(0) : v.toFixed(2));
-const limitText = (v: number) => '$' + (v >= 100 ? v.toFixed(0) : v.toFixed(2));
+// Предел — как задан: копейки не теряются и у больших сумм.
+const limitText = (v: number) => '$' + (Number.isInteger(v) ? v.toFixed(0) : v.toFixed(2));
+/** Доля предела: округление, но «100 %» — только у достигнутого предела. */
+const percentOf = (spent: number, limit: number) => {
+  const p = Math.round((spent / limit) * 100);
+  return spent < limit ? Math.min(p, 99) : p;
+};
 const callsText = (n: number) => `${n} ${plural(n, 'вызова', 'вызовов', 'вызовов')}`;
 
 /**
@@ -771,7 +777,7 @@ function BudgetLines({
             )}
           >
             <span className={b.state === 'within' ? 'text-muted-foreground' : undefined}>
-              Бюджет {b.scope}:{' '}
+              Бюджет {b.label ?? b.scope}:{' '}
             </span>
             <PanelLink
               href={href}
@@ -782,7 +788,7 @@ function BudgetLines({
             {' · '}
             {money(b.spentUsd)}
             {b.limitUsd !== undefined
-              ? ` из ${limitText(b.limitUsd)} (${Math.round((b.spentUsd / b.limitUsd) * 100)} %)`
+              ? ` из ${limitText(b.limitUsd)} (${percentOf(b.spentUsd, b.limitUsd)} %)`
               : ''}
             {b.limitMs !== undefined
               ? `; время ${minutes(b.spentMs ?? 0)} из ${minutes(b.limitMs)}`
@@ -800,6 +806,7 @@ function BudgetLines({
           {scopes.map((b) => (
             <li key={b.scope}>
               {b.scope}: оценка ${b.spentUsd.toFixed(4)}
+              {b.limitUsd !== undefined ? ` из $${b.limitUsd.toFixed(2)}` : ''}
               {b.spentMs !== undefined ? `, время ${Math.round(b.spentMs / 1000)} с` : ''}
               {b.reason ? `. ${b.reason}` : ''}
             </li>

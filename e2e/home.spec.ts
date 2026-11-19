@@ -254,7 +254,7 @@ test('Route fixtures: exhausted budget, failing gate, startupError and long titl
   // Строка на область: красная — исчерпанная, янтарная — не определённая.
   const budgets = harness.getByRole('list', { name: 'Бюджеты' });
   const lines = budgets.getByRole('listitem');
-  await expect(lines.nth(0)).toContainText('~$7.25 из $5.00 (145 %)');
+  await expect(lines.nth(0)).toContainText('~$7.25 из $5 (145 %)');
   await expect(lines.nth(0)).toContainText('время 70 мин из 60 мин');
   await expect(lines.nth(0)).toContainText('у 2 вызовов стоимость неизвестна — сумма занижена');
   await expect(lines.nth(0)).toHaveClass(/text-destructive/);
@@ -268,7 +268,9 @@ test('Route fixtures: exhausted budget, failing gate, startupError and long titl
   const details = harness.getByText('подробнее', { exact: true });
   await expect(page.getByText('Бюджет workspace исчерпан: время и сумма')).toBeHidden();
   await details.click();
-  await expect(page.getByText(/workspace: оценка \$7\.2500, время 4200 с/)).toBeVisible();
+  await expect(
+    page.getByText(/workspace: оценка \$7\.2500 из \$5\.00, время 4200 с/),
+  ).toBeVisible();
   await expect(page.getByText(/board B-1: оценка \$1014\.1558/)).toContainText(
     'у 1 попытки вызовы не записаны',
   );
