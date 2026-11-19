@@ -72,6 +72,21 @@ export const pausedByLead = (
   state.pauseActor?.by === 'lead' &&
   state.pauseActor.at === state.pausedAt;
 
+/**
+ * Новое время действующей паузы (перенос базы ставит ожидание проверки
+ * поверх неё). Пауза ведущего остаётся его паузой: отметка ведущего
+ * привязана ко времени паузы и переходит на новое время (F89), иначе пауза
+ * ведущего читалась бы паузой человека.
+ */
+export function movePauseTime(
+  state: Pick<DevContourState, 'paused' | 'pauseReason' | 'pausedAt' | 'pauseActor'>,
+  at: string,
+) {
+  const lead = pausedByLead(state);
+  state.pausedAt = at;
+  if (lead && state.pauseActor) state.pauseActor = { ...state.pauseActor, at };
+}
+
 /** Предел короткой причины паузы ведущего (`queue_set {"reason"}`), в знаках. */
 export const PAUSE_REASON_CHARS = 300;
 
@@ -95,14 +110,40 @@ export const heldBasePaths = (detail: string | undefined): string[] => {
 };
 
 /**
- * Паузу поставил ведущий, и снять её он вправе сам: под ней нет ожидания
- * проверки базы. Снятие паузы снимает и ожидание без проверки базы, а под
- * паузой `operator` ожидание снимает только человек (как `baseWaitOf`): ни
- * цикл ведущего, ни автоматическая проверка его уже не снимут.
+ * Что сделает снятие паузы ведущим (`queue_set {"paused": false}`,
+ * `queue --start --by host`) — один источник для отказа `pause` и для
+ * подсказок (`session_handoff`, центр внимания, ответ `base-update`):
+ * - `lifts` — пауза снимается, очередь идёт;
+ * - `keeps-base-check` — снимается только пауза поверх неудержанного
+ *   ожидания проверки базы: очередь остаётся на ожидании `base-check`,
+ *   которое снимут gates цикла задания;
+ * - `held` — отказ: удержанный перенос базы (D42) подтверждает только человек;
+ * - `base-check` — отказ: очередь держит одно ожидание проверки базы, снятие
+ *   паузы сняло бы его без gates.
+ */
+export type LeadResume = 'lifts' | 'keeps-base-check' | 'held' | 'base-check';
+export function leadResumeOf(
+  state: Partial<Pick<DevContourState, 'paused' | 'pauseReason' | 'waits'>>,
+): LeadResume {
+  if (heldBaseOf(state)) return 'held';
+  if (state.paused && state.waits?.some((w) => w.kind === 'base-check'))
+    return state.pauseReason === 'base-check' ? 'base-check' : 'keeps-base-check';
+  return 'lifts';
+}
+
+/**
+ * Паузу поставил ведущий, и снять её он вправе сам (`leadResumeOf` не
+ * отказывает): над неудержанным ожиданием проверки базы снимается только
+ * пауза, ожидание проверит цикл задания. Удержанный перенос — решение
+ * человека.
  */
 export const leadLiftsPause = (
   state: Pick<DevContourState, 'paused' | 'pauseReason' | 'pausedAt' | 'pauseActor' | 'waits'>,
-) => pausedByLead(state) && !state.waits?.some((w) => w.kind === 'base-check');
+) => {
+  if (!pausedByLead(state)) return false;
+  const resume = leadResumeOf(state);
+  return resume === 'lifts' || resume === 'keeps-base-check';
+};
 
 /**
  * Начало остановки такта «база прогонов отстала» (`Scheduler.assertBaseCurrent`):
@@ -154,7 +195,7 @@ export function staleBaseStop(
  * `pause` отказывает. Ручной маршрут — запуск оператора после проверки.
  */
 export const BASE_WAIT_ACTION =
-  'Базу проверит workflow доски: зарегистрируйте доску через workflow_start (идущее задание проверит её само) — его цикл исполнит gates на новой базе и продолжит выдачу. Ведущий агент ожидание сам не снимает: queue_set и queue --start --by host откажут. Без workflow ожидание снимает только пользователь после проверки базы — «Подтвердить и запустить» в «Внимании» панели; попросите его, сами очередь не запускайте';
+  'Базу проверит workflow доски: зарегистрируйте доску через workflow_start (идущее задание проверит её само) — его цикл исполнит gates на новой базе и продолжит выдачу. Ведущий агент само ожидание не снимает: queue_set и queue --start --by host снимают только паузу поверх него, а когда очередь держит одно ожидание — откажут. Без workflow ожидание снимает только пользователь после проверки базы — «Подтвердить и запустить» в «Внимании» панели; попросите его, сами очередь не запускайте';
 
 /** Действие при удержанном переносе базы: подтверждает оператор в «Внимании». */
 export const HELD_BASE_ACTION =

@@ -15,7 +15,12 @@ import { handoffRedactor } from '../application/handoff.ts';
 import { repository, repositories } from '../core/repositories.ts';
 import { validateWorkflow } from '../core/workflow.ts';
 import { TaskFailure } from '../core/failure.ts';
-import { STALE_BASE, mayBeStaleBaseStop, staleBaseStop } from '../core/work-status.ts';
+import {
+  STALE_BASE,
+  mayBeStaleBaseStop,
+  movePauseTime,
+  staleBaseStop,
+} from '../core/work-status.ts';
 import { executionOf, type Execution } from '../harness/execution.ts';
 import { devcontourContextSource, pinnedSnapshot, taskPacks } from '../harness/host.ts';
 import { runtimeAdapters } from '../harness/adapters.ts';
@@ -295,7 +300,8 @@ export class Scheduler {
     this.h.store.change('base.fast-forwarded', (st) => {
       st.paused = true;
       if (st.pauseReason !== 'operator') st.pauseReason = 'base-check';
-      st.pausedAt = new Date().toISOString();
+      // Пауза ведущего остаётся его паузой (F89).
+      movePauseTime(st, new Date().toISOString());
       waitBaseCheck(
         st,
         moved,
