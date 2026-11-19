@@ -39,7 +39,7 @@ const taskIdOf = (state: string) =>
     (t) => t.title === 'Оптимальный рюкзак',
   )!.id;
 async function openTask(page: Page) {
-  await page.goto(base + '/');
+  await page.goto(base + '/?tab=overview');
   await page
     .getByRole('navigation', { name: 'Доски' })
     .getByRole('button', { name: /Рюкзак: договор проверки/ })

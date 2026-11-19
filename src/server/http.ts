@@ -4,7 +4,9 @@ import { DiscussionService } from '../application/discussion.ts';
 import { quickResultDiff, quickSetupApplied, quickResult } from '../runner/quick.ts';
 import { quickFactsCache, quickPrerequisites, quickView } from '../application/quick-view.ts';
 import { AttentionService, type AttentionView } from '../application/attention.ts';
-import { homeView } from '../application/home.ts';
+import { homeSlowView, homeView, type HomeSlow } from '../application/home.ts';
+import { budgetOverview } from '../harness/budget.ts';
+import { usageTotals } from '../core/usage.ts';
 import type { UsageRecord } from '../core/usage.ts';
 import { Preparation } from '../core/preparation.ts';
 import { PreparationAgent } from '../application/preparation-agent.ts';
@@ -38,6 +40,7 @@ import {
   panelSummary,
   summaryCache,
   inputPolicyView,
+  configDrift,
   panelTask,
   panelTaskSearch,
 } from '../application/panel.ts';
@@ -215,6 +218,13 @@ export async function serve(
     maxAgeMs: PROJECTION_MAX_AGE_MS,
   });
   const homes = new ProjectionCache<Promise<Etagged>>({ maxAgeMs: PROJECTION_MAX_AGE_MS });
+  // Медленный ярус главной (карта продукта, проверки за сутки, бюджеты,
+  // расход): не чаще раза в `SLOW_TIER_MS` и при неизменных данных — раз в
+  // пять минут; ответ называет момент расчёта (`asOf`).
+  const homeSlows = new ProjectionCache<HomeSlow>({
+    maxAgeMs: 10 * SLOW_TIER_MS,
+    minAgeMs: SLOW_TIER_MS,
+  });
   const preparations = new ProjectionCache<string>({ maxAgeMs: QUICK_FACTS_MAX_AGE_MS });
   const products = new ProjectionCache<string>({
     maxAgeMs: SLOW_TIER_MS,
@@ -225,6 +235,49 @@ export async function serve(
       root: h?.config.workspaceRoot ?? options.bootstrap?.workspace,
       cachedFacts,
     });
+  // Состояние процесса для здоровья главной: сбой проекции журнала и
+  // расхождение config.json с действующей конфигурацией.
+  const processHealth = (engine: DevContour) => {
+    const drift = scheduler ? configDrift(engine, scheduler.root) : null;
+    return {
+      ...(engine.store.projectionError ? { journalError: engine.store.projectionError } : {}),
+      ...(drift ? { configDrift: drift.reason } : {}),
+    };
+  };
+  // Медленный ярус: карта продукта из общего кэша вкладки «Карта продукта»
+  // (та же область, что у `GET /api/product` без релиза), бюджеты и расход.
+  const homeSlowOf = (engine: DevContour, store: Store): HomeSlow => {
+    let product: Parameters<typeof homeSlowView>[0]['product'];
+    try {
+      product = JSON.parse(
+        products.get(
+          scopeOf(new URL('http://home.invalid/api/product')),
+          String(engine.store.revision()),
+          [engine, configKey(engine)],
+          () => ({ value: JSON.stringify(new IntentService(engine).productView({})) }),
+        ),
+      ) as typeof product;
+    } catch (error) {
+      product = { error: error instanceof Error ? error.message : String(error) };
+    }
+    let budgets: ReturnType<typeof budgetOverview>;
+    try {
+      budgets = budgetOverview(engine);
+    } catch {
+      budgets = undefined;
+    }
+    const records = [undefined, ...repositories(engine.config).map((r) => r.id)].flatMap((owner) =>
+      Object.values(engine.store.localRecords<UsageRecord>('usage', owner)),
+    );
+    return homeSlowView({
+      state: store.view(),
+      now: Date.now(),
+      preparation: Boolean(store.view().preparation),
+      product,
+      ...(budgets ? { budgets } : {}),
+      usage: usageTotals(records),
+    });
+  };
   const startEngine = () => {
     if (!h || !scheduler) return;
     attachJournal(h);
@@ -486,12 +539,22 @@ export async function serve(
         if (req.method === 'GET' && path === '/api/home' && preparationStore) {
           const store = preparationStore;
           const attention = activeAttention(store, ACTIVE_ATTENTION_SCOPE, {});
+          const slowEngine = h;
+          const slow = slowEngine
+            ? homeSlows.get(
+                'home',
+                String(store.revision()),
+                [slowEngine, configKey(slowEngine)],
+                () => ({ value: homeSlowOf(slowEngine, store) }),
+              )
+            : undefined;
+          const mark = leadActivityMark(store);
           const pending = homes.get(
             'home',
-            `${store.revision()}|${leadActivityMark(store) ?? ''}`,
+            `${store.revision()}|${mark ?? ''}`,
             // Центр внимания по тождеству: его пересчёт (срок lease, факты
-            // Git) пересчитывает и главную.
-            [store, h, configKey(h), startupError, attention],
+            // Git) пересчитывает и главную; медленный ярус — тоже.
+            [store, h, configKey(h), startupError, attention, slow],
             (previous) => {
               let value: Promise<Etagged> | undefined = undefined;
               value = (async () => {
@@ -509,8 +572,16 @@ export async function serve(
                       now: Date.now(),
                       ...(startupError ? { startupError } : {}),
                       ...(engine
-                        ? { events: engine.store.latestEvents(['scheduler.error'], 50) }
+                        ? {
+                            events: engine.store.latestEvents(
+                              ['scheduler.error', 'server.loop-stalled', 'server.clock-jump'],
+                              200,
+                            ),
+                            process: processHealth(engine),
+                          }
                         : {}),
+                      ...(slow ? { slow } : {}),
+                      leadMark: mark,
                     }),
                   );
                 let { view } = await attention;
@@ -1168,7 +1239,7 @@ export async function serve(
     server,
     url: origin,
     /** Кэши проекций опроса панели: счётчики вычислений для диагностики и тестов. */
-    projections: { summaries, overviews, attentions, preparations, products, homes },
+    projections: { summaries, overviews, attentions, preparations, products, homes, homeSlows },
     close: async () => {
       stopping = true;
       // Ведущий цикл прерывается первым — до отметки остановки: его стадия не

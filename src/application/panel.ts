@@ -385,7 +385,7 @@ export function inputPolicyView(h: DevContour, state: Readonly<DevContourState>,
  * сверяются с загрузкой дёшево; digest считается только при изменённых
  * байтах — переформатирование без смысловой правки расхождением не считается.
  */
-function configDrift(h: DevContour, root: string) {
+export function configDrift(h: DevContour, root: string) {
   const changed = h.configProvenance();
   if (!changed) return null;
   try {

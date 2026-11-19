@@ -35,6 +35,7 @@ import { QuickForm, QuickRoute } from './QuickRoute.tsx';
 import { AttentionCount, useAttentionScreen } from './AttentionProvider.tsx';
 import { AttentionCenter } from './AttentionCenter.tsx';
 import { developmentStatus } from './development-status.ts';
+import { isHome, navigate } from './navigation.ts';
 
 const Development = lazy(() => import('./App.tsx').then((m) => ({ default: m.App })));
 type View = ReturnType<Preparation['status']> & {
@@ -101,9 +102,11 @@ function writeLocation(
   const params = new URLSearchParams(window.location.search);
   for (const key of ['change', 'stage', 'view']) params.delete(key);
   if (state.change) params.set('change', state.change);
-  if (state.tab !== 'product') params.set('stage', state.tab);
   if (state.boards) params.set('view', 'boards');
   else if (state.attention) params.set('view', 'attention');
+  // Голый адрес — главная: этап «Продукт» без изменения назван явно, иначе
+  // перезагрузка уводила бы с этапа на главную.
+  if (state.tab !== 'product' || !params.size) params.set('stage', state.tab);
   const search = params.toString();
   const next = window.location.pathname + (search ? '?' + search : '');
   // Тот же набор параметров в другом порядке — тот же адрес: панель
@@ -699,7 +702,10 @@ export function PreparationPanel() {
   // Этап выбирается по состоянию один раз и заменяет адрес, а не добавляет
   // запись: иначе «Назад» возвращал бы на тот же выбор.
   const landed = useRef(new URLSearchParams(window.location.search).has('stage'));
-  const replaceLocation = useRef(false);
+  // Первая запись адреса — нормализация пришедшей ссылки (этап «Продукт» по
+  // умолчанию): замена с якорем, а не новая запись, иначе «Назад» после
+  // перехода с главной возвращал на ту же ссылку, а не на главную.
+  const replaceLocation = useRef(true);
   useEffect(() => {
     if (landed.current || !view?.enabled) return;
     landed.current = true;
@@ -715,6 +721,8 @@ export function PreparationPanel() {
   }, [selected, tab, tasks, attention]);
   useEffect(() => {
     const restore = () => {
+      // Переход на главную: оболочку сменит корень, адрес не переписывается.
+      if (isHome(window.location)) return;
       const state = readLocation();
       // Адрес уже в истории («Назад», переход центра внимания): запись
       // нормализуется на месте, и эффект адреса не добавляет её вперёд.
@@ -864,7 +872,18 @@ export function PreparationPanel() {
     <main className="mx-auto max-w-[100rem] p-4 sm:p-8">
       <header className="mb-8 flex flex-wrap items-start justify-between gap-6">
         <div>
-          <span className="text-primary mb-3 block font-semibold">DevContour</span>
+          <a
+            href="/"
+            className="text-primary mb-3 block font-semibold no-underline"
+            aria-label="DevContour, главная"
+            onClick={(e) => {
+              if (e.metaKey || e.ctrlKey || e.shiftKey || e.button !== 0) return;
+              e.preventDefault();
+              navigate('/');
+            }}
+          >
+            DevContour
+          </a>
           <h1 className="text-xl leading-tight font-semibold">От запроса к разработке</h1>
           <p className="text-muted-foreground mt-3 max-w-[70ch]">
             Сначала определяем продукт, затем согласуем устройство системы и запускаем исполнение.
@@ -872,6 +891,18 @@ export function PreparationPanel() {
         </div>
         <div className="grid gap-1 text-sm">
           <span className="text-success whitespace-nowrap">Панель подключена</span>
+          <Button asChild variant="link" className="h-auto justify-start px-0">
+            <a
+              href="/"
+              onClick={(e) => {
+                if (e.metaKey || e.ctrlKey || e.shiftKey || e.button !== 0) return;
+                e.preventDefault();
+                navigate('/');
+              }}
+            >
+              Главная
+            </a>
+          </Button>
           <Button asChild variant="link" className="h-auto justify-start gap-2 px-0">
             <a
               href="?view=attention"

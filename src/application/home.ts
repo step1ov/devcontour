@@ -11,6 +11,10 @@ import type { AttentionView } from './attention.ts';
 import { inputHolds } from './input.ts';
 import { queueStopOf, quietAttempts } from './queue-stop.ts';
 import { hrefs } from './panel-links.ts';
+import { leadPresence } from './quick-view.ts';
+import { harnessVersion } from '../harness/index.ts';
+import { configApplyKeys, reconfigureSlotBusy } from '../runner/reconfigure.ts';
+import type { ProductView } from '../core/product-map.ts';
 
 /**
  * Главная панели (`GET /api/home`): по плитке на раздел — продукт,
@@ -27,6 +31,11 @@ export const HOME_LIMITS = {
   boards: 3,
   jobs: 3,
   runningNow: 6,
+  releases: 8,
+  failingGates: 5,
+  failureKinds: 8,
+  /** Интервалов графика нагрузки: сутки по 15 минут. */
+  loadBuckets: 96,
   title: 160,
   startupError: 300,
   /** Жёсткий предел тела ответа (тест). */
@@ -177,6 +186,11 @@ export interface HomeView {
   generatedAt: string;
   revision: number;
   shell: 'bootstrap' | 'preparation' | 'development';
+  /**
+   * Подготовка ведётся в панели. Без неё (разработка без подготовки) плитки
+   * продукта и архитектуры ведут на карту продукта и контракты.
+   */
+  preparation: boolean;
   engineConnected: boolean;
   startupError?: string;
   change?: { id: string; key: string; title: string; phase: string };
@@ -186,6 +200,10 @@ export interface HomeView {
     design: PreparationSection;
     development: DevelopmentSection;
   };
+  progress?: HomeProgress;
+  harness?: HomeHarness;
+  /** Экран внимания этой оболочки (кто действует — `&who=`). */
+  links: { attention: string };
   attention: {
     active: number;
     unread: number;
@@ -194,6 +212,116 @@ export interface HomeView {
     /** Центр внимания перечислил не все карточки: разделы считают перечисленные. */
     truncated?: number;
   };
+}
+
+/** Ход работ: релизы, задачи, ChangeSet и покрытие (медленный ярус). */
+export interface HomeProgress {
+  releases: {
+    id: string;
+    title: string;
+    tasks: number;
+    done: number;
+    failed: number;
+    criteria: number;
+    readiness: 'unplanned' | 'in-progress' | 'failed' | 'done';
+  }[];
+  releasesTotal: number;
+  tasks: { total: number; done: number; remaining: number; failed: number; cancelled: number };
+  changeSets: {
+    total: number;
+    accepted: number;
+    verifying: number;
+    failed: number;
+    latest?: {
+      id: string;
+      title: string;
+      status: 'accepted' | 'verifying' | 'failed' | 'open';
+      href: string;
+    };
+  };
+  /** Карта продукта: расчёт медленного яруса, не старше `asOf` + 30 с. */
+  coverage?:
+    | {
+        available: true;
+        releaseId: string;
+        complete: boolean;
+        accepted: boolean;
+        issueCount: number;
+        unconfirmed: number;
+        deferred: number;
+        asOf: string;
+        href: string;
+      }
+    | { available: false; reason: string; asOf: string; href: string };
+  href: string;
+}
+export type BudgetState = 'within' | 'exceeded' | 'undetermined';
+/** Исполнение: попытки, проверки, сбои, бюджет и здоровье сервера. */
+export interface HomeHarness {
+  version: string;
+  concurrency: number;
+  active: number;
+  attempts24h: { total: number; failed: number; byKind: Record<string, number> };
+  /** Проверки попыток за 24 ч (медленный ярус); у отказавших — первые пять. */
+  gates?: {
+    failing: { gate: string; failed: number; passed: number }[];
+    total: number;
+    asOf: string;
+  };
+  /** Нагрузка агентов за сутки (медленный ярус). */
+  load?: HomeLoad;
+  failures: { tasks: number; recoveries: number; quiet: number };
+  budget?: {
+    state: BudgetState;
+    /** Область, которая держит работу (или общая): workspace, доска, задача. */
+    scope: string;
+    limitUsd?: number;
+    spentUsd: number;
+    unknownCalls: number;
+    complete: boolean;
+    exceeded: number;
+    total: number;
+    reason?: string;
+    asOf: string;
+  };
+  usage?: { calls: number; knownCostUsd: number; unknownCalls: number; asOf: string };
+  health: {
+    journalError?: string;
+    configDrift?: string;
+    configPending?: string;
+    loopStalls1h: number;
+    clockJumps1h: number;
+    lead: { present: boolean; lastActivityAt: string | null };
+  };
+  href: string;
+  budgetHref: string;
+}
+/** Исход попытки на графике нагрузки. */
+export type LoadOutcome = 'running' | 'succeeded' | 'failed' | 'interrupted';
+/**
+ * Нагрузка агентов за сутки: по интервалу `bucketMs` — пик одновременно
+ * идущих попыток и их исходы в момент пика; по часу — начатые попытки и
+ * сбои среди них. Размер постоянный: не больше `HOME_LIMITS.loadBuckets`
+ * интервалов, сколько бы попыток ни было.
+ */
+export interface HomeLoad {
+  from: string;
+  to: string;
+  bucketMs: number;
+  /** Пик в интервале по исходам: [идёт, принята, сбой, прервана]. */
+  peaks: [number, number, number, number][];
+  /** Начатые попытки по часам: [всего, со сбоем]. */
+  hourly: [number, number][];
+  asOf: string;
+}
+/** Медленный ярус главной: считается не чаще раза в 30 с (`minAgeMs`). */
+export interface HomeSlow {
+  asOf: string;
+  load: HomeLoad;
+  coverage?: HomeProgress['coverage'];
+  gates: NonNullable<HomeHarness['gates']>;
+  budget?: HomeHarness['budget'];
+  usage?: HomeHarness['usage'];
 }
 
 export interface HomeContext {
@@ -205,8 +333,17 @@ export interface HomeContext {
   revision: number;
   now: number;
   startupError?: string;
-  /** События `scheduler.error` для причины остановки очереди. */
+  /**
+   * Недавние события: `scheduler.error` для причины остановки очереди,
+   * `server.loop-stalled` и `server.clock-jump` — для здоровья сервера.
+   */
   events?: AuditEvent[];
+  /** Медленный ярус (покрытие, проверки, бюджет, расход), посчитанный отдельно. */
+  slow?: HomeSlow;
+  /** Состояние процесса вне базы: сбой журнала, расхождение config.json, применение. */
+  process?: { journalError?: string; configDrift?: string };
+  /** Отметка обращения ведущего (`leadActivityMark`). */
+  leadMark?: string | null;
 }
 
 const clip = (text: string, max: number = HOME_LIMITS.title) =>
@@ -266,7 +403,7 @@ function stageFields(revisions: readonly Revision[] | undefined, fresh = true) {
   };
 }
 const stageHref = (change: ProductChange | undefined, stage: string) =>
-  change ? hrefs.preparation(change.id, stage) : `/?stage=${stage}`;
+  hrefs.preparation(change?.id, stage);
 
 function preparationSections(
   change: ProductChange | undefined,
@@ -527,9 +664,340 @@ function development(
     // До подключения движка досок нет: ссылка — этап «Разработка» подготовки.
     href:
       !h && prep.enabled
-        ? hrefs.preparation(prep.current?.id, 'development').replace(/^\/$/, '/?stage=development')
+        ? hrefs.preparation(prep.current?.id, 'development')
         : (prep.enabled ? '/?view=boards&tab=kanban' : '/?tab=kanban') +
           (live[0] ? `&board=${encodeURIComponent(live[0].board.id)}` : ''),
+  };
+}
+
+const HOUR_MS = 60 * 60 * 1000;
+const DAY_MS = 24 * HOUR_MS;
+/** Экран панели разработки в обеих оболочках (с подготовкой — `view=boards`). */
+const devHref = (preparation: boolean, tab: string) =>
+  (preparation ? '/?view=boards&tab=' : '/?tab=') + tab;
+
+/** Ход работ по снимку версии; покрытие — из медленного яруса. */
+function progressOf(
+  ctx: HomeContext,
+  prep: ReturnType<typeof Preparation.statusOf>,
+  change: ProductChange | undefined,
+): HomeProgress | undefined {
+  const { state, h } = ctx;
+  const releases = prep.enabled && prep.current ? prep.current.releases : [];
+  if (!h && !releases.length) return undefined;
+  const planned =
+    change?.product.findLast((r) => r.status === 'approved') ?? change?.product.at(-1);
+  const titles = new Map((planned?.content.releases ?? []).map((r) => [r.id, r.title]));
+  const tasks = state.tasks;
+  const done = tasks.filter((t) => t.status === 'done').length;
+  const cancelled = tasks.filter((t) => t.status === 'cancelled').length;
+  const statusOf = (c: DevContourState['changeSets'][number]) =>
+    c.acceptance
+      ? ('accepted' as const)
+      : c.verifications.some((v) => v.status === 'active')
+        ? ('verifying' as const)
+        : c.verifications.at(-1)?.status === 'failed'
+          ? ('failed' as const)
+          : ('open' as const);
+  const sets = state.changeSets.map((c) => ({ c, status: statusOf(c) }));
+  const latest = sets.at(-1);
+  const preparation = prep.enabled;
+  return {
+    releases: releases.slice(0, HOME_LIMITS.releases).map((r) => ({
+      id: r.id,
+      title: clip(titles.get(r.id) ?? r.id),
+      tasks: r.tasks,
+      done: r.done,
+      failed: r.failed,
+      criteria: r.criteria,
+      readiness: r.readiness,
+    })),
+    releasesTotal: releases.length,
+    tasks: {
+      total: tasks.length,
+      done,
+      remaining: tasks.length - done - cancelled,
+      failed: tasks.filter((t) => t.status === 'failed').length,
+      cancelled,
+    },
+    changeSets: {
+      total: sets.length,
+      accepted: sets.filter((x) => x.status === 'accepted').length,
+      verifying: sets.filter((x) => x.status === 'verifying').length,
+      failed: sets.filter((x) => x.status === 'failed').length,
+      ...(latest
+        ? {
+            latest: {
+              id: latest.c.id,
+              title: clip(latest.c.title),
+              status: latest.status,
+              href: hrefs.changeset(latest.c.id),
+            },
+          }
+        : {}),
+    },
+    ...(ctx.slow?.coverage ? { coverage: ctx.slow.coverage } : {}),
+    href: devHref(preparation, 'progress'),
+  };
+}
+
+/** Число событий типа за последний час (окно — недавний журнал). */
+const lastHour = (events: readonly AuditEvent[], type: string, now: number) =>
+  events.filter((e) => e.type === type && now - Date.parse(e.at) < HOUR_MS).length;
+
+/** Попытки за сутки по классу отказа: первые `failureKinds` классов, остальные — `other`. */
+export function attemptsOf(runs: DevContourState['runs'], now: number) {
+  const recent = runs.filter((r) => now - Date.parse(r.startedAt) < DAY_MS);
+  const failed = recent.filter((r) => r.status === 'failed' || r.status === 'expired');
+  const counts = new Map<string, number>();
+  for (const r of failed) {
+    const kind = r.failureKind ?? 'unknown';
+    counts.set(kind, (counts.get(kind) ?? 0) + 1);
+  }
+  const sorted = [...counts].sort((a, b) => b[1] - a[1] || a[0].localeCompare(b[0]));
+  const byKind = Object.fromEntries(sorted.slice(0, HOME_LIMITS.failureKinds));
+  const rest = sorted.slice(HOME_LIMITS.failureKinds).reduce((sum, [, n]) => sum + n, 0);
+  if (rest) byKind.other = (byKind.other ?? 0) + rest;
+  return { total: recent.length, failed: failed.length, byKind };
+}
+
+function harnessOf(
+  ctx: HomeContext,
+  change: ProductChange | undefined,
+  preparation: boolean,
+  version: string,
+): HomeHarness | undefined {
+  const { state, h, now } = ctx;
+  if (!h) return undefined;
+  const events = ctx.events ?? [];
+  const proc = ctx.process ?? {};
+  // Применение конфигурации идёт (слот занят): то же правило, что у панели.
+  const request = state.reconfigure;
+  const keys = request && configApplyKeys(request.operation);
+  const configPending =
+    request && reconfigureSlotBusy(request)
+      ? keys
+        ? `Применяется config.json: ${keys.join(', ')}`
+        : 'Применяется конфигурация после изменения контракта'
+      : undefined;
+  return {
+    version,
+    concurrency: h.config.concurrency,
+    active: state.runs.filter((r) => r.status === 'active').length,
+    attempts24h: attemptsOf(state.runs, now),
+    ...(ctx.slow ? { gates: ctx.slow.gates, load: ctx.slow.load } : {}),
+    failures: {
+      tasks: state.tasks.filter((t) => t.status === 'failed').length,
+      recoveries: state.tasks.filter(
+        (t) => t.recovery && t.status !== 'done' && t.status !== 'cancelled',
+      ).length,
+      quiet: quietAttempts(state, now).length,
+    },
+    ...(ctx.slow?.budget ? { budget: ctx.slow.budget } : {}),
+    ...(ctx.slow?.usage ? { usage: ctx.slow.usage } : {}),
+    health: {
+      ...(proc.journalError
+        ? { journalError: clip(proc.journalError, HOME_LIMITS.startupError) }
+        : {}),
+      ...(proc.configDrift
+        ? { configDrift: clip(proc.configDrift, HOME_LIMITS.startupError) }
+        : {}),
+      ...(configPending ? { configPending } : {}),
+      loopStalls1h: lastHour(events, 'server.loop-stalled', now),
+      clockJumps1h: lastHour(events, 'server.clock-jump', now),
+      lead: leadPresence(change, state, now, ctx.leadMark ?? null),
+    },
+    href: devHref(preparation, 'settings'),
+    budgetHref: devHref(preparation, 'overview'),
+  };
+}
+
+const LOAD_BUCKET_MS = 15 * 60 * 1000;
+const outcomeOf = (r: DevContourState['runs'][number]): number =>
+  r.status === 'active'
+    ? 0
+    : r.status === 'succeeded'
+      ? 1
+      : r.status === 'failed' || r.status === 'expired'
+        ? 2
+        : 3;
+
+/**
+ * Нагрузка агентов за сутки до `now` (медленный ярус). Интервал попытки —
+ * от начала до конца; идущая или без записанного конца (оборванная) — до
+ * `now` либо до срока аренды, что раньше. Пик интервала — наибольшее число
+ * одновременно идущих попыток в его начале или в момент начала любой из
+ * них внутри интервала; исходы — у попыток, шедших в этот момент.
+ */
+export function loadOf(runs: DevContourState['runs'], now: number): Omit<HomeLoad, 'asOf'> {
+  const buckets = HOME_LIMITS.loadBuckets;
+  const to = Math.ceil(now / LOAD_BUCKET_MS) * LOAD_BUCKET_MS;
+  const from = to - buckets * LOAD_BUCKET_MS;
+  const spans = runs.flatMap((r) => {
+    const start = Date.parse(r.startedAt);
+    if (!Number.isFinite(start) || start >= now) return [];
+    const finished = r.finishedAt ? Date.parse(r.finishedAt) : NaN;
+    const lease = r.leaseUntil > 0 ? r.leaseUntil : Infinity;
+    const end = Math.min(
+      now,
+      Number.isFinite(finished) ? finished : r.status === 'active' ? now : Math.min(lease, now),
+    );
+    if (end <= from || end <= start) return [];
+    return [{ start, end, outcome: outcomeOf(r) }];
+  });
+  const peaks: HomeLoad['peaks'] = [];
+  for (let b = 0; b < buckets; b++) {
+    const lo = from + b * LOAD_BUCKET_MS;
+    const hi = Math.min(lo + LOAD_BUCKET_MS, now);
+    let best: [number, number, number, number] = [0, 0, 0, 0];
+    let bestTotal = 0;
+    if (lo < now) {
+      const here = spans.filter((x) => x.start < hi && x.end > lo);
+      const moments = [lo, ...here.map((x) => x.start).filter((t) => t > lo && t < hi)];
+      for (const t of moments) {
+        const split: [number, number, number, number] = [0, 0, 0, 0];
+        for (const x of here) if (x.start <= t && x.end > t) split[x.outcome]++;
+        const total = split[0] + split[1] + split[2] + split[3];
+        if (total > bestTotal) {
+          bestTotal = total;
+          best = split;
+        }
+      }
+    }
+    peaks.push(best);
+  }
+  const hourly: HomeLoad['hourly'] = Array.from({ length: 24 }, () => [0, 0]);
+  for (const r of runs) {
+    const start = Date.parse(r.startedAt);
+    if (!(start >= from && start < to)) continue;
+    const hour = Math.floor((start - from) / (4 * LOAD_BUCKET_MS));
+    hourly[hour][0]++;
+    if (r.status === 'failed' || r.status === 'expired') hourly[hour][1]++;
+  }
+  return {
+    from: new Date(from).toISOString(),
+    to: new Date(to).toISOString(),
+    bucketMs: LOAD_BUCKET_MS,
+    peaks,
+    hourly,
+  };
+}
+
+/** Проверки попыток за сутки по gate: отказавшие первыми (медленный ярус). */
+export function gatesOf(runs: DevContourState['runs'], now: number) {
+  const rows = new Map<string, { gate: string; failed: number; passed: number }>();
+  for (const run of runs) {
+    if (now - Date.parse(run.startedAt) >= DAY_MS) continue;
+    for (const e of run.evidence) {
+      // Взятая из кандидата запись — не запуск; неприменимый gate — не результат.
+      if (e.kind !== 'test' || e.reusedEvidence) continue;
+      const row = rows.get(e.gate) ?? { gate: e.gate, failed: 0, passed: 0 };
+      row[e.passed ? 'passed' : 'failed'] += 1;
+      rows.set(e.gate, row);
+    }
+  }
+  return {
+    failing: [...rows.values()]
+      .filter((r) => r.failed > 0)
+      .sort((a, b) => b.failed - a.failed || a.gate.localeCompare(b.gate))
+      .slice(0, HOME_LIMITS.failingGates),
+    total: rows.size,
+  };
+}
+
+type Budgets = {
+  budgets: {
+    scope: { kind: 'task' | 'board' | 'workspace'; id?: string };
+    state: BudgetState;
+    limit: { usd?: number; timeMs?: number };
+    reportedUsd: number;
+    estimatedUsd: number;
+    unknownCalls: number;
+    unfinishedCalls: number;
+    reason?: string;
+  }[];
+};
+/** Бюджет плитки: исчерпанный или неопределённый — первым, иначе общий. */
+export function budgetOf(overview: Budgets | undefined, asOf: string): HomeSlow['budget'] {
+  if (!overview?.budgets.length) return undefined;
+  const rank = (s: BudgetState) => (s === 'exceeded' ? 0 : s === 'undetermined' ? 1 : 2);
+  const [b] = overview.budgets.toSorted(
+    (x, y) =>
+      rank(x.state) - rank(y.state) ||
+      Number(y.scope.kind === 'workspace') - Number(x.scope.kind === 'workspace'),
+  );
+  return {
+    state: b.state,
+    scope:
+      b.scope.kind === 'workspace' ? 'workspace' : `${b.scope.kind} ${b.scope.id ?? ''}`.trim(),
+    ...(b.limit.usd !== undefined ? { limitUsd: b.limit.usd } : {}),
+    spentUsd: b.reportedUsd + b.estimatedUsd,
+    unknownCalls: b.unknownCalls,
+    complete: b.unknownCalls === 0 && b.unfinishedCalls === 0,
+    exceeded: overview.budgets.filter((x) => x.state === 'exceeded').length,
+    total: overview.budgets.length,
+    ...(b.reason ? { reason: clip(b.reason, HOME_LIMITS.startupError) } : {}),
+    asOf,
+  };
+}
+
+/** Покрытие релиза по карте продукта (`IntentService.productView`). */
+export function coverageOf(
+  view: ProductView | { error: string } | undefined,
+  asOf: string,
+  preparation: boolean,
+): HomeSlow['coverage'] {
+  if (!view) return undefined;
+  const href = devHref(preparation, 'product');
+  if ('error' in view)
+    return { available: false, reason: clip(view.error, HOME_LIMITS.startupError), asOf, href };
+  if (!view.available)
+    return { available: false, reason: clip(view.reason, HOME_LIMITS.startupError), asOf, href };
+  return {
+    available: true,
+    releaseId: view.releaseId,
+    complete: view.coverageComplete,
+    accepted: view.releaseAccepted,
+    issueCount: view.issues.length,
+    unconfirmed: view.unconfirmedScenarios.length,
+    deferred: view.deferredScenarios.length,
+    asOf,
+    href,
+  };
+}
+
+/**
+ * Медленный ярус главной над снимком версии: проверки за сутки, бюджет,
+ * расход и покрытие карты продукта. Карта, бюджет и расход посчитаны
+ * вызывающим (они читают Git, записи расхода и движок исполнения).
+ */
+export function homeSlowView(input: {
+  state: Readonly<DevContourState>;
+  now: number;
+  preparation: boolean;
+  product?: ProductView | { error: string };
+  budgets?: Budgets;
+  usage?: { calls: number; knownCostUsd: number; unknownCalls: number };
+}): HomeSlow {
+  const asOf = new Date(input.now).toISOString();
+  const coverage = coverageOf(input.product, asOf, input.preparation);
+  const budget = budgetOf(input.budgets, asOf);
+  return {
+    asOf,
+    load: { ...loadOf(input.state.runs, input.now), asOf },
+    ...(coverage ? { coverage } : {}),
+    gates: { ...gatesOf(input.state.runs, input.now), asOf },
+    ...(budget ? { budget } : {}),
+    ...(input.usage
+      ? {
+          usage: {
+            calls: input.usage.calls,
+            knownCostUsd: input.usage.knownCostUsd,
+            unknownCalls: input.usage.unknownCalls,
+            asOf,
+          },
+        }
+      : {}),
   };
 }
 
@@ -559,14 +1027,29 @@ export function homeView(ctx: HomeContext): HomeView {
       ? prep.current.binding.fresh
       : { architecture: false, references: false, concept: false, design: false };
   const shell: HomeView['shell'] = h ? 'development' : change ? 'preparation' : 'bootstrap';
+  const prepared = preparationSections(
+    change,
+    fresh,
+    bySection,
+    h ? state.contracts.length : undefined,
+  );
+  // Без подготовки в панели этапов нет: продукт — карта продукта, архитектура —
+  // контракты движка, дизайн — обзор.
+  if (h && !prep.enabled) {
+    prepared.product.href = devHref(false, 'product');
+    prepared.architecture.href = hrefs.contracts().replace('view=boards&', '');
+    prepared.design.href = devHref(false, 'overview');
+  }
   const sections = {
-    ...preparationSections(change, fresh, bySection, h ? state.contracts.length : undefined),
+    ...prepared,
     development: development(ctx, prep, bySection.development),
   };
   // Центр внимания перечислил не все карточки: вопросы разделов неполны, и
   // каждый раздел зовёт в центр внимания («ещё»).
   if (attention.truncated)
     for (const section of Object.values(sections)) section.questions.more = true;
+  const progress = progressOf(ctx, prep, change);
+  const harness = harnessOf(ctx, change, prep.enabled, harnessVersion);
   return {
     generatedAt: new Date(ctx.now).toISOString(),
     revision: ctx.revision,
@@ -583,7 +1066,11 @@ export function homeView(ctx: HomeContext): HomeView {
           },
         }
       : {}),
+    preparation: prep.enabled,
     sections,
+    ...(progress ? { progress } : {}),
+    ...(harness ? { harness } : {}),
+    links: { attention: prep.enabled ? '/?view=attention' : '/?tab=attention' },
     attention: {
       active: attention.counts.active,
       unread: attention.counts.unread,

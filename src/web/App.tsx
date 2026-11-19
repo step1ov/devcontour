@@ -31,6 +31,7 @@ import {
   Eye,
   Loader2,
   Copy,
+  House,
   LayoutDashboard,
   BellDot,
   Map as MapIcon,
@@ -42,6 +43,7 @@ import {
   SquareKanban,
   Settings2,
 } from 'lucide-react';
+import { isHome, navigate } from './navigation.ts';
 import type { Task, Run } from '../core/model.ts';
 import {
   NOT_APPLICABLE_LABEL,
@@ -841,7 +843,8 @@ const screenKeys = ['tab', 'board', 'task', 'attention', 'who'];
 function appHref(tab: string) {
   const params = new URLSearchParams(window.location.search);
   for (const key of screenKeys) params.delete(key);
-  if (tab !== 'overview') params.set('tab', tab);
+  // Обзор назван явно: голый адрес — главная панели.
+  params.set('tab', tab);
   const search = params.toString();
   return window.location.pathname + (search ? '?' + search : '');
 }
@@ -991,6 +994,8 @@ export function App() {
     if (tab !== 'attention') for (const key of ['attention', 'who']) params.delete(key);
     if (tab !== 'overview') params.set('tab', tab);
     if (boardScreen && boardId) params.set('board', boardId);
+    // Голый адрес — главная: обзор без других параметров назван явно.
+    if (!params.size) params.set('tab', tab);
     if ((boardScreen || tab === 'workspace') && selected) params.set('task', selected);
     const search = params.toString();
     const next = window.location.pathname + (search ? '?' + search : '');
@@ -1026,6 +1031,8 @@ export function App() {
   shownBoard.current = boardId;
   useEffect(() => {
     const restore = () => {
+      // Переход на главную: оболочку сменит корень панели.
+      if (isHome(window.location)) return;
       const place = readAppLocation();
       setHistoryDepth(
         (window.history.state as { devcontourDepth?: number } | null)?.devcontourDepth ?? 0,
@@ -1795,12 +1802,11 @@ export function App() {
           className="text-foreground flex items-center gap-2 px-2 pt-0.5 pb-1 text-sm font-semibold no-underline"
           href="/"
           aria-label="DevContour, главная"
-          // Главная — обзор в этой же панели: без перезагрузки и без выхода
-          // из режима разработки на экране подготовки.
+          // Главная панели — плитки разделов; переход без перезагрузки.
           onClick={(e) => {
             if (e.metaKey || e.ctrlKey || e.shiftKey || e.button !== 0) return;
             e.preventDefault();
-            openScreen('overview');
+            navigate('/');
           }}
         >
           <svg
@@ -1836,6 +1842,18 @@ export function App() {
           aria-label="Workspace"
           className="grid gap-0.5 max-[760px]:flex max-[760px]:gap-1 max-[760px]:overflow-x-auto max-[760px]:pb-1"
         >
+          <a
+            href="/"
+            onClick={(e) => {
+              if (e.metaKey || e.ctrlKey || e.shiftKey || e.button !== 0) return;
+              e.preventDefault();
+              navigate('/');
+            }}
+            className="text-foreground hover:bg-active flex h-8 shrink-0 items-center gap-2.5 rounded-md border border-transparent px-2 text-sm font-medium whitespace-nowrap no-underline transition-colors duration-(--duration-hover)"
+          >
+            <House aria-hidden="true" className="text-muted-foreground size-4 shrink-0" />
+            Главная
+          </a>
           {workspaceScreens.map((s) => (
             <a
               key={s.key}

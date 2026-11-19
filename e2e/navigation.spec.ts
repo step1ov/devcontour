@@ -62,7 +62,7 @@ test('An unknown board in the link opens the current board instead of an empty s
 });
 
 test('«Назад» in the path row appears only after the panel itself moved', async ({ page }) => {
-  await page.goto('/');
+  await page.goto('/?tab=overview');
   const back = page.getByRole('button', { name: 'Назад', exact: true });
   await expect(page.getByRole('heading', { name: 'Обзор', exact: true })).toBeVisible();
   await expect(back).toHaveCount(0);
@@ -72,7 +72,7 @@ test('«Назад» in the path row appears only after the panel itself moved',
     .click();
   await expect(back).toBeVisible();
   await back.click();
-  await expect(page).toHaveURL(/\/$/);
+  await expect(page).toHaveURL(/\/\?tab=overview$/);
   await expect(back).toHaveCount(0);
 });
 

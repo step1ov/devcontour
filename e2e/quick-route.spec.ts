@@ -71,7 +71,7 @@ test('Quick change: one change per request key, five steps, facts, setup plan, r
       }
     ).changes;
   try {
-    await page.goto(app.url);
+    await page.goto(app.url + '/?stage=product');
     const form = page.getByRole('form', { name: 'Быстрое изменение' });
     // Embedded workspace — корень репозитория: путь подставлен.
     await expect(form.getByLabel('Репозиторий (абсолютный путь)')).toHaveValue(root);
