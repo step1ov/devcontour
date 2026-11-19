@@ -289,7 +289,18 @@ export class LeadRunner {
     ]);
   }
   tick() {
-    if (this.pending) return this.pending;
+    if (this.pending) {
+      // Такт ждёт долгую стадию (проверка базы, F91): отметка живого прохода
+      // после ответа не должна истечь, пока сервер жив, — иначе фаза
+      // прохода пропадает и карточка вопроса меняет версию.
+      if (!this.stopping)
+        try {
+          this.resumer.beat();
+        } catch {
+          /* Хранилище занято или закрыто: следующий такт повторит. */
+        }
+      return this.pending;
+    }
     this.pending = this.advance().finally(() => {
       this.pending = undefined;
     });

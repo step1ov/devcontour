@@ -989,7 +989,8 @@ export function receiptBytes(h: DevContour, s: DevContourState, t: Task) {
  */
 export function baseMovesOf(s: Readonly<DevContourState>) {
   const wait = s.waits?.find((w) => w.kind === 'base-check');
-  return wait && s.baseMoves?.at === wait.at ? s.baseMoves.bases : undefined;
+  // Без диапазона — undefined и у ожидания без времени (прежние записи).
+  return wait && s.baseMoves && s.baseMoves.at === wait.at ? s.baseMoves.bases : undefined;
 }
 /**
  * Начало отказа снять паузу ведущим при ожидании проверки базы (`pause`):

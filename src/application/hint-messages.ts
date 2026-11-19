@@ -113,8 +113,21 @@ export interface HintParamMap {
   };
   /** Пауза выдачи, её снимет действующее задание; `pause` — причина паузы. */
   'pause-lift': { pause: string; stage: number };
-  /** Пауза человека (`by: lead` — её поставил ведущий через queue_set), её не снимает ни одно задание. */
-  'pause-operator': { by?: 'lead'; reason?: string };
+  /**
+   * Пауза человека (`by: lead` — её поставил ведущий через queue_set), её не
+   * снимает ни одно задание; `base` — под ней ожидание проверки базы,
+   * которое цикл задания не проверит: `unchecked` — нет диапазона этого
+   * переноса, `no-board` — нет задания доски (задание ChangeSet базу не
+   * проверяет).
+   */
+  'pause-operator': { by?: 'lead'; reason?: string; base?: 'unchecked' | 'no-board' };
+  /**
+   * Очередь держит одно ожидание проверки базы без диапазона этого переноса
+   * (поставлено до переноса, прежней версией или диапазон устарел):
+   * `checkBase` его не проверит, снимает пользователь (F93); `failed` —
+   * ожидание называет проваленную проверку: базу сначала исправляют.
+   */
+  'base-unchecked': { failed?: true };
   /**
    * Перенос базы удержан до подтверждения человека (`base.check.held`):
    * `paths` — чувствительные пути (`компонент:путь`), которые цикл задания
@@ -458,8 +471,19 @@ const en: Catalog = {
     (p.by === 'lead'
       ? `Dispatch is paused by the lead (queue_set${p.reason ? `: ${p.reason}` : ''}) and no job loop lifts it: resume with queue_set {"paused": false} (devcontour queue --start --by host) once the reason for the pause is resolved.`
       : 'Dispatch is paused by the operator and no job loop lifts it: resume only on the user\'s decision with queue_set {"paused": false} (devcontour queue --start --by host).') +
-    ' Over a base-check wait this lifts only the pause: the board workflow checks the base.' +
+    (p.base === 'unchecked'
+      ? ' Over a base-check wait this lifts only the pause, and no job loop checks that base: the wait has no range of this base move (set before the move, by an older version, or outdated), so only the user lifts it after checking the base — the confirm-and-start action of the base move card in the attention center.'
+      : p.base === 'no-board'
+        ? ' Over a base-check wait this lifts only the pause, and no board workflow job runs to check the base (a ChangeSet job does not): register the board with workflow_start, its job loop checks the base.'
+        : ' Over a base-check wait this lifts only the pause: the board workflow checks the base.') +
     (s.loop && s.boardId ? ` Meanwhile the job loop of board ${s.boardId} ${loopEn(s.loop)}.` : ''),
+  'base-unchecked': (p, s) =>
+    'operator: confirm the base move. Dispatch waits for a base check that no job loop runs: the wait has no range of this base move (set before the move, by an older version, or outdated), so the board workflow cannot check it with gates.' +
+    (p.failed
+      ? ' The wait reports a failed base check: fix the base and run devcontour base-update --by host (the new move has a range, and the board workflow checks it), or ask the user to lift the wait with the confirm-and-start action of the base move card in the attention center once the base is fixed;'
+      : ' Ask the user to check the base and lift the wait with the confirm-and-start action of the base move card in the attention center of the panel;') +
+    ' do not start the queue yourself (queue_set refuses while the queue holds only this wait).' +
+    (s.boardId ? ` The job loop of board ${s.boardId} waits until then.` : ''),
   'base-held': (p, s) =>
     `operator: confirm the base move. The moved base changes acceptance or contour setup (${p.paths.length ? p.paths.join(', ') : 'see the wait in the attention center'}), and gates of that base do not prove such a change, so dispatch waits for a human: ask the user to confirm it with the confirm-and-start action of the base move card in the attention center of the panel. The lead does not lift this wait itself (no queue_set, no workflow_retry). The job loop lifts on its own only contract documents at the exact text that an independent review approved (review-contract or contract-change); acceptance files, profile, config and gates always need the user.` +
     (s.boardId ? ` The job loop of board ${s.boardId} waits until then.` : ''),
@@ -769,8 +793,19 @@ const ru: Catalog = {
     (p.by === 'lead'
       ? `Выдачу приостановил ведущий агент (queue_set${p.reason ? `: ${p.reason}` : ''}), и ни один цикл задания её не снимет: возобновите queue_set {"paused": false} (devcontour queue --start --by host), когда причина паузы устранена.`
       : 'Выдачу приостановил оператор, и ни один цикл задания её не снимет: возобновляйте только по решению пользователя — queue_set {"paused": false} (devcontour queue --start --by host).') +
-    ' Над ожиданием проверки базы это снимает только паузу: базу проверит workflow доски.' +
+    (p.base === 'unchecked'
+      ? ' Над ожиданием проверки базы это снимает только паузу, а ту базу не проверит ни один цикл задания: у ожидания нет диапазона этого переноса (поставлено до переноса, прежней версией или устарело), поэтому его снимает только пользователь после проверки базы — «Подтвердить и запустить» в карточке переноса во «Внимании» панели.'
+      : p.base === 'no-board'
+        ? ' Над ожиданием проверки базы это снимает только паузу, а задания доски, которое проверит базу, нет (задание ChangeSet её не проверяет): зарегистрируйте доску через workflow_start — её цикл проверит базу.'
+        : ' Над ожиданием проверки базы это снимает только паузу: базу проверит workflow доски.') +
     (s.loop && s.boardId ? ` Тем временем цикл задания доски ${s.boardId} ${loopRu(s.loop)}.` : ''),
+  'base-unchecked': (p, s) =>
+    'operator: подтвердите перенос базы. Выдача ждёт проверки базы, которую не проведёт ни один цикл задания: у ожидания нет диапазона этого переноса (поставлено до переноса, прежней версией или устарело), и workflow доски не может проверить её gates.' +
+    (p.failed
+      ? ' Ожидание называет проваленную проверку: исправьте базу и выполните devcontour base-update --by host (у нового переноса есть диапазон, и его проверит workflow доски) или, когда база исправлена, попросите пользователя снять ожидание кнопкой «Подтвердить и запустить» в карточке переноса во «Внимании»;'
+      : ' Попросите пользователя проверить базу и снять ожидание кнопкой «Подтвердить и запустить» в карточке переноса во «Внимании» панели;') +
+    ' сами очередь не запускайте (queue_set откажет, пока очередь держит одно это ожидание).' +
+    (s.boardId ? ` До этого цикл задания доски ${s.boardId} ждёт.` : ''),
   'base-held': (p, s) =>
     `operator: подтвердите перенос базы. Перенесённая база меняет приёмку или настройку контура (${p.paths.length ? p.paths.join(', ') : 'см. ожидание в центре внимания'}), а gates этой базы такое изменение не доказывают, поэтому выдача ждёт человека: попросите пользователя подтвердить перенос кнопкой «Подтвердить и запустить» в «Внимании» панели. Ведущий агент это ожидание сам не снимает (ни queue_set, ни workflow_retry). Цикл задания сам снимает только документы контрактов в редакции, одобренной независимым ревью (review-contract или contract-change); файлы приёмки, профиль, конфигурацию и gates всегда подтверждает пользователь.` +
     (s.boardId ? ` До этого цикл задания доски ${s.boardId} ждёт.` : ''),

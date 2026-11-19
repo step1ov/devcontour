@@ -67,8 +67,14 @@ export class InputResumer {
     return new InputService(this.h, this.root, { ...adapters, ...this.runtimes });
   }
 
-  /** Отметка живого прохода: проекции называют фазы, только пока сервер его ведёт. */
-  private beat(now = Date.now()) {
+  /**
+   * Отметка живого прохода: проекции называют фазы, только пока сервер его
+   * ведёт. Цикл ведущего обновляет её и пока такт ждёт долгую стадию
+   * (проверка базы идёт минуты, F91): иначе отметка истекает, и фаза прохода
+   * (сдвинутая остановка, пауза) на это время пропадает из сводки и карточки.
+   */
+  beat(now = Date.now()) {
+    if (this.h.config.approvalMode !== 'agent' || this.controller.signal.aborted) return;
     const store = this.h.store;
     const lease = Math.max(this.h.config.leaseMs, 5000);
     const beat = store.localRecord<{ leaseUntil: number }>(RESUME, undefined, RESUME_DRIVER);

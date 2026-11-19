@@ -3,6 +3,7 @@ import { Check } from 'lucide-react';
 import type { HomeGateTrend, HomeLoad, HomeProgress, HomeSpend } from '../application/home.ts';
 import { Bar } from '@/ui/progress-bar.tsx';
 import { cn, plural } from '@/lib/utils.ts';
+import { atClock, clock, span } from '@/lib/chart-time.ts';
 
 // Графики главной: общий ход работ, нагрузка агентов за сутки, попытки и
 // проверки по часам, расход по дням. Небольшой встроенный SVG на токенах
@@ -18,8 +19,6 @@ const OUTCOMES = [
   { key: 'interrupted', label: 'прервана', color: 'var(--status-waiting)' },
 ] as const;
 
-const hhmm = (ms: number) =>
-  new Date(ms).toLocaleTimeString('ru-RU', { hour: '2-digit', minute: '2-digit' });
 /** Подпись календарной даты сервера (YYYY-MM-DD) — без пересчёта в пояс браузера. */
 const dayName = (date: string) => {
   const [y, m, d] = date.split('-').map(Number);
@@ -56,13 +55,13 @@ function Legend({ items }: { items: readonly LegendItem[] }) {
   );
 }
 
-/** Подписи оси времени под графиком: начало, середина, конец. */
+/** Подписи оси времени под графиком: начало, середина, конец; день — вне сегодняшнего (F92). */
 function TimeAxis({ from, to }: { from: number; to: number }) {
   return (
     <div className="text-muted-foreground tabular flex justify-between text-xs" aria-hidden="true">
-      <span>{hhmm(from)}</span>
-      <span>{hhmm((from + to) / 2)}</span>
-      <span>{hhmm(to)}</span>
+      <span>{clock(from, to)}</span>
+      <span>{clock((from + to) / 2, to)}</span>
+      <span>{clock(to, to)}</span>
     </div>
   );
 }
@@ -208,6 +207,7 @@ function Stacked({
  */
 export function LoadChart({ load, concurrency }: { load: HomeLoad; concurrency: number }) {
   const from = Date.parse(load.from);
+  const today = Date.parse(load.to);
   const totals = load.peaks.map((p) => p[0] + p[1] + p[2] + p[3]);
   const peak = Math.max(0, ...totals);
   const at = totals.indexOf(peak);
@@ -218,10 +218,10 @@ export function LoadChart({ load, concurrency }: { load: HomeLoad; concurrency: 
     OUTCOMES.flatMap((o, k) => (p[k] ? [`${o.label} ${p[k]}`] : [])).join(', ');
   const titles = load.peaks.map(
     (p, i) =>
-      `${hhmm(start(i))}–${hhmm(start(i + 1))}: ${totals[i] ? `пик ${agents(totals[i])} (${split(p)})` : 'никто не работал'}`,
+      `${span(start(i), start(i + 1), today)}: ${totals[i] ? `пик ${agents(totals[i])} (${split(p)})` : 'никто не работал'}`,
   );
   const summary = peak
-    ? `Пик ${agents(peak)} в ${hhmm(start(at))}, сейчас ${now}; слотов ${concurrency}.`
+    ? `Пик ${agents(peak)} ${atClock(start(at), today)}, сейчас ${now}; слотов ${concurrency}.`
     : `За сутки агенты не работали; сейчас ${now}; слотов ${concurrency}.`;
   const busy = load.peaks.map((p, i) => ({ p, i })).filter(({ i }) => totals[i] > 0);
   return (
@@ -245,9 +245,7 @@ export function LoadChart({ load, concurrency }: { load: HomeLoad; concurrency: 
           <tbody>
             {busy.map(({ p, i }) => (
               <tr key={i}>
-                <th scope="row">
-                  {hhmm(start(i))}–{hhmm(start(i + 1))}
-                </th>
+                <th scope="row">{span(start(i), start(i + 1), today)}</th>
                 <td>{totals[i]}</td>
                 {p.map((v, k) => (
                   <td key={k}>{v}</td>
@@ -286,7 +284,7 @@ export function LoadChart({ load, concurrency }: { load: HomeLoad; concurrency: 
             {now}
           </span>
         </div>
-        <TimeAxis from={from} to={Date.parse(load.to)} />
+        <TimeAxis from={from} to={today} />
       </div>
       <Legend
         items={[
@@ -307,6 +305,7 @@ const HOURLY = [
 /** Начатые попытки по часам за сутки, сбои — верхней частью столбика. */
 export function HourlyChart({ load }: { load: HomeLoad }) {
   const from = Date.parse(load.from);
+  const today = Date.parse(load.to);
   const hour = 4 * load.bucketMs;
   const rows = load.hourly.map(([total, failed]) => [total - failed, failed]);
   const total = load.hourly.reduce((s, [n]) => s + n, 0);
@@ -315,10 +314,10 @@ export function HourlyChart({ load }: { load: HomeLoad }) {
   const mostAt = load.hourly.findIndex(([n]) => n === most);
   const start = (i: number) => from + i * hour;
   const titles = load.hourly.map(
-    ([n, f], i) => `${hhmm(start(i))}–${hhmm(start(i + 1))}: начато ${n}, со сбоем ${f}`,
+    ([n, f], i) => `${span(start(i), start(i + 1), today)}: начато ${n}, со сбоем ${f}`,
   );
   const summary = total
-    ? `Начато ${total}, со сбоем ${failed}; больше всего в ${hhmm(start(mostAt))} (${most}).`
+    ? `Начато ${total}, со сбоем ${failed}; больше всего ${atClock(start(mostAt), today)} (${most}).`
     : 'За сутки попыток не было.';
   return (
     <Figure
@@ -338,7 +337,7 @@ export function HourlyChart({ load }: { load: HomeLoad }) {
             {load.hourly.map(([n, f], i) =>
               n ? (
                 <tr key={i}>
-                  <th scope="row">{hhmm(start(i))}</th>
+                  <th scope="row">{clock(start(i), today)}</th>
                   <td>{n}</td>
                   <td>{f}</td>
                 </tr>
@@ -361,7 +360,7 @@ export function HourlyChart({ load }: { load: HomeLoad }) {
           </Mark>
         )}
       </div>
-      <TimeAxis from={from} to={Date.parse(load.to)} />
+      <TimeAxis from={from} to={today} />
       <Legend items={HOURLY} />
     </Figure>
   );
@@ -376,6 +375,7 @@ const GATES = [
 /** Записи проверок по часам за сутки: прошло, отказ, взято из кандидата. */
 export function GateTrendChart({ trend }: { trend: HomeGateTrend }) {
   const from = Date.parse(trend.from);
+  const today = Date.parse(trend.to);
   const start = (i: number) => from + i * 3_600_000;
   const sum = (k: number) => trend.hourly.reduce((s, row) => s + row[k], 0);
   const [passed, failed, reused] = [sum(0), sum(1), sum(2)];
@@ -388,12 +388,14 @@ export function GateTrendChart({ trend }: { trend: HomeGateTrend }) {
   const colors = [GATES[1].color, GATES[0].color, GATES[2].color];
   const titles = trend.hourly.map(
     ([p, f, r], i) =>
-      `${hhmm(start(i))}–${hhmm(start(i + 1))}: прошло ${p}, отказов ${f}, взято из кандидата ${r}`,
+      `${span(start(i), start(i + 1), today)}: прошло ${p}, отказов ${f}, взято из кандидата ${r}`,
   );
   const summary =
     passed + failed + reused
       ? `Прошло ${passed}, отказов ${failed}, взято из кандидата ${reused}` +
-        (worst ? `; больше всего отказов в ${hhmm(start(worstAt))} (${worst}).` : '; отказов нет.')
+        (worst
+          ? `; больше всего отказов ${atClock(start(worstAt), today)} (${worst}).`
+          : '; отказов нет.')
       : 'За сутки проверки не запускались.';
   return (
     <Figure
@@ -416,7 +418,7 @@ export function GateTrendChart({ trend }: { trend: HomeGateTrend }) {
             {trend.hourly.map((row, i) =>
               totals[i] ? (
                 <tr key={i}>
-                  <th scope="row">{hhmm(start(i))}</th>
+                  <th scope="row">{clock(start(i), today)}</th>
                   {row.map((v, k) => (
                     <td key={k}>{v}</td>
                   ))}
@@ -435,7 +437,7 @@ export function GateTrendChart({ trend }: { trend: HomeGateTrend }) {
           </Mark>
         )}
       </div>
-      <TimeAxis from={from} to={Date.parse(trend.to)} />
+      <TimeAxis from={from} to={today} />
       <Legend items={GATES} />
     </Figure>
   );

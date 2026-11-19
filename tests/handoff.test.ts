@@ -564,15 +564,18 @@ test('session_handoff: host.next по состоянию — сервер, за�
       assert.equal(f.store.read().paused, true, 'пауза ведущего не снята при удержании');
       // Обычное ожидание переноса базы (не удержанное) под паузой ведущего:
       // пауза остаётся паузой ведущего (F89) — её снятие снимает только
-      // паузу, ожидание проверит цикл задания (`leadResumeOf`).
+      // паузу, ожидание проверит цикл задания (`leadResumeOf`) — по
+      // диапазону этого переноса (`baseMovesOf`, F93).
       f.store.change('fixture', (s) => {
+        const movedAt = new Date().toISOString();
         s.waits = [
           {
             kind: 'base-check',
             detail: 'База прогонов перенесена (main): проверьте её гейтами и продолжите очередь',
-            at: new Date().toISOString(),
+            at: movedAt,
           },
         ];
+        s.baseMoves = { at: movedAt, bases: [{ repositoryId: 'main', from: 'a', to: 'b' }] };
         return {};
       });
       const plain = at().host.next;

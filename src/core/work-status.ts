@@ -197,6 +197,13 @@ export function staleBaseStop(
 export const BASE_WAIT_ACTION =
   'Базу проверит workflow доски: зарегистрируйте доску через workflow_start (идущее задание проверит её само) — его цикл исполнит gates на новой базе и продолжит выдачу. Ведущий агент само ожидание не снимает: queue_set и queue --start --by host снимают только паузу поверх него, а когда очередь держит одно ожидание — откажут. Без workflow ожидание снимает только пользователь после проверки базы — «Подтвердить и запустить» в «Внимании» панели; попросите его, сами очередь не запускайте';
 
+/**
+ * Ожидание проверки базы без диапазона переноса (поставлено до переноса или
+ * прежней версией): цикл задания базу не проверит (`checkBase`).
+ */
+export const BASE_WAIT_NO_RANGE =
+  'Цикл ведущего эту базу не проверит: у ожидания нет диапазона переноса. Ожидание снимает только пользователь после проверки базы — «Подтвердить и запустить» в «Внимании» панели; попросите его, сами очередь не запускайте';
+
 /** Действие при удержанном переносе базы: подтверждает оператор в «Внимании». */
 export const HELD_BASE_ACTION =
   'Перенос подтверждает оператор: «Подтвердить и запустить» в «Внимании» панели (на ручном маршруте — запуск очереди самим оператором); ведущий агент это ожидание и паузу сам не снимает: попросите пользователя';
@@ -235,7 +242,17 @@ export function queueStopView(
     'paused' | 'pauseReason' | 'pausedAt' | 'pauseFailures' | 'waits' | 'pauseActor'
   >,
   events: Pick<AuditEvent, 'id' | 'at' | 'type' | 'data'>[],
-  options: { approvalMode?: 'agent' | 'operator'; workflowActive?: boolean } = {},
+  options: {
+    approvalMode?: 'agent' | 'operator';
+    workflowActive?: boolean;
+    /**
+     * У ожидания проверки базы есть диапазон этого переноса (`baseMovesOf`):
+     * без него цикл базу не проверит, ожидание — решение человека.
+     */
+    baseRange?: boolean;
+    /** Идёт задание доски: только его стадия проверяет базу (не ChangeSet). */
+    boardActive?: boolean;
+  } = {},
 ): QueueStopView {
   if (!state.paused) return { paused: false };
   const agent = (options.approvalMode ?? 'agent') === 'agent';
@@ -279,9 +296,11 @@ export function queueStopView(
   // и ожидание» читалось бы как разрешение снять его без gates.
   const agentWait =
     agent && wait && !heldBaseOf(state) && !wait.startsWith('Проверка базы не пройдена')
-      ? options.workflowActive
-        ? 'Цикл ведущего проверит базу gates и продолжит выдачу сам'
-        : BASE_WAIT_ACTION
+      ? options.baseRange === false
+        ? BASE_WAIT_NO_RANGE
+        : (options.boardActive ?? options.workflowActive)
+          ? 'Цикл ведущего проверит базу gates и продолжит выдачу сам'
+          : BASE_WAIT_ACTION
       : undefined;
   const baseUpdate = agent
     ? 'исправьте базу и выполните devcontour base-update --by host — ' +

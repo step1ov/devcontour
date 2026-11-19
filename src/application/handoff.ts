@@ -40,7 +40,7 @@ import {
   questionHolds,
   sectionOf,
 } from '../core/owner-questions.ts';
-import type { DevContour } from '../core/service.ts';
+import { baseMovesOf, type DevContour } from '../core/service.ts';
 import {
   LeadWorkflow,
   jointWaiting,
@@ -1177,6 +1177,40 @@ export function planStep(boardId: string, ctx: HostContext): HandoffHostNext | u
 const acts = (loop: LoopOutlook | undefined) =>
   !!loop && loop.step !== 'wait' && loop.step !== 'none';
 
+/**
+ * Неудержанное ожидание проверки базы, которое цикл задания не проверит
+ * (F93, как `queueStopView` и `baseLoopChecks`): `unchecked` — у ожидания
+ * нет диапазона этого переноса (поставлено до переноса, прежней версией или
+ * диапазон устарел; `checkBase` откажет), `no-board` — диапазон есть, но
+ * нет живого задания доски (задание ChangeSet базу не проверяет). `failed`
+ * — ожидание называет проваленную проверку.
+ */
+function baseWaitGap(
+  h: DevContour,
+  state: State,
+  /** Живые задания доски (`ctx.jobs` — только задания досок; ChangeSet — вне их). */
+  live: readonly unknown[],
+): { gap: 'unchecked' | 'no-board'; failed: boolean } | undefined {
+  const wait = state.waits?.find((w) => w.kind === 'base-check');
+  if (!wait || heldBaseOf(state) || (h.config.approvalMode ?? 'agent') !== 'agent')
+    return undefined;
+  const failed = wait.detail.startsWith('Проверка базы не пройдена');
+  if (!baseMovesOf(state)) return { gap: 'unchecked', failed };
+  if (!live.length) return { gap: 'no-board', failed };
+  return undefined;
+}
+
+/** Шаг подтверждения человека для ожидания, которое цикл не проверит. */
+const baseUncheckedDraft = (
+  failed: boolean,
+  job?: { id: string } & Parameters<typeof jobRef>[0],
+) => ({
+  action: 'operator' as const,
+  ...(job ? { boardId: job.id, job: jobRef(job) } : {}),
+  code: 'base-unchecked' as const,
+  params: failed ? { failed: true as const } : {},
+});
+
 /** Шаг по заданиям одной доски: ждать, повторить, начать, исправить вход или решить. */
 export function boardStep(boardId: string, ctx: HostContext): HandoffHostNext | undefined {
   const step = boardDraft(boardId, ctx);
@@ -1241,6 +1275,23 @@ function boardDraft(boardId: string, ctx: HostContext): HostNextDraft | undefine
         code: 'job-stops',
         params: { stage },
       };
+    // Цикл «проверит базу», которую `checkBase` не проверит (F93): шаг —
+    // подтверждение человека, а не ожидание задания.
+    if (loop.step === 'check-base') {
+      // Удержанный перенос — подтверждение человека и при выборе между
+      // досками (решение о плане другой доски), как в блоке паузы.
+      const held = heldBaseOf(state);
+      if (held)
+        return {
+          action: 'operator',
+          boardId,
+          job: jobRef(live),
+          code: 'base-held',
+          params: { paths: held.paths },
+        };
+      const gap = baseWaitGap(h, state, ctx.jobs.filter(ctx.live));
+      if (gap?.gap === 'unchecked') return baseUncheckedDraft(gap.failed, live);
+    }
     return {
       action: 'wait',
       boardId,
@@ -2127,6 +2178,13 @@ function hostStep(ctx: HostContext): HandoffHostNext | undefined {
         params: { paths: held.paths },
       });
     }
+    // Неудержанное ожидание проверки базы, которое цикл не проверит
+    // (`baseWaitGap`, F93): «цикл проверит базу» было бы неправдой. Под
+    // паузой ведущего — его шаг паузы с этой оговоркой; когда очередь держит
+    // одно ожидание без диапазона — подтверждение человека.
+    const gap = baseWaitGap(h, state, live);
+    if (gap?.gap === 'unchecked' && state.pauseReason === 'base-check')
+      return withDetail(h, baseUncheckedDraft(gap.failed, live[0]));
     // Остановка такта «база прогонов отстала»: её не снимет ни задание (на
     // стадии задач), ни harness run, а снятие паузы (в том числе циклом на
     // стадии запуска) лишь даёт следующему такту остановить выдачу снова.
@@ -2173,12 +2231,16 @@ function hostStep(ctx: HostContext): HandoffHostNext | undefined {
         action: 'queue_set',
         ...(first ? { boardId: first.id, job: jobRef(first), loop: ahead!.outlook } : {}),
         code: 'pause-operator',
-        params: leadLiftsPause(state)
-          ? {
-              by: 'lead',
-              ...(leadPauseNote(state) ? { reason: leadPauseNote(state)! } : {}),
-            }
-          : {},
+        params: {
+          ...(leadLiftsPause(state)
+            ? {
+                by: 'lead' as const,
+                ...(leadPauseNote(state) ? { reason: leadPauseNote(state)! } : {}),
+              }
+            : {}),
+          // Под паузой — ожидание, которое цикл не проверит (F93).
+          ...(gap ? { base: gap.gap } : {}),
+        },
       });
     }
   }

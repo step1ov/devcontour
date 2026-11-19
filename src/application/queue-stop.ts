@@ -1,4 +1,4 @@
-import type { DevContour } from '../core/service.ts';
+import { baseMovesOf, type DevContour } from '../core/service.ts';
 import { inputHolds } from './input.ts';
 import type { AuditEvent, DevContourState } from '../core/model.ts';
 import { LeadWorkflow } from '../core/lead-workflow.ts';
@@ -12,6 +12,7 @@ import {
   operationLiveness,
   queueStopView,
   heldBaseWait,
+  leadLiftsPause,
   runLiveness,
   type OperationLiveness,
   type RunLiveness,
@@ -28,10 +29,16 @@ export function queueStopOf(
   state: Readonly<DevContourState> = h.store.view(),
   events: AuditEvent[] = h.store.events(),
 ) {
+  // Работа ведущего нужна только для подсказки остановленной очереди; кто
+  // проверит перенесённую базу — только при ожидании проверки базы с
+  // диапазоном. Задания читаются один раз.
+  const live = state.paused ? liveJobKinds(h) : undefined;
+  const baseWait = state.paused && state.waits?.some((w) => w.kind === 'base-check');
+  const baseRange = baseWait ? Boolean(baseMovesOf(state)) : undefined;
   const view = queueStopView(state, events, {
     approvalMode: h.config.approvalMode,
-    // Работа ведущего нужна только для подсказки остановленной очереди.
-    workflowActive: state.paused && workflowActive(h),
+    workflowActive: Boolean(live?.size),
+    ...(baseWait ? { baseRange, ...(baseRange ? { boardActive: live!.has('board') } : {}) } : {}),
   });
   // Вопрос исполнителя очередь не останавливает (`needs-input` не держит
   // выдачу): рядом с её состоянием — сколько задач ждут ответа.
@@ -56,20 +63,49 @@ export function baseWaitOf(h: DevContour | undefined, state: Readonly<DevContour
   const byEngine =
     Boolean(h) &&
     (h!.config.approvalMode ?? 'agent') === 'agent' &&
-    state.pauseReason === 'base-check' &&
-    Boolean(state.baseMoves) &&
+    // Пауза ведущего поверх неудержанного ожидания (F93, `leadResumeOf`
+    // `keeps-base-check`): ведущий снимает свою паузу, ожидание проверяет
+    // цикл задания — действия человека нет, как в `queueStopView`.
+    (state.pauseReason === 'base-check' || leadLiftsPause(state)) &&
+    baseLoopChecks(h!, state) &&
     !held &&
-    !failed &&
-    workflowActive(h!);
+    !failed;
   return { needsOperator: !byEngine, detail: wait.detail };
 }
 
-/** Есть ли работа ведущего, которую продвинет цикл `serve` (queued/running). */
-function workflowActive(h: DevContour) {
+/**
+ * Проверит ли перенесённую базу цикл задания (`checkBase`): у ожидания есть
+ * диапазон этого переноса (`baseMovesOf`) и идёт задание доски — проверку
+ * базы делает только стадия доски, задание ChangeSet её не делает.
+ * `boardActive` — уже известный вызывающему признак живого задания доски.
+ */
+export function baseLoopChecks(
+  h: DevContour,
+  state: Readonly<DevContourState>,
+  boardActive?: boolean,
+) {
+  if (!baseMovesOf(state)) return false;
+  return boardActive ?? boardWorkflowActive(h);
+}
+
+/** Есть ли задание доски, которое продвинет цикл `serve` (queued/running). */
+function boardWorkflowActive(h: DevContour) {
   const workflow = new LeadWorkflow(h);
   return [undefined, ...repositories(h.config).map((r) => r.id)].some((owner) =>
-    workflow.list(owner).some((j) => j.status === 'queued' || j.status === 'running'),
+    workflow
+      .list(owner)
+      .some((j) => j.kind === 'board' && (j.status === 'queued' || j.status === 'running')),
   );
+}
+
+/** Виды заданий ведущего, которые продвинет цикл `serve` (queued/running), одним обходом. */
+function liveJobKinds(h: DevContour) {
+  const workflow = new LeadWorkflow(h);
+  const kinds = new Set<string>();
+  for (const owner of [undefined, ...repositories(h.config).map((r) => r.id)])
+    for (const j of workflow.list(owner))
+      if (j.status === 'queued' || j.status === 'running') kinds.add(j.kind);
+  return kinds;
 }
 
 /** Идущая попытка без движения глазами ведущего агента и CLI. */
