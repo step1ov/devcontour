@@ -8,6 +8,7 @@ export const inputStateLabels: Record<string, string> = {
   'answer-saved': 'Ответ сохранён — нужна подготовка и проверка контекста',
   'context-review': 'Контекст проверен, применить пока нельзя',
   'review-rejected': 'Ревью отклонило ответ',
+  'contract-change-required': 'Ответ принят, нужно изменение контракта — ведёт ведущий',
   'ready-to-apply': 'Контекст с ответом проверен',
   'applied-awaiting-claim': 'Ответ применён, ждёт попытки',
   delivered: 'Передано в новую попытку',
@@ -150,6 +151,8 @@ export function inputNextText(r: {
             : 'прочитайте находки ревью и исправьте ответ') +
             (r.operatorMode ? ' или примените его с подтверждением' : '')
         : 'ведущий агент читает находки ревью и исправляет ответ или постановку задачи';
+    case 'contract-change-required':
+      return 'отвечать заново не нужно: ведущий агент меняет закреплённый контракт (contract-change), затем тот же ответ проходит проверку на новой редакции';
     case 'applied-awaiting-claim':
       return 'ответ применён, задача ждёт новой попытки';
     default:

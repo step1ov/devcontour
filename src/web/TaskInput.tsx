@@ -112,6 +112,7 @@ export function TaskInput({ taskId, revision }: { taskId: string; revision: stri
     'awaiting-answer',
     'answer-saved',
     'review-rejected',
+    'contract-change-required',
     'context-review',
     'ready-to-apply',
     'stale',
@@ -200,7 +201,12 @@ export function TaskInput({ taskId, revision }: { taskId: string; revision: stri
       {lastReview && (
         <div className="mt-2 text-xs" data-input-review>
           <Badge variant={lastReview.approved ? 'secondary' : 'destructive'}>
-            Ревью ответа, раунд {lastReview.round}: {lastReview.approved ? 'одобрено' : 'отклонено'}
+            Ревью ответа, раунд {lastReview.round}:{' '}
+            {lastReview.approved
+              ? 'одобрено'
+              : current.state === 'contract-change-required'
+                ? 'нужна поправка контракта'
+                : 'отклонено'}
           </Badge>
           <p className="mt-1 mb-0 whitespace-pre-wrap [overflow-wrap:anywhere]">
             {lastReview.summary}

@@ -532,6 +532,7 @@ const inputActionable = new Set([
   'awaiting-answer',
   'answer-saved',
   'review-rejected',
+  'contract-change-required',
   'stale',
   'context-review',
   'ready-to-apply',
@@ -620,7 +621,10 @@ const inputSource: AttentionSourceRule = {
             sourceVersion:
               `${r.version}:${r.state}:${r.round ?? 0}` +
               (proposal ? `:p${proposal.digest.slice(0, 12)}` : '') +
-              (r.resume ? `:r-${r.resume.phase}` : ''),
+              (r.resume ? `:r-${r.resume.phase}` : '') +
+              (r.route
+                ? `:cc${r.route.waiting ? '-w' : ''}${r.route.operation ? `-${r.route.operation.id}-${r.route.operation.status}` : ''}`
+                : ''),
             source: 'input',
             category: operator ? 'question' : 'technical',
             actor: operator ? 'operator' : 'lead',
@@ -630,9 +634,11 @@ const inputSource: AttentionSourceRule = {
                 ? `Исполнитель спрашивает по задаче «${title}»`
                 : apply
                   ? `Ответ по задаче «${title}» готов к применению`
-                  : r.resume
-                    ? `Ответ по задаче «${title}»: DevContour не может продолжить сам`
-                    : `Вопрос исполнителя по задаче «${title}»: ${inputStateLabels[r.state] ?? r.state}`,
+                  : r.state === 'contract-change-required'
+                    ? `Ответ по задаче «${title}» принят: нужно изменение контракта — ведёт ведущий`
+                    : r.resume
+                      ? `Ответ по задаче «${title}»: DevContour не может продолжить сам`
+                      : `Вопрос исполнителя по задаче «${title}»: ${inputStateLabels[r.state] ?? r.state}`,
             // Следующий шаг — словами оператора: поле `next` сводки — указание
             // ведущему агенту по-английски, с операциями агентского API.
             // Повторные остановки вопросом — первой строкой: длинный вопрос
@@ -648,6 +654,14 @@ const inputSource: AttentionSourceRule = {
                       : ': он длинный или содержит скрытые данные — прочитайте и подтвердите его в карточке задачи. ')
                   : '') +
                 (rejected ? `Ревью отклонило ответ (раунд ${r.round}): ${findings} — ` : '') +
+                // Маршрут contract-change (F83): какие контракты и чья операция.
+                (r.route
+                  ? `Ответ — выбор, которому нужна поправка закреплённого контракта ${r.route.contracts.map((c) => `«${c.title}»`).join(', ')}` +
+                    (r.route.operation
+                      ? ` (операция ${r.route.operation.id}: ${r.route.operation.status})`
+                      : '') +
+                    '. '
+                  : '') +
                 (question ? `${question} — ` : '') +
                 `Дальше: ${inputNextText({ ...r, operatorMode })}.`,
             ),

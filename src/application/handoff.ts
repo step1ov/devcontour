@@ -1319,21 +1319,44 @@ function inputStep(ctx: HostContext, taskId: string): HandoffHostNext | undefine
           code: 'apply-stale' as const,
           params: { reason: summary.stale?.reason ?? 'context', operator, ...stops },
         }
-      : summary.state === 'review-rejected'
+      : summary.state === 'contract-change-required'
         ? {
-            code: 'apply-rejected' as const,
+            code: 'contract-change-required' as const,
             params: {
-              operator,
-              // Исправляет оператор: ведущий предлагает исправление (F37).
-              ...(summary.actor === 'operator'
-                ? { operatorAnswers: true, proposed: !!summary.proposal }
+              contracts: summary.route?.contracts.map((c) => c.id) ?? [],
+              ...(summary.route?.contracts.some((c) => c.source)
+                ? {
+                    files: summary.route.contracts.flatMap((c) => (c.source ? [c.source] : [])),
+                  }
                 : {}),
+              ...(summary.route?.operation ? { operation: summary.route.operation } : {}),
+              ...(summary.route?.waiting ? { waiting: true as const } : {}),
+              operator,
+              ...(!operator && summary.route?.answeredBy === 'operator'
+                ? { server: true as const }
+                : {}),
+              ...(summary.floors.length ? { floors: true as const } : {}),
               ...stops,
             },
           }
-        : summary.state === 'applied-awaiting-claim'
-          ? { code: 'apply-claim' as const, params: stops }
-          : { code: 'apply-saved' as const, params: { state: summary.state, operator, ...stops } }),
+        : summary.state === 'review-rejected'
+          ? {
+              code: 'apply-rejected' as const,
+              params: {
+                operator,
+                // Исправляет оператор: ведущий предлагает исправление (F37).
+                ...(summary.actor === 'operator'
+                  ? { operatorAnswers: true, proposed: !!summary.proposal }
+                  : {}),
+                ...stops,
+              },
+            }
+          : summary.state === 'applied-awaiting-claim'
+            ? { code: 'apply-claim' as const, params: stops }
+            : {
+                code: 'apply-saved' as const,
+                params: { state: summary.state, operator, ...stops },
+              }),
   });
 }
 

@@ -128,6 +128,24 @@ export interface HintParamMap {
    * `proposed` — предложение исправления уже ждёт оператора (F37).
    */
   'apply-rejected': { operator: boolean; operatorAnswers?: boolean; proposed?: boolean } & Stops;
+  /**
+   * Ревью приняло ответ как выбор, которому нужна только поправка закреплённых
+   * контрактов (F83): ход ведущего — contract-change. `contracts` — ID,
+   * `files` — их файлы; `operation` — операция после раунда; `waiting` —
+   * задача перепривязана и ждёт завершения операции и утверждения;
+   * `operator` — approvalMode operator (ответ применяет оператор);
+   * `server` — ответ дал оператор: после перепривязки ревью того же ответа
+   * проводит проход сервера; `floors` — засчитывается только операция.
+   */
+  'contract-change-required': {
+    contracts: string[];
+    files?: string[];
+    operation?: { id: string; status: string };
+    waiting?: true;
+    operator: boolean;
+    server?: true;
+    floors?: true;
+  } & Stops;
   /** Ответ применён, задача ждёт следующей попытки. */
   'apply-claim': Stops;
   /** Ответ сохранён, но не применён (`state`). */
@@ -435,6 +453,30 @@ const en: Catalog = {
       repeatedEn(taskId, p.stops)
     );
   },
+  'contract-change-required': (p, s) => {
+    const { requestId, taskId } = s.input!;
+    const named = p.contracts.join(', ') + (p.files?.length ? ` (${p.files.join(', ')})` : '');
+    const op = p.operation;
+    const step =
+      op && op.status !== 'completed'
+        ? `contract-change ${op.id} is ${op.status}: continue it (devcontour contract-change --id ${op.id})${op.status === 'failed' ? ', revise it (--revise --expected-version N) or abandon it (--abandon; the question then returns to the operator)' : ''}`
+        : p.waiting
+          ? 'the task is rebound and waits for the operation to complete and for its approval (contract_change_status, workflow_start or review-plan --tasks)'
+          : 'write the amended contract file and run devcontour contract-change --file proposal.json --author-runtime codex|claude (the same title and file)';
+    const after = p.operator
+      ? 'input_context and input_review with the same answer; the operator applies it in the panel'
+      : p.server
+        ? 'DevContour reviews and applies the same answer itself when the server runs (otherwise input_context, input_review, input_target, input_apply)'
+        : 'input_context, input_review, input_target, input_apply with the same answer';
+    return (
+      `The answer to ${requestId} is accepted; its only conflict is an amendment of the pinned contract ${named}, so the lead changes the contract: ${step}.` +
+      (p.floors
+        ? ' The question has floors: only a completed contract-change operation counts, not a manual registration and task edit.'
+        : '') +
+      ` After the rebinding and the re-approval of task ${taskId}: ${after}. The operator does not answer again.` +
+      repeatedEn(taskId, p.stops)
+    );
+  },
   'apply-claim': (p, s) => {
     const { requestId, taskId } = s.input!;
     return (
@@ -698,6 +740,30 @@ const ru: Catalog = {
           : 'ответ исправляет оператор; предложите исправленный ответ через input_propose, чтобы оператор подтвердил его, или переоткройте задачу с новой постановкой'
         : 'исправьте ответ или переоткройте задачу с новой постановкой') +
       `${p.operator ? '; оператор может применить его только с явным подтверждением' : ''}.` +
+      repeatedRu(taskId, p.stops)
+    );
+  },
+  'contract-change-required': (p, s) => {
+    const { requestId, taskId } = s.input!;
+    const named = p.contracts.join(', ') + (p.files?.length ? ` (${p.files.join(', ')})` : '');
+    const op = p.operation;
+    const step =
+      op && op.status !== 'completed'
+        ? `contract-change ${op.id} в состоянии ${op.status}: продолжите её (devcontour contract-change --id ${op.id})${op.status === 'failed' ? ', пересмотрите (--revise --expected-version N) или отмените (--abandon; тогда вопрос вернётся оператору)' : ''}`
+        : p.waiting
+          ? 'задача перепривязана и ждёт завершения операции и утверждения (contract_change_status, workflow_start или review-plan --tasks)'
+          : 'запишите исправленный файл контракта и выполните devcontour contract-change --file proposal.json --author-runtime codex|claude (то же название и файл)';
+    const after = p.operator
+      ? 'input_context и input_review с тем же ответом; применяет оператор в панели'
+      : p.server
+        ? 'тот же ответ DevContour проверит и применит сам, пока работает сервер (иначе input_context, input_review, input_target, input_apply)'
+        : 'input_context, input_review, input_target, input_apply с тем же ответом';
+    return (
+      `Ответ на ${requestId} принят; его единственный конфликт — поправка закреплённого контракта ${named}, поэтому контракт меняет ведущий: ${step}.` +
+      (p.floors
+        ? ' У вопроса есть минимумы: засчитывается только завершённая операция contract-change, а не ручная регистрация и правка задачи.'
+        : '') +
+      ` После перепривязки и нового утверждения задачи ${taskId}: ${after}. Оператор заново не отвечает.` +
       repeatedRu(taskId, p.stops)
     );
   },

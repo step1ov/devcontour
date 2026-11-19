@@ -352,6 +352,34 @@ const samples: { [C in HintCode]: (HintSubject & Extract<HintOf, { code: C }>)[]
       input: input1,
     },
   ],
+  'contract-change-required': [
+    {
+      code: 'contract-change-required',
+      params: {
+        contracts: ['contract-v1'],
+        files: ['docs/contracts/format.md'],
+        operator: false,
+        server: true,
+        floors: true,
+      },
+      input: input1,
+    },
+    {
+      code: 'contract-change-required',
+      params: {
+        contracts: ['contract-v1'],
+        operation: { id: 'CC-1', status: 'failed' },
+        operator: false,
+        stops,
+      },
+      input: input1,
+    },
+    {
+      code: 'contract-change-required',
+      params: { contracts: ['contract-v1', 'contract-w1'], waiting: true, operator: true },
+      input: input1,
+    },
+  ],
   'apply-claim': [
     { code: 'apply-claim', params: { stops: { ...stops, exhausted: false } }, input: input1 },
   ],
@@ -611,8 +639,10 @@ test('Подсказки шага: новая конфигурация setup п�
  * выдачи»: черновик, отменённый человеком, тоже останавливает задание.
  * Намеренное изменение (F80): `plan.misrouted` говорит, что правка одной
  * роли оставляет находку неразобранной (для ждущей решения владельца).
+ * Намеренное изменение (F83): новый код `contract-change-required` — ответ
+ * принят как выбор, которому нужна поправка закреплённого контракта.
  */
-const ENGLISH_SAMPLES_SHA256 = 'be1aac0f25021981cf3b5abb181409c65a444ac3a9be2225b3a22f6b79c8c3f6';
+const ENGLISH_SAMPLES_SHA256 = 'c43568e4645c6a989f627927dc0ed9f10391739a49dcf4771e5c518365a0eb36';
 
 test('Подсказки шага: английские тексты образцов закреплены', () => {
   assert.equal(

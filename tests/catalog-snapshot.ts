@@ -233,5 +233,10 @@
 // предела ответа md — раздел DevContour ссылается на host.next.detail и
 // commands того же ответа вместо повтора их текста; прочие операции
 // байтово прежние.
-export const CATALOG_DIGEST = '400fda86407382ab00f5e5b5d6058a6b5ea23adc3ee4812c932d3412f9d90d3d';
+// Намеренное изменение (F83): состояние вопроса contract-change-required в
+// фильтре input_list; описания input_list, input_review и session_handoff
+// называют маршрут contract-change (правило находки contract-change:<id>,
+// route и contracts результата ревью, код шага contract-change-required);
+// прочие операции байтово прежние.
+export const CATALOG_DIGEST = 'fa57ff359613382950745d5d90f440d6bc425b7a0c8fe0847c3c41e1e7ef7695';
 export const SNAPSHOT_VERSION = '0.4.0-alpha.7';
