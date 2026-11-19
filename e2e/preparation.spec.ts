@@ -27,7 +27,7 @@ test('An empty workspace shows live product review, C1/C2 and separate operator 
     return response.json();
   };
   try {
-    await page.goto(app.url);
+    await page.goto(app.url + '/?stage=product');
     await expect(page.getByRole('heading', { name: 'От запроса к разработке' })).toBeVisible();
     await expect(page.getByText('Внутри репозитория', { exact: true })).toBeVisible();
     await page.getByLabel('Новое изменение').fill('Модерация чата');
@@ -132,9 +132,10 @@ test('An empty workspace shows live product review, C1/C2 and separate operator 
     expect((await (await request.get(app.url + '/api/preparation')).json()).developmentReady).toBe(
       true,
     );
-    // A bare address opens where the work is now, not the product brief, and
-    // replaces itself so Back does not land on the same redirect.
-    await page.goto(app.url);
+    // A change address without a stage opens where the work is now, not the
+    // product brief, and replaces itself so Back does not land on the same
+    // redirect. The bare address is the panel home.
+    await page.goto(app.url + '/?change=' + encodeURIComponent(changeId));
     await expect(
       page.getByRole('heading', { name: 'Постановка и архитектура утверждены' }),
     ).toBeVisible();
@@ -202,7 +203,7 @@ test('The operator edits a section in the panel and the change reaches state and
   const root = mkdtempSync(join(tmpdir(), 'devcontour-ui-edit-'));
   const app = await startWorkspace(join(root, 'workspace'), { port: 0, workspaceMode: 'embedded' });
   try {
-    await page.goto(app.url);
+    await page.goto(app.url + '/?stage=product');
     await page.getByLabel('Новое изменение').fill('Модерация чата');
     await page.getByRole('button', { name: 'Создать изменение', exact: true }).click();
     const current = await (await request.get(app.url + '/api/preparation')).json();
@@ -353,7 +354,7 @@ test('A product draft over the approved version keeps development and names its 
       },
     });
     expect(draft.developmentReady).toBe(true);
-    await page.goto(app.url);
+    await page.goto(app.url + '/?stage=product');
     await page.getByRole('button', { name: /1 Продукт/ }).click();
     await expect(
       page.getByText(/Версия 2 — черновик агента, на согласование ещё не отправлена\./),

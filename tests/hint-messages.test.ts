@@ -60,6 +60,23 @@ const samples: { [C in HintCode]: (HintSubject & Extract<HintOf, { code: C }>)[]
   'plan-unapproved': [
     {
       code: 'plan-unapproved',
+      params: { scope: 3 },
+      boardId: 'board-1',
+      plan: {
+        drafts: ['t-1', 't-4'],
+        stale: [],
+        review: ['t-1'],
+        reviewCount: 1,
+        unverified: [],
+        unverifiedCount: 0,
+        blocked: [],
+        blockedCount: 0,
+        questions: [{ id: 't-4', questionId: 'Q-1' }],
+        questionsCount: 1,
+      },
+    },
+    {
+      code: 'plan-unapproved',
       params: { scope: 2 },
       boardId: 'board-1',
       plan: {
@@ -210,6 +227,22 @@ const samples: { [C in HintCode]: (HintSubject & Extract<HintOf, { code: C }>)[]
       job,
       loop: { step: 'stop' as const, taskId: 't-1', reason: 'cancelled' },
     })),
+    // Мёртвая доска, остановки — решения ведущего: закрытие задания (F86).
+    {
+      code: 'job-cancelled-task' as const,
+      params: {
+        taskId: 't-1',
+        by: 'host' as const,
+        budget: false,
+        live: false,
+        allCancelled: true as const,
+        closable: true as const,
+        error: 'boom',
+      },
+      boardId: 'board-1',
+      job,
+      loop: { step: 'stop' as const, taskId: 't-1', reason: 'cancelled' },
+    },
   ],
   'job-retry': [
     {
@@ -235,6 +268,12 @@ const samples: { [C in HintCode]: (HintSubject & Extract<HintOf, { code: C }>)[]
       job: { ...job, repositoryId: undefined },
     },
     { code: 'job-exhausted', params: { error: 'boom' }, boardId: 'board-1', job },
+    {
+      code: 'job-exhausted',
+      params: { error: 'boom', closable: true },
+      boardId: 'board-1',
+      job,
+    },
   ],
   'job-settled': [
     { code: 'job-settled', params: {}, boardId: 'board-1', job: { ...job, status: 'stale' } },
@@ -260,6 +299,24 @@ const samples: { [C in HintCode]: (HintSubject & Extract<HintOf, { code: C }>)[]
         leadPause: { reason: 'waiting for the schema' },
       },
       boardId: 'board-1',
+      job,
+    },
+  ],
+  'changeset-restart': [
+    {
+      code: 'changeset-restart',
+      params: {
+        changeSetId: 'CHG-1',
+        authorRuntime: 'codex',
+        operation: 'CC-1',
+        others: ['CHG-2'],
+        more: 3,
+      },
+      job: { ...job, status: 'stale' },
+    },
+    {
+      code: 'changeset-restart',
+      params: { changeSetId: 'CHG-1', authorRuntime: 'claude' },
       job,
     },
   ],
@@ -352,6 +409,34 @@ const samples: { [C in HintCode]: (HintSubject & Extract<HintOf, { code: C }>)[]
       input: input1,
     },
   ],
+  'contract-change-required': [
+    {
+      code: 'contract-change-required',
+      params: {
+        contracts: ['contract-v1'],
+        files: ['docs/contracts/format.md'],
+        operator: false,
+        server: true,
+        floors: true,
+      },
+      input: input1,
+    },
+    {
+      code: 'contract-change-required',
+      params: {
+        contracts: ['contract-v1'],
+        operation: { id: 'CC-1', status: 'failed' },
+        operator: false,
+        stops,
+      },
+      input: input1,
+    },
+    {
+      code: 'contract-change-required',
+      params: { contracts: ['contract-v1', 'contract-w1'], waiting: true, operator: true },
+      input: input1,
+    },
+  ],
   'apply-claim': [
     { code: 'apply-claim', params: { stops: { ...stops, exhausted: false } }, input: input1 },
   ],
@@ -413,6 +498,22 @@ const samples: { [C in HintCode]: (HintSubject & Extract<HintOf, { code: C }>)[]
       params: { order: 'now', active: ['R-1'], userPause: true },
       input: input1,
     },
+  ],
+  'owner-answer': [
+    {
+      code: 'owner-answer',
+      params: { count: 1, stage: 'product' },
+      question: { id: 'Q-1', changeId: 'PC-1', section: 'product' },
+    },
+    {
+      code: 'owner-answer',
+      params: { count: 3, stage: 'development' },
+      question: { id: 'Q-2', changeId: 'PC-1', section: 'development' },
+    },
+  ],
+  'owner-question-pending': [
+    { code: 'owner-question-pending', params: { questions: ['Q-1'], held: 2 }, boardId: 'b-1' },
+    { code: 'owner-question-pending', params: { questions: many('Q', 7), held: 9 } },
   ],
 };
 
@@ -611,8 +712,21 @@ test('Подсказки шага: новая конфигурация setup п�
  * выдачи»: черновик, отменённый человеком, тоже останавливает задание.
  * Намеренное изменение (F80): `plan.misrouted` говорит, что правка одной
  * роли оставляет находку неразобранной (для ждущей решения владельца).
+ * Намеренное изменение (F82): новый код `contract-change-required` — ответ
+ * принят как выбор, которому нужна поправка закреплённого контракта.
+ * Намеренное изменение (F84): новый код `changeset-restart` — перезапуск
+ * устаревшего задания ChangeSet.
+ * Намеренное изменение (F86): добавлены образцы `job-cancelled-task` и
+ * `job-exhausted` с `closable` (закрытие задания мёртвой доски,
+ * workflow_close); прежние образцы байтово прежние.
+ * Намеренное изменение (вопросы владельцу): новые коды owner-answer и owner-question-pending
+ * и образец plan-unapproved с plan.questions (вопросы владельцу); тексты прежних образцов байтово прежние.
+ * Сборка 0.4.0-alpha.51: образцы F82, F84, F86 и вопросов владельцу вместе
+ * (новые коды contract-change-required, changeset-restart, owner-answer,
+ * owner-question-pending, образцы closable и plan.questions); тексты прежних
+ * образцов байтово прежние.
  */
-const ENGLISH_SAMPLES_SHA256 = 'be1aac0f25021981cf3b5abb181409c65a444ac3a9be2225b3a22f6b79c8c3f6';
+const ENGLISH_SAMPLES_SHA256 = '24e67e66b80e8edac26c874cbbee20245b339500fc0ce515d1d48f6031f16aa8';
 
 test('Подсказки шага: английские тексты образцов закреплены', () => {
   assert.equal(

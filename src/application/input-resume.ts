@@ -153,6 +153,24 @@ export function resumeRecord(h: DevContour, requestId: string) {
 }
 
 /**
+ * Запись прохода по текущему ответу запроса. `rebased` — ревью снова нужно
+ * потому, что маршрут contract-change сменил основание (F82,
+ * `InputService.routeRebased`): ревью, отклонённые маршрутом по прежнему
+ * основанию, тогда предела ревью не тратят — ревью того же ответа на новой
+ * редакции не повтор.
+ */
+export function resumeRecordFor(
+  h: DevContour,
+  request: InputRequest,
+  rebased = false,
+): ResumeRecord | undefined {
+  const answer = latestAnswer(request);
+  const saved = resumeRecord(h, request.id);
+  if (!answer || saved?.answerDigest !== answer.digest) return undefined;
+  return rebased && saved.phase === 'rejected' ? { ...saved, reviews: 0 } : saved;
+}
+
+/**
  * Одобренный раунд ревью, который уже покрывает текущий ответ и
  * утверждение задачи: устаревшее применение (`stale` не по контексту) не
  * требует нового ревью — тот же снимок, новая цель. `undefined` — нужно ревью.
@@ -194,6 +212,8 @@ export function resumeOf(
   now = Date.now(),
   /** Исходная остановка не держится: кто решает выход (F39). */
   moved?: 'operator' | 'lead',
+  /** Маршрут contract-change сменил основание ревью (F82, `resumeRecordFor`). */
+  rebased = false,
 ): ResumeView | undefined {
   if (h.config.approvalMode !== 'agent') return undefined;
   if (request.kind !== 'question' || !request.blocking || request.lifecycle !== 'answered')
@@ -217,8 +237,7 @@ export function resumeOf(
   // Пауза держит любой шаг прохода — и ревью, и применение — раньше записей.
   const held = resumeHeld(h);
   if (held) return view('paused', { detail: held });
-  const saved = resumeRecord(h, request.id);
-  const record = saved?.answerDigest === answer.digest ? saved : undefined;
+  const record = resumeRecordFor(h, request, rebased);
   const review = needsReview(h, request, state, task);
   if (review) {
     // Идущее ревью — пока не истёк его срок; запись прерванного процесса —

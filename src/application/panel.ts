@@ -385,7 +385,7 @@ export function inputPolicyView(h: DevContour, state: Readonly<DevContourState>,
  * сверяются с загрузкой дёшево; digest считается только при изменённых
  * байтах — переформатирование без смысловой правки расхождением не считается.
  */
-function configDrift(h: DevContour, root: string) {
+export function configDrift(h: DevContour, root: string) {
   const changed = h.configProvenance();
   if (!changed) return null;
   try {
@@ -526,7 +526,8 @@ function summaryOnce(
     // Номер: ревизия данных, отпечаток процесса (если есть) и `.1`, пока
     // действует lease операции.
     const revision =
-      String(shared.revision) + (local ? `.${local}` : '') + (leases.length ? '.1' : '');
+      // Тот же снимок, что у `shared`: ревизия совпадает с `shared.revision`.
+      String(h.store.visibleRevision()) + (local ? `.${local}` : '') + (leases.length ? '.1' : '');
     if (q.revision === revision) return { revision, unchanged: true as const };
     if (!cache) return buildSummary(h, root, q, state, revision, leases, now);
     // Область — запрос без номера клиента: он решает только «без изменений».
@@ -685,7 +686,7 @@ function buildSummary(
     queue: queueStopOf(h, state, recent),
     journalError: short(h.store.projectionError, DIAGNOSTIC),
     workflows: new LeadWorkflow(h)
-      .view()
+      .view(state)
       .map((w) => clip({ ...w, history: (w.history ?? []).slice(-5) })),
     dataRoot: resolve(root),
     ready,

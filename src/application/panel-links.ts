@@ -5,7 +5,8 @@ export const hrefs = {
     (changeId
       ? `/?change=${encodeURIComponent(changeId)}` +
         (stage ? `&stage=${encodeURIComponent(stage)}` : '')
-      : '/') + (anchor ? `#${anchor}` : ''),
+      : // Голый адрес — главная панели: без изменения этап назван явно.
+        `/?stage=${encodeURIComponent(stage ?? 'product')}`) + (anchor ? `#${anchor}` : ''),
   // Панель разработки внутри оболочки подготовки показывается с view=boards;
   // без подготовки параметр безвреден.
   task: (taskId: string) => `/?view=boards&tab=list&task=${encodeURIComponent(taskId)}`,
@@ -20,5 +21,6 @@ export const hrefs = {
   changeset: (changeSetId: string) =>
     `/?view=boards&tab=changesets#changeset-${encodeURIComponent(changeSetId)}`,
   contracts: () => '/?view=boards&tab=contracts',
-  overview: () => '/',
+  /** Обзор автора в обеих оболочках (голый адрес — главная). */
+  overview: () => '/?view=boards&tab=overview',
 };

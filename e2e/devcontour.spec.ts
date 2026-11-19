@@ -14,7 +14,7 @@ test('Plan → parallel execution → acceptance → correction → acceptance p
   const cycle = { timeout: 150_000 };
   const errors: string[] = [];
   page.on('pageerror', (e) => errors.push(e.message));
-  await page.goto('/');
+  await page.goto('/?tab=overview');
   // Автор попадает на обзор; доску открывает навигацией. Обзор — экран
   // workspace в боковой навигации, а не вкладка доски.
   await expect(
@@ -88,7 +88,7 @@ test('Operator can create a board, tasks and dependency; invalid cycle is explai
   page,
   request,
 }) => {
-  await page.goto('/');
+  await page.goto('/?tab=overview');
   await page.getByRole('button', { name: 'Создать доску', exact: true }).click();
   await page.getByLabel('Название', { exact: true }).fill('Проверка зависимостей');
   await page
@@ -144,7 +144,7 @@ test('Operator can create a board, tasks and dependency; invalid cycle is explai
   await expect(page.getByRole('button', { name: /Экран сервиса.*Отменена/ })).toBeVisible();
 });
 test('Desktop and mobile views are accessible and do not overflow', async ({ page }) => {
-  await page.goto('/');
+  await page.goto('/?tab=overview');
   const boards = page.getByRole('navigation', { name: 'Доски' });
   const catalog = boards.getByRole('button', { name: /Каталог продуктов/ });
   // Принятые доски лежат в свёрнутой группе «Принятые»; текущая работа — над ней.
@@ -242,7 +242,7 @@ for (const [label, author, reviewer, shown] of [
       ];
       await route.fulfill({ response, json: state });
     });
-    await page.goto('/');
+    await page.goto('/?tab=overview');
     const live = page.getByRole('region', { name: 'Сейчас работают' });
     await expect(live).toContainText('Ревью плана');
     const row = live.getByRole('list', { name: 'Работа ведущего цикла' }).getByRole('listitem');

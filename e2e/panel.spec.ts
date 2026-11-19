@@ -67,7 +67,7 @@ test('Polling asks only for the bounded summary; unchanged polls are tiny and th
     const body = await response.body().catch(() => Buffer.alloc(0));
     polled.push({ path: url.pathname, bytes: body.length });
   });
-  await page.goto(base);
+  await page.goto(base + '/?tab=overview');
   await expect(page.getByRole('region', { name: 'Сейчас работают' })).toBeVisible();
   await page.waitForTimeout(9000);
   expect(polled.some((p) => p.path === '/api/state')).toBe(false);
@@ -79,7 +79,7 @@ test('Polling asks only for the bounded summary; unchanged polls are tiny and th
 });
 
 test('A task with a long history opens with its attempts loaded on request', async ({ page }) => {
-  await page.goto(base);
+  await page.goto(base + '/?tab=overview');
   await openBusyTask(page);
   const attempts = page.getByRole('region', { name: 'Ход попыток' });
   await expect(attempts).toContainText('Попытка 5');
@@ -95,7 +95,7 @@ test('A failed detail load is shown with a retry, and the retry loads the attemp
     if (fail) await route.fulfill({ status: 500, json: { error: 'стенд: отказ деталей' } });
     else await route.continue();
   });
-  await page.goto(base);
+  await page.goto(base + '/?tab=overview');
   await openBusyTask(page);
   const alert = page.getByRole('alert').filter({ hasText: 'Детали задачи не загрузились' });
   await expect(alert).toContainText('стенд: отказ деталей');
@@ -108,7 +108,7 @@ test('A failed detail load is shown with a retry, and the retry loads the attemp
 test('A polling failure is visible, keeps the shown state and clears after the next successful poll', async ({
   page,
 }) => {
-  await page.goto(base);
+  await page.goto(base + '/?tab=overview');
   await openBusyTask(page);
   await expect(page.getByRole('region', { name: 'Ход попыток' })).toContainText('Попытка 5');
   await page.route('**/api/summary*', (route) =>
@@ -125,7 +125,7 @@ test('A polling failure is visible, keeps the shown state and clears after the n
 test('A board switch that failed is loaded by the next successful poll instead of staying empty', async ({
   page,
 }) => {
-  await page.goto(base);
+  await page.goto(base + '/?tab=overview');
   const { board } = await target(page);
   const summary = (await (await page.request.get(`${base}/api/summary`)).json()) as {
     boards: { id: string; title: string; live: boolean; revisions: { status: string }[] }[];
@@ -168,7 +168,7 @@ test('A board switch that failed is loaded by the next successful poll instead o
 test('The dependency picker finds tasks on other boards through server search', async ({
   page,
 }) => {
-  await page.goto(base);
+  await page.goto(base + '/?tab=overview');
   const { title, board } = await target(page);
   const summary = (await (await page.request.get(`${base}/api/summary`)).json()) as {
     boards: { title: string; live: boolean; revisions: { status: string }[] }[];
@@ -197,7 +197,7 @@ test('Attempt numbers count the whole history, so they do not change when earlie
   await page.route(`**/api/tasks/${busyTask}?*`, (route) =>
     route.continue({ url: route.request().url().replace('limit=10', 'limit=2') }),
   );
-  await page.goto(base);
+  await page.goto(base + '/?tab=overview');
   await openBusyTask(page);
   const attempts = page.getByRole('region', { name: 'Ход попыток' });
   await expect(attempts.locator('strong').first()).toHaveText('Попытка 5');
@@ -218,7 +218,7 @@ test('A failed verification snapshot is retried by its own retry, not by reloadi
       await route.fulfill({ status: 500, json: { error: 'стенд: отказ снимка' } });
     else await route.continue();
   });
-  await page.goto(base);
+  await page.goto(base + '/?tab=overview');
   await page
     .getByRole('navigation', { name: 'Workspace' })
     .getByRole('link', { name: 'Изменения', exact: true })
@@ -238,7 +238,7 @@ test('A failed verification snapshot is retried by its own retry, not by reloadi
 });
 
 test('A late summary response of the same view does not replace a newer one', async ({ page }) => {
-  await page.goto(base);
+  await page.goto(base + '/?tab=overview');
   await page.getByRole('navigation', { name: 'Доски' }).getByRole('button').first().click();
   await page.getByRole('tab', { name: 'Список', exact: true }).click();
   await expect(page.getByRole('region', { name: 'Сейчас работают' })).toBeVisible();
@@ -281,7 +281,7 @@ test('A late summary response of the same view does not replace a newer one', as
 });
 
 test('A shortened change set description opens in full on request', async ({ page }) => {
-  await page.goto(base);
+  await page.goto(base + '/?tab=overview');
   await page
     .getByRole('navigation', { name: 'Workspace' })
     .getByRole('link', { name: 'Изменения', exact: true })
@@ -295,7 +295,7 @@ test('A shortened change set description opens in full on request', async ({ pag
 });
 
 test('Review findings beyond the first page load on request', async ({ page }) => {
-  await page.goto(base);
+  await page.goto(base + '/?tab=overview');
   await page.getByRole('navigation', { name: 'Доски' }).getByRole('button').first().click();
   await page.getByRole('tab', { name: 'Ход работ', exact: true }).click();
   const review = page.locator('li').filter({ hasText: 'Обезличенный контракт' }).first();
@@ -321,7 +321,7 @@ test('A double click on "more findings" loads the page once and keeps every find
     await new Promise((r) => setTimeout(r, 600));
     await route.continue();
   });
-  await page.goto(base);
+  await page.goto(base + '/?tab=overview');
   await page.getByRole('navigation', { name: 'Доски' }).getByRole('button').first().click();
   await page.getByRole('tab', { name: 'Ход работ', exact: true }).click();
   const review = page.locator('li').filter({ hasText: 'Обезличенный контракт' }).first();
@@ -345,7 +345,7 @@ test('A failed earlier attempts page is retried as that page, not by reloading t
     if (fail) await route.fulfill({ status: 500, json: { error: 'стенд: отказ страницы' } });
     else await route.continue();
   });
-  await page.goto(base);
+  await page.goto(base + '/?tab=overview');
   await openBusyTask(page);
   const attempts = page.getByRole('region', { name: 'Ход попыток' });
   await expect(attempts.locator('strong').first()).toHaveText('Попытка 5');
@@ -369,7 +369,7 @@ test('A late snapshot response does not replace the snapshot chosen after it', a
       await route.fulfill({ response });
     } else await route.continue();
   });
-  await page.goto(base);
+  await page.goto(base + '/?tab=overview');
   await page
     .getByRole('navigation', { name: 'Workspace' })
     .getByRole('link', { name: 'Изменения', exact: true })
@@ -402,7 +402,7 @@ test('A summary refresh while paging the verification history keeps the history 
       await route.fulfill({ response });
     } else await route.continue();
   });
-  await page.goto(base);
+  await page.goto(base + '/?tab=overview');
   await page
     .getByRole('navigation', { name: 'Workspace' })
     .getByRole('link', { name: 'Изменения', exact: true })
@@ -447,7 +447,7 @@ test('Earlier revisions page in the history tab, and an earlier plan opens with 
   };
   const first = own.board.revisions.find((r) => r.number === 1)!;
   const task = own.tasks.find((t) => first.taskIds.includes(t.id))!;
-  await page.goto(base);
+  await page.goto(base + '/?tab=overview');
   await page
     .getByRole('button', { name: /Доска с длинной историей/ })
     .filter({ visible: true })

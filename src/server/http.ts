@@ -1,9 +1,14 @@
+import { questionSummary } from '../core/owner-questions.ts';
+import { hrefs } from '../application/panel-links.ts';
 import { notApplicableLine } from '../core/evidence-verdict.ts';
 import { workspaceDescription } from '../runner/workspace-mode.ts';
 import { DiscussionService } from '../application/discussion.ts';
 import { quickResultDiff, quickSetupApplied, quickResult } from '../runner/quick.ts';
 import { quickFactsCache, quickPrerequisites, quickView } from '../application/quick-view.ts';
-import { AttentionService } from '../application/attention.ts';
+import { AttentionService, type AttentionView } from '../application/attention.ts';
+import { homeSlowView, homeView, type HomeSlow } from '../application/home.ts';
+import { budgetOverview } from '../harness/budget.ts';
+import { usageTotals } from '../core/usage.ts';
 import type { UsageRecord } from '../core/usage.ts';
 import { Preparation } from '../core/preparation.ts';
 import { PreparationAgent } from '../application/preparation-agent.ts';
@@ -37,6 +42,7 @@ import {
   panelSummary,
   summaryCache,
   inputPolicyView,
+  configDrift,
   panelTask,
   panelTaskSearch,
 } from '../application/panel.ts';
@@ -161,7 +167,14 @@ const scopeOf = (url: URL, ...ignored: string[]) =>
  * реже этого. С фактами Git быстрого маршрута — срок их кэша.
  */
 const PROJECTION_MAX_AGE_MS = 30_000;
+/**
+ * Медленные проекции (карта продукта читает карты историй в Git и обходит
+ * всю историю): один расчёт не чаще этого и при частых записях.
+ */
+const SLOW_TIER_MS = 30_000;
 const QUICK_FACTS_MAX_AGE_MS = 10_000;
+/** Область кэша центра внимания без параметров (`scopeOf` пустого запроса). */
+const ACTIVE_ATTENTION_SCOPE = JSON.stringify([]);
 async function body(req: IncomingMessage) {
   let text = '';
   for await (const chunk of req) {
@@ -203,15 +216,75 @@ export async function serve(
   // Кэши проекций частого опроса панели (F60): одна проекция на версию данных.
   const summaries = summaryCache();
   const overviews = new ProjectionCache<Etagged>({ maxAgeMs: PROJECTION_MAX_AGE_MS });
-  const attentions = new ProjectionCache<Promise<Etagged>>({
+  const attentions = new ProjectionCache<Promise<Etagged & { view: AttentionView }>>({
     maxAgeMs: PROJECTION_MAX_AGE_MS,
   });
+  const homes = new ProjectionCache<Promise<Etagged>>({ maxAgeMs: PROJECTION_MAX_AGE_MS });
+  // Медленный ярус главной (карта продукта, проверки за сутки, бюджеты,
+  // расход): не чаще раза в `SLOW_TIER_MS` и при неизменных данных — раз в
+  // пять минут; ответ называет момент расчёта (`asOf`).
+  const homeSlows = new ProjectionCache<HomeSlow>({
+    maxAgeMs: 10 * SLOW_TIER_MS,
+    minAgeMs: SLOW_TIER_MS,
+  });
+  // Сводка вопросов владельцу: одна на видимую ревизию (F83) и конфигурацию
+  // (маска секретов), как главная, которая считает те же счётчики.
+  const questionSummaries = new ProjectionCache<{
+    revision: number;
+    generatedAt: string;
+    sections: ReturnType<typeof questionSummary>;
+  }>({ maxAgeMs: PROJECTION_MAX_AGE_MS });
   const preparations = new ProjectionCache<string>({ maxAgeMs: QUICK_FACTS_MAX_AGE_MS });
+  const products = new ProjectionCache<string>({
+    maxAgeMs: SLOW_TIER_MS,
+    minAgeMs: SLOW_TIER_MS,
+  });
   const attentionOf = (store: Store) =>
     new AttentionService(store, h, {
       root: h?.config.workspaceRoot ?? options.bootstrap?.workspace,
       cachedFacts,
     });
+  // Состояние процесса для здоровья главной: сбой проекции журнала и
+  // расхождение config.json с действующей конфигурацией.
+  const processHealth = (engine: DevContour) => {
+    const drift = scheduler ? configDrift(engine, scheduler.root) : null;
+    return {
+      ...(engine.store.projectionError ? { journalError: engine.store.projectionError } : {}),
+      ...(drift ? { configDrift: drift.reason } : {}),
+    };
+  };
+  // Медленный ярус: карта продукта, бюджеты и расход. Карта считается здесь,
+  // а не берётся из кэша вкладки «Карта продукта»: его значение могло бы
+  // быть старше своего `minAgeMs` и получить здесь новый срок и новый `asOf`.
+  const homeSlowOf = (engine: DevContour, store: Store): HomeSlow => {
+    let product: Parameters<typeof homeSlowView>[0]['product'];
+    try {
+      product = new IntentService(engine).productView({});
+    } catch (error) {
+      product = { error: error instanceof Error ? error.message : String(error) };
+    }
+    let budgets: ReturnType<typeof budgetOverview>;
+    try {
+      budgets = budgetOverview(engine);
+    } catch {
+      budgets = undefined;
+    }
+    const records = [undefined, ...repositories(engine.config).map((r) => r.id)].flatMap((owner) =>
+      Object.values(engine.store.localRecords<UsageRecord>('usage', owner)),
+    );
+    return homeSlowView({
+      state: store.view(),
+      now: Date.now(),
+      preparation: Boolean(store.view().preparation),
+      product,
+      ...(budgets ? { budgets } : {}),
+      usage: usageTotals(records),
+      gapEvents: engine.store.eventsSince(
+        ['server.loop-stalled', 'server.clock-jump'],
+        new Date(Date.now() - 60 * 60 * 1000).toISOString(),
+      ),
+    });
+  };
   const startEngine = () => {
     if (!h || !scheduler) return;
     attachJournal(h);
@@ -250,12 +323,15 @@ export async function serve(
     : undefined;
   /** Экран этапа подготовки: статус, настройка, исполнители и остановка очереди. */
   const preparationView = (store: Store, change: string | undefined) => {
-    const view = new Preparation(store).status(change);
+    // Замороженный снимок версии (`Store.view`), а не разбор документа на
+    // каждый пересчёт: та же база до setup и после него — один снимок.
+    const state = store.view();
+    const view = Preparation.statusOf(state, change);
     const root = h?.config.workspaceRoot ?? options.bootstrap?.workspace;
     // Setting a contour up is work with a result, so the stage that
     // waits on it reports how far it got and who is busy right now,
     // instead of a task count that stays at zero for the whole of setup.
-    const engine = h?.store.read();
+    const engine = h ? (h.store === store ? state : h.store.view()) : undefined;
     return {
       ...view,
       engineConnected: Boolean(h),
@@ -302,6 +378,35 @@ export async function serve(
       workspace: root ? workspaceDescription(root) : undefined,
     };
   };
+  /**
+   * Активный список центра внимания — из кэша версии данных (F60). Отметка
+   * присутствия ведущего — файл вне базы: она входит в версию. Значение
+   * хранит и сам вид: главная читает его, не разбирая тело.
+   */
+  const activeAttention = (store: Store, scope: string, query: Record<string, string>) => {
+    const service = attentionOf(store);
+    return attentions.get(
+      scope,
+      `${store.visibleRevision()}|${leadActivityMark(store) ?? ''}`,
+      [store, h, configKey(h)],
+      (previous) => {
+        let value: Promise<Etagged & { view: AttentionView }> | undefined = undefined;
+        value = (async () => {
+          const before = await previous?.catch(() => undefined);
+          const quick = await service.prerequisites();
+          const view = service.view(query, quick);
+          if (value) {
+            const until = attentionUntil(store, view);
+            if (until !== undefined) attentions.limit(scope, value, until);
+            // Факты Git быстрого маршрута устаревают по своему сроку.
+            if (quick.size) attentions.limit(scope, value, Date.now() + QUICK_FACTS_MAX_AGE_MS);
+          }
+          return { ...etagged({ ...view }, before, ['generatedAt']), view };
+        })();
+        return { value };
+      },
+    );
+  };
   const handleRequest = async (req: IncomingMessage, res: ServerResponse) => {
     try {
       if (
@@ -334,6 +439,13 @@ export async function serve(
           });
           return;
         }
+        // Счётчики простоя сервера (F83): процессорное время, разборы
+        // документа, шлюз выдачи и пробуждения цикла ведущего. Без чтения
+        // документа — опрос сам по себе ничего не разбирает.
+        if (req.method === 'GET' && path === '/api/metrics') {
+          json(res, 200, serverMetrics(h, scheduler, lead));
+          return;
+        }
         const preparationStore = h?.store ?? options.bootstrap?.store;
         if (req.method === 'GET' && path === '/api/preparation' && preparationStore) {
           // Экран этапа опрашивается так же часто: ответ версии данных — из
@@ -342,7 +454,7 @@ export async function serve(
             res,
             preparations.get(
               scopeOf(url),
-              String(preparationStore.revision()),
+              String(preparationStore.visibleRevision()),
               [preparationStore, h, configKey(h), startupError],
               () => ({
                 value: JSON.stringify(
@@ -427,33 +539,114 @@ export async function serve(
             json(res, 200, service.history(query));
             return;
           }
-          // Активный список — из кэша версии данных (F60). Отметка присутствия
-          // ведущего — файл вне базы: она входит в версию.
-          const scope = scopeOf(url, 'etag');
+          jsonText(
+            res,
+            etaggedBody(
+              await activeAttention(preparationStore, scopeOf(url, 'etag'), query),
+              known,
+            ),
+          );
+          return;
+        }
+        // Главная: плитки разделов по снимку версии и центру внимания той же
+        // версии. До setup — на базе подготовки, как центр внимания.
+        if (req.method === 'GET' && path === '/api/home' && preparationStore) {
           const store = preparationStore;
-          const pending = attentions.get(
-            scope,
-            `${store.revision()}|${leadActivityMark(store) ?? ''}`,
-            [store, h, configKey(h)],
+          const attention = activeAttention(store, ACTIVE_ATTENTION_SCOPE, {});
+          const slowEngine = h;
+          const slow = slowEngine
+            ? homeSlows.get(
+                'home',
+                String(store.visibleRevision()),
+                [slowEngine, configKey(slowEngine)],
+                () => ({ value: homeSlowOf(slowEngine, store) }),
+              )
+            : undefined;
+          const mark = leadActivityMark(store);
+          const pending = homes.get(
+            'home',
+            `${store.visibleRevision()}|${mark ?? ''}`,
+            // Центр внимания по тождеству: его пересчёт (срок lease, факты
+            // Git) пересчитывает и главную; медленный ярус — тоже.
+            [store, h, configKey(h), startupError, attention, slow],
             (previous) => {
               let value: Promise<Etagged> | undefined = undefined;
               value = (async () => {
+                // Движок — тот, для которого считалась версия кэша (deps), а не
+                // подключённый за время ожидания центра внимания.
+                const engine = h;
                 const before = await previous?.catch(() => undefined);
-                const quick = await service.prerequisites();
-                const view = service.view(query, quick);
+                const compute = (view: AttentionView) =>
+                  store.snapshot(() =>
+                    homeView({
+                      state: store.view(),
+                      h: engine,
+                      attention: view,
+                      revision: store.visibleRevision(),
+                      now: Date.now(),
+                      ...(startupError ? { startupError } : {}),
+                      ...(engine
+                        ? {
+                            // Разрывы цикла за час считает медленный ярус
+                            // (`eventsSince`, без окна последних записей).
+                            events: engine.store.latestEvents(['scheduler.error'], 50),
+                            process: processHealth(engine),
+                          }
+                        : {}),
+                      ...(slow ? { slow } : {}),
+                      leadMark: mark,
+                      redact: attentionOf(store).redactor(),
+                    }),
+                  );
+                let { view } = await attention;
+                let home = compute(view);
+                // Запись между центром внимания и снимком: плитки и вопросы разных
+                // версий. Центр внимания новой версии — и главная заново (один раз:
+                // при непрерывных записях ответ отдаётся, а опрос считает снова).
+                if (home.revision !== view.revision) {
+                  ({ view } = await activeAttention(store, ACTIVE_ATTENTION_SCOPE, {}));
+                  home = compute(view);
+                }
                 if (value) {
                   const until = attentionUntil(store, view);
-                  if (until !== undefined) attentions.limit(scope, value, until);
-                  // Факты Git быстрого маршрута устаревают по своему сроку.
-                  if (quick.size)
-                    attentions.limit(scope, value, Date.now() + QUICK_FACTS_MAX_AGE_MS);
+                  if (until !== undefined) homes.limit('home', value, until);
+                  if (home.revision !== view.revision) homes.limit('home', value, Date.now());
                 }
-                return etagged({ ...view }, before, ['generatedAt']);
+                // Ревизия — момент чтения, как и время: запись, не изменившая
+                // плиток, оставляет метку, и опрос получает «без изменений».
+                return etagged({ ...home }, before, ['generatedAt', 'revision']);
               })();
               return { value };
             },
           );
-          jsonText(res, etaggedBody(await pending, known));
+          jsonText(res, etaggedBody(await pending, url.searchParams.get('etag')));
+          return;
+        }
+        // Сводка вопросов владельцу по разделам (главная панели): открытые,
+        // ответы без решения ведущего, удержанные черновики и до пяти записей.
+        // До setup и после него; только чтение.
+        if (req.method === 'GET' && path === '/api/questions/summary' && preparationStore) {
+          const store = preparationStore;
+          // Замороженный снимок версии (`Store.view`): опрос главной не
+          // разбирает документ заново. Ревизия — видимая (F83), как у главной:
+          // тихие записи процесса сводку не пересчитывают.
+          const summary = questionSummaries.get(
+            'questions',
+            String(store.visibleRevision()),
+            [store, h, configKey(h)],
+            () => ({
+              value: store.snapshot(() => ({
+                revision: store.visibleRevision(),
+                generatedAt: new Date().toISOString(),
+                sections: questionSummary(
+                  store.view(),
+                  hrefs.preparation,
+                  attentionOf(store).redactor(),
+                ),
+              })),
+            }),
+          );
+          json(res, 200, summary);
           return;
         }
         // Отметки «прочитано» и «увидел» — локальные записи оператора, не решение.
@@ -633,10 +826,10 @@ export async function serve(
           const engine = h;
           const overview = overviews.get(
             'overview',
-            String(engine.store.revision()),
+            String(engine.store.visibleRevision()),
             [engine, configKey(engine)],
             (previous) => ({
-              value: etagged({ ...authorOverview(engine) }, previous),
+              value: etagged({ ...authorOverview(engine, engine.store.view()) }, previous),
               until: overviewUntil(engine),
             }),
           );
@@ -748,7 +941,7 @@ export async function serve(
             })),
             events,
             journalError: h.store.projectionError,
-            workflows: new LeadWorkflow(h).view(),
+            workflows: new LeadWorkflow(h).view(state),
             dataRoot: resolve(scheduler.root),
             ready: readyTasks(state, inputs).map((t) => t.id),
             config: {
@@ -774,11 +967,27 @@ export async function serve(
               packs: h.config.packs,
             },
           };
-        } else if (req.method === 'GET' && path === '/api/product')
-          result = new IntentService(h).productView({
-            releaseId: url.searchParams.get('release') ?? undefined,
-          });
-        else if (req.method === 'GET' && parts[1] === 'changesets' && parts[3] === 'journal')
+        } else if (req.method === 'GET' && path === '/api/product') {
+          // Карта продукта стоит сотни миллисекунд (Git и вся история), а
+          // вкладка опрашивает её каждые 10 с: расчёт не чаще `SLOW_TIER_MS`.
+          const engine = h;
+          jsonText(
+            res,
+            products.get(
+              scopeOf(url),
+              String(engine.store.visibleRevision()),
+              [engine, configKey(engine)],
+              () => ({
+                value: JSON.stringify(
+                  new IntentService(engine).productView({
+                    releaseId: url.searchParams.get('release') ?? undefined,
+                  }),
+                ),
+              }),
+            ),
+          );
+          return;
+        } else if (req.method === 'GET' && parts[1] === 'changesets' && parts[3] === 'journal')
           result = { content: renderJournal(h.store.read(), parts[2], h.store.allEvents()) };
         else if (req.method === 'GET' && parts[1] === 'changesets' && parts[3] === 'evidence') {
           const e = h.store
@@ -1071,7 +1280,16 @@ export async function serve(
     server,
     url: origin,
     /** Кэши проекций опроса панели: счётчики вычислений для диагностики и тестов. */
-    projections: { summaries, overviews, attentions, preparations },
+    projections: {
+      summaries,
+      overviews,
+      attentions,
+      preparations,
+      products,
+      homes,
+      homeSlows,
+      questionSummaries,
+    },
     close: async () => {
       stopping = true;
       // Ведущий цикл прерывается первым — до отметки остановки: его стадия не
@@ -1100,5 +1318,33 @@ export async function serve(
       server.closeAllConnections();
       await closed;
     },
+  };
+}
+
+/**
+ * Счётчики простоя сервера (`GET /api/metrics`, F83): процессорное время и
+ * память процесса, разборы документа соединением сервера, шлюз выдачи такта
+ * (`skipped` — выдачи без перемен, которые такт не повторил; `passed` —
+ * выдачи, пропущенные к движку) и такты цикла ведущего. Ведущий и оператор
+ * видят по ним, закрыт ли шлюз на простое и кто разбирает документ.
+ */
+export function serverMetrics(
+  h: DevContour | undefined,
+  scheduler: Scheduler | undefined,
+  lead: LeadRunner | undefined,
+) {
+  const cpu = process.cpuUsage();
+  const memory = process.memoryUsage();
+  const gate = scheduler?.idleClaims;
+  return {
+    pid: process.pid,
+    uptimeMs: Math.round(process.uptime() * 1000),
+    cpuMs: { user: Math.round(cpu.user / 1000), system: Math.round(cpu.system / 1000) },
+    memory: { rss: memory.rss, heapUsed: memory.heapUsed },
+    store: h
+      ? { ...h.store.parseStats, ...h.store.version(), visibleRevision: h.store.visibleRevision() }
+      : null,
+    idleClaims: gate ? { skipped: gate.skipped, passed: gate.passed, maxMs: gate.maxMs } : null,
+    lead: lead ? { ...lead.stats } : null,
   };
 }

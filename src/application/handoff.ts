@@ -32,6 +32,14 @@ import { z } from 'zod';
 import { dirname, resolve } from 'node:path';
 import { heldByServer } from '../runner/server-record.ts';
 import { DomainError, type Config, type DevContourState } from '../core/model.ts';
+import type { QuestionSection } from '../core/preparation-model.ts';
+import {
+  answeredPending,
+  choicesOf,
+  maskUrlCredentials,
+  questionHolds,
+  sectionOf,
+} from '../core/owner-questions.ts';
 import type { DevContour } from '../core/service.ts';
 import {
   LeadWorkflow,
@@ -59,10 +67,12 @@ import {
 import { executionOf, toDomain } from '../harness/execution.ts';
 import {
   ContractChanges,
+  invalidatedBy,
   openCorrections,
   type CorrectionEffect,
 } from '../runner/contract-change.ts';
 import { resolveIdPrefix } from '../core/id-prefix.ts';
+import { closureOf, parkedBoards, parkedHold, userStoppers } from '../core/board-hold.ts';
 import type { DevContourExecutionStore } from '../harness/store.ts';
 
 export const handoffFormats = ['json', 'md'] as const;
@@ -162,7 +172,7 @@ interface HandoffHostNextFields {
    * О чём решение `decide`: `plan` — план доски не согласован (объём работы
    * решает ведущий или пользователь), `job` — задание ведущего.
    */
-  decision?: 'plan' | 'job';
+  decision?: 'plan' | 'job' | 'question';
   /** Задачи, из-за которых план не согласован (`decision: plan`). */
   plan?: {
     drafts: string[];
@@ -183,7 +193,15 @@ interface HandoffHostNextFields {
      */
     misrouted?: { id: string; role: string; path: string; owners: string[] }[];
     misroutedCount?: number;
+    /**
+     * Черновики, которые держит вопрос владельцу (до 20): вне ревью до
+     * решения по вопросу (`preparation_resolve`) или его снятия.
+     */
+    questions?: { id: string; questionId: string }[];
+    questionsCount?: number;
   };
+  /** Вопрос владельцу, к которому относится шаг (`owner-answer`). */
+  question?: { id: string; changeId: string; section: QuestionSection };
   /**
    * Вопрос исполнителя, к которому относится шаг (`answer-input`, `apply-input`,
    * `close-follow-up`); у переноса ответа заменённого вопроса (`apply-carry`)
@@ -253,13 +271,28 @@ export interface DevContourHandoff {
     changesets?: {
       changeSetId: string;
       job: { key: string; status: string; stage: number; attempts: number };
-      waiting: NonNullable<ReturnType<LeadWorkflow['boardsWaitingOf']>>;
+      waiting?: NonNullable<ReturnType<LeadWorkflow['boardsWaitingOf']>>;
+      /**
+       * Задание начато по прежнему входу и не продолжится (F84): вход набора
+       * сменился (например, перепривязкой или перенастройкой завершённой
+       * операции изменения контракта `operation`), а задания по текущему
+       * нет. `command` — его перезапуск; прежнее закроется (или закрыто) как
+       * stale.
+       */
+      stale?: { operation?: string; command: string };
     }[];
     /**
      * Открытые корректировки принятых задач завершённых операций изменения
      * контракта (F69): до пяти, старые операции первыми; `more` — сколько
      * ещё. Каждая закрывается `command` после проверки принятого результата.
      */
+    /**
+     * Отложенные доски (F86, `board_park`): до десяти, с причиной и сроком.
+     * Их план и задание не шаг ведущего, пока отметка действует. Сверх
+     * предела ответа причины уходят последними уступками (`reason`
+     * отсутствует; полная запись — пакет без предела, CLI).
+     */
+    parked?: { boardId: string; reason?: string; until?: string; by: string; at: string }[];
     corrections?: {
       items: {
         operation: string;
@@ -269,7 +302,119 @@ export interface DevContourHandoff {
       }[];
       more?: number;
     };
+    /**
+     * Вопросы владельцу (`preparation_question`) по всему workspace: открытые
+     * по разделам и ответы, которые ждут решения ведущего (до пяти, старые
+     * первыми, выдержки после редактора секретов; `more` — сколько ещё).
+     * Ответ закрывается `preparation_resolve` с `questionId` и `refs`;
+     * `held` — черновиков, которые держат вопросы. Нет поля — вопросов нет.
+     */
+    questions?: HandoffQuestions;
   };
+}
+
+export interface HandoffQuestions {
+  open: Record<QuestionSection, number>;
+  answered: {
+    id: string;
+    changeId: string;
+    section: QuestionSection;
+    stage: string;
+    text: string;
+    answer: string;
+    choice?: string;
+    links?: Record<string, string[]>;
+    blocks?: string[];
+  }[];
+  more?: number;
+  held: number;
+}
+
+/** Предел записей `host.questions.answered` и выдержки их текстов. */
+const HANDOFF_QUESTIONS = 5;
+const QUESTION_EXCERPT = 300;
+const excerpt = (text: string) => {
+  const chars = [...text.replace(/\s+/g, ' ').trim()];
+  return chars.length > QUESTION_EXCERPT
+    ? chars.slice(0, QUESTION_EXCERPT - 1).join('') + '…'
+    : chars.join('');
+};
+
+/** Ответы владельца без решения ведущего: старые первыми. */
+function answeredQuestions(state: State) {
+  return (state.preparation?.changes ?? [])
+    .flatMap((c) => (c.questions ?? []).filter((q) => answeredPending(c, q)).map((q) => ({ c, q })))
+    .sort((a, b) => a.q.answer!.at.localeCompare(b.q.answer!.at));
+}
+
+/** `host.questions` по состоянию; маска — до выдержки. */
+function questionsOfHandoff(state: State, known: Redactor): HandoffQuestions | undefined {
+  // Секреты конфигурации и учётные данные в URL — как у карточек центра внимания.
+  const redact = (text: string) => maskUrlCredentials(known(text));
+  const open: HandoffQuestions['open'] = { product: 0, architecture: 0, design: 0, development: 0 };
+  for (const c of state.preparation?.changes ?? [])
+    for (const q of c.questions ?? []) if (q.status === 'open') open[sectionOf(q)]++;
+  const all = answeredQuestions(state);
+  const holds = questionHolds(state);
+  if (!all.length && !Object.values(open).some(Boolean)) return undefined;
+  const answered = all.slice(0, HANDOFF_QUESTIONS).map(({ c, q }) => {
+    const chosen = q.answer!.choice !== undefined ? choicesOf(q)[q.answer!.choice] : undefined;
+    const blocks = (q.blocks?.taskIds ?? []).filter((id) => holds.get(id)?.questionId === q.id);
+    const links = Object.fromEntries(
+      Object.entries(q.links ?? {}).filter(([, ids]) => (ids as string[] | undefined)?.length),
+    ) as Record<string, string[]>;
+    return {
+      id: q.id,
+      changeId: c.id,
+      section: sectionOf(q),
+      stage: q.stage,
+      text: excerpt(redact(q.text)),
+      answer: excerpt(redact(q.answer!.text)),
+      ...(chosen ? { choice: excerpt(redact(chosen.label)) } : {}),
+      ...(Object.keys(links).length ? { links } : {}),
+      ...(blocks.length ? { blocks } : {}),
+    };
+  });
+  return {
+    open,
+    answered,
+    ...(all.length > answered.length ? { more: all.length - answered.length } : {}),
+    held: holds.size,
+  };
+}
+
+/** Шаг по ответу владельца: старейший ответ без решения ведущего. */
+function ownerAnswerStep(ctx: HostContext): HandoffHostNext | undefined {
+  const all = answeredQuestions(ctx.state);
+  const first = all[0];
+  if (!first) return undefined;
+  return withDetail(ctx.h, {
+    action: 'decide',
+    decision: 'question',
+    question: { id: first.q.id, changeId: first.c.id, section: sectionOf(first.q) },
+    code: 'owner-answer',
+    params: { count: all.length, stage: first.q.stage },
+  });
+}
+
+/**
+ * Ожидание владельца: шагов нет, а черновики держат открытые вопросы — не
+ * холостой цикл, а ожидание ответа в панели.
+ */
+function ownerWaitStep(ctx: HostContext): HandoffHostNext | undefined {
+  const all = questionHolds(ctx.state);
+  const holds = [...all.values()].filter((x) => x.status === 'open');
+  // Только когда вся невыпущенная работа удержана: иначе шаг — её план.
+  if (!holds.length || ctx.state.tasks.some((t) => t.status === 'draft' && !all.has(t.id)))
+    return undefined;
+  return withDetail(ctx.h, {
+    action: 'wait',
+    code: 'owner-question-pending',
+    params: {
+      questions: [...new Set(holds.map((x) => x.questionId))].slice(0, PLAN_HINT_IDS),
+      held: holds.length,
+    },
+  });
 }
 
 /** Предел записей `host.corrections`. */
@@ -302,6 +447,32 @@ function correctionsOfHandoff(
   if (!all.length) return undefined;
   const items = all.slice(0, HANDOFF_CORRECTIONS);
   return { items, ...(all.length > items.length ? { more: all.length - items.length } : {}) };
+}
+
+/** Предел записей `host.parked`. */
+const HANDOFF_PARKED = 10;
+
+/** Отложенные доски (`host.parked`); с `boardId` — только она. */
+function parkedOf(
+  h: DevContour,
+  state: State,
+  boardId: string | undefined,
+  redact: (text: string) => string,
+): DevContourHandoff['host']['parked'] {
+  const found = parkedBoards(h)
+    .filter(
+      (p) => (boardId === undefined || p.boardId === boardId) && parkedHold(h, state, p.boardId),
+    )
+    .sort((a, b) => a.at.localeCompare(b.at))
+    .slice(0, HANDOFF_PARKED)
+    .map((p) => ({
+      boardId: p.boardId,
+      reason: redact(p.reason),
+      ...(p.until ? { until: p.until } : {}),
+      by: p.by,
+      at: p.at,
+    }));
+  return found.length ? found : undefined;
 }
 
 /** Предел записей `host.verifications`. */
@@ -340,7 +511,12 @@ function verificationsOf(
   return found.length ? found : undefined;
 }
 
-/** Задания ChangeSet, ждущие приёмки досок (`host.changesets`, F78). */
+/**
+ * Задания ChangeSet для `host.changesets`: действующие на стадии 0, ждущие
+ * приёмки досок (F78), и устаревшие без задания по текущему входу (F84) —
+ * с шагом перезапуска, а закрытые `stale` — только когда их вход сменила
+ * завершённая операция изменения контракта (`invalidatedChangesets`).
+ */
 function changesetsOf(
   h: DevContour,
   state: State,
@@ -348,28 +524,82 @@ function changesetsOf(
   redact?: (text: string) => string,
 ): DevContourHandoff['host']['changesets'] {
   const workflow = new LeadWorkflow(h);
-  const found = workflow
+  const inScope = (id: string) =>
+    boardId === undefined ||
+    state.changeSets.some((c) => c.id === id && c.boardIds.includes(boardId));
+  const stale = new Map(changesetRestarts(h, state).map((r) => [r.key, r]));
+  const live = workflow
     .list()
     .filter((j) => j.kind === 'changeset' && ['queued', 'running'].includes(j.status))
-    .filter(
-      (j) =>
-        boardId === undefined ||
-        state.changeSets.some((c) => c.id === j.id && c.boardIds.includes(boardId)),
-    )
+    .filter((j) => inScope(j.id))
     .flatMap((j) => {
       const waiting = workflow.boardsWaitingOf(j, state, redact);
-      return waiting
+      const restart = stale.get(j.key);
+      return waiting || restart
         ? [
             {
               changeSetId: j.id,
               job: { key: j.key, status: j.status, stage: j.stage, attempts: j.attempts },
-              waiting,
+              ...(waiting ? { waiting } : {}),
+              ...(restart ? { stale: restartOf(restart) } : {}),
             },
           ]
         : [];
-    })
-    .slice(0, HANDOFF_VERIFICATIONS);
+    });
+  const closed = [...stale.values()]
+    .filter((r) => r.status === 'stale' && inScope(r.changeSetId))
+    .map((r) => ({
+      changeSetId: r.changeSetId,
+      job: { key: r.key, status: r.status, stage: r.stage, attempts: r.attempts },
+      stale: restartOf(r),
+    }));
+  const found = [...closed, ...live].slice(0, HANDOFF_VERIFICATIONS);
   return found.length ? found : undefined;
+}
+
+/** Перезапуск устаревшего задания ChangeSet: команда и операция, сменившая его вход. */
+const restartOf = (r: ChangesetRestart) => ({
+  ...(r.operation ? { operation: r.operation } : {}),
+  command: `workflow_start {"kind": "changeset", "id": ${JSON.stringify(r.changeSetId)}, "authorRuntime": ${JSON.stringify(r.authorRuntime)}}`,
+});
+
+type ChangesetRestart = ReturnType<LeadWorkflow['invalidatedChangesets']>[number] & {
+  attempts: number;
+  maxAttempts: number;
+  repairs: number;
+  operation?: string;
+};
+
+/**
+ * Устаревшие задания ChangeSet (F84): `LeadWorkflow.invalidatedChangesets`
+ * с операцией, сменившей вход (`invalidates`). В режиме оператора задания
+ * ведущего не исполняются — перезапуска нет.
+ */
+function changesetRestarts(h: DevContour, state: State): ChangesetRestart[] {
+  if (h.config.approvalMode === 'operator') return [];
+  const workflow = new LeadWorkflow(h);
+  const jobs = new Map(
+    ownersOf(h.config)
+      .flatMap((owner) => workflow.list(owner))
+      .filter((j) => j.kind === 'changeset')
+      .map((j) => [j.key, j]),
+  );
+  return workflow
+    .invalidatedChangesets(
+      state,
+      (id, _since, job) => !!reboundOf(h, { kind: 'changeset', id }, job),
+    )
+    .map((r) => {
+      const operation = reboundOf(h, { kind: 'changeset', id: r.changeSetId }, r);
+      const job = jobs.get(r.key);
+      return {
+        ...r,
+        attempts: job?.attempts ?? 0,
+        maxAttempts: job?.maxAttempts ?? 0,
+        repairs: job?.repairs ?? 0,
+        ...(operation ? { operation } : {}),
+      };
+    });
 }
 
 /** Владельцы заданий ведущего: workspace и компоненты (как `LeadWorkflow.view`). */
@@ -836,7 +1066,11 @@ export function hostContext(
         h.config.approvalMode === 'operator'
           ? []
           : new LeadWorkflow(h)
-              .invalidated(undefined, state, (boardId, since) => !!reboundOf(h, boardId, since))
+              .invalidated(
+                undefined,
+                state,
+                (boardId, _since, job) => !!reboundOf(h, { kind: 'board', id: boardId }, job),
+              )
               // Пакет одной доски называет только её перезапуск.
               .filter((j) => {
                 const graph = (built ??= pack()).graphId;
@@ -869,6 +1103,8 @@ const REASON_CHARS = 300;
 export function planStep(boardId: string, ctx: HostContext): HandoffHostNext | undefined {
   const found = boardTasks(ctx.state, boardId);
   if (!found || planApproved(ctx.h, found.revision, found.tasks)) return undefined;
+  // Отложенная доска (F86): решение о её плане ждёт снятия отметки.
+  if (parkedHold(ctx.h, ctx.state, boardId)) return undefined;
   const why = unapprovedTasks(ctx.h, ctx.state, found.tasks);
   const stopper = revisionStopper(ctx.state, boardId);
   // Утверждение (и ревью плана до модели) отвергнет черновик без предусловий,
@@ -876,9 +1112,22 @@ export function planStep(boardId: string, ctx: HostContext): HandoffHostNext | u
   // не включает их в область ревью, а без других задач ревью не предлагает
   // вовсе — оно было бы оплачено впустую. Списки с текстом причин ограничены,
   // как подсказка: `host` не растёт с числом черновиков.
-  const held = new Set([...why.blocked.map((b) => b.id), ...why.unverified]);
+  const asked = new Set(why.questions.map((q) => q.id));
+  const held = new Set([...why.blocked.map((b) => b.id), ...why.unverified, ...asked]);
   const scope = [...why.drafts, ...why.stale];
   const review = scope.filter((id) => !held.has(id));
+  // Вся оставшаяся работа плана ждёт ответа владельца: решения о плане нет,
+  // есть ожидание вопроса (ответ придёт в host.questions и шагом owner-answer).
+  if (!review.length && !why.unverified.length && !why.blocked.length && asked.size)
+    return withDetail(ctx.h, {
+      action: 'wait',
+      boardId,
+      code: 'owner-question-pending',
+      params: {
+        questions: [...new Set(why.questions.map((q) => q.questionId))],
+        held: asked.size,
+      },
+    });
   const plan = {
     drafts: why.drafts,
     stale: why.stale,
@@ -891,6 +1140,12 @@ export function planStep(boardId: string, ctx: HostContext): HandoffHostNext | u
       reason: b.reason.length > REASON_CHARS ? b.reason.slice(0, REASON_CHARS - 1) + '…' : b.reason,
     })),
     blockedCount: why.blocked.length,
+    ...(why.questions.length
+      ? {
+          questions: why.questions.slice(0, PLAN_HINT_IDS),
+          questionsCount: why.questions.length,
+        }
+      : {}),
     ...(why.misrouted.length
       ? {
           misrouted: why.misrouted.slice(0, PLAN_HINT_IDS).map((m) => ({
@@ -935,23 +1190,22 @@ function closedBoard(state: State, boardId: string) {
 }
 
 /**
- * Завершённая операция изменения контракта, перепривязавшая задачи доски
- * после старта её задания (`since`): последняя такая, если есть.
+ * Завершённая операция изменения контракта, которая сделала задание доски
+ * устаревшим (`invalidatedBy`: её запись завершения, у прежней версии —
+ * перепривязка задач доски после старта задания): последняя такая, если есть.
  */
-function reboundBy(ctx: HostContext, boardId: string, since: string) {
-  return reboundOf(ctx.h, boardId, since);
+function reboundBy(ctx: HostContext, boardId: string, job: { key: string; startedAt: string }) {
+  return reboundOf(ctx.h, { kind: 'board', id: boardId }, job);
 }
-/** Последняя завершённая перепривязка задач доски после `since` (id операции). */
-function reboundOf(h: DevContour, boardId: string, since: string) {
+/** Последняя завершённая операция, сделавшая задание устаревшим (id операции). */
+function reboundOf(
+  h: DevContour,
+  subject: { kind: 'board' | 'changeset'; id: string },
+  job: { key: string; startedAt: string },
+) {
   return new ContractChanges(h, '')
     .list()
-    .filter(
-      (op) =>
-        op.status === 'completed' &&
-        op.boards.includes(boardId) &&
-        !!op.finishedAt &&
-        op.finishedAt >= since,
-    )
+    .filter((op) => invalidatedBy(op, subject, job))
     .sort((a, b) => (a.finishedAt! < b.finishedAt! ? 1 : -1))[0]?.id;
 }
 
@@ -996,6 +1250,11 @@ function boardDraft(boardId: string, ctx: HostContext): HostNextDraft | undefine
       params: { stage },
     };
   }
+  // Отложенная доска (F86): ни решения о плане, ни старта или повтора её
+  // задания — до снятия отметки или её срока. Действующее задание выше
+  // отметку обходит: отложить доску с ним нельзя, и шаги идущей работы
+  // остаются.
+  if (parkedHold(h, state, boardId)) return undefined;
   const job = jobs.find((j) => ctx.current(j));
   const error = job?.error ? { error: job.error } : {};
   // Доска без неотменённых задач (см. выше): шаг — только остановка D46
@@ -1004,16 +1263,19 @@ function boardDraft(boardId: string, ctx: HostContext): HostNextDraft | undefine
   // исчерпаны. Без такой остановки шага нет.
   if (closed) {
     if (job?.status !== 'failed') return undefined;
+    // Задание мёртвой доски закрыто (`workflow_close`, F86): остановки нет.
+    if (closureOf(h, state, boardId, job)) return undefined;
     const { outlook: loop } = loopAhead(h, state, { ...asLead(job), status: 'queued' });
     const cancelled = cancelledStop(boardId, ctx, job, loop, error);
     if (!cancelled || job.attempts < job.maxAttempts) return cancelled;
+    const closable = (cancelled.params as { closable?: true }).closable;
     return {
       action: 'decide',
       decision: 'job',
       boardId,
       job: jobRef(job),
       code: 'job-exhausted',
-      params: error,
+      params: { ...error, ...(closable ? { closable } : {}) },
     };
   }
   const refused = ctx.inputError(boardId);
@@ -1085,7 +1347,7 @@ function boardDraft(boardId: string, ctx: HostContext): HostNextDraft | undefine
   const restart = ctx.invalidated().find((j) => j.boardId === boardId);
   if (restart) {
     const job = jobs.find((j) => j.key === restart.key) ?? jobs[0];
-    const operation = reboundBy(ctx, boardId, restart.startedAt);
+    const operation = reboundBy(ctx, boardId, restart);
     const others = ctx
       .invalidated()
       .filter((j) => j.boardId !== boardId)
@@ -1170,6 +1432,12 @@ function cancelledStop(
       budget: stoppedOnBudget(task, ctx.state.runs),
       live,
       ...(allCancelled ? { allCancelled: true as const } : {}),
+      // Мёртвая доска, остановки которой — решения ведущего: он может
+      // закрыть упавшее задание (`workflow_close`, F86). У действующего
+      // задания закрывать ещё нечего.
+      ...(allCancelled && !live && !userStoppers(ctx.state, revision.taskIds).length
+        ? { closable: true as const }
+        : {}),
       ...error,
     },
   };
@@ -1319,21 +1587,44 @@ function inputStep(ctx: HostContext, taskId: string): HandoffHostNext | undefine
           code: 'apply-stale' as const,
           params: { reason: summary.stale?.reason ?? 'context', operator, ...stops },
         }
-      : summary.state === 'review-rejected'
+      : summary.state === 'contract-change-required'
         ? {
-            code: 'apply-rejected' as const,
+            code: 'contract-change-required' as const,
             params: {
-              operator,
-              // Исправляет оператор: ведущий предлагает исправление (F37).
-              ...(summary.actor === 'operator'
-                ? { operatorAnswers: true, proposed: !!summary.proposal }
+              contracts: summary.route?.contracts.map((c) => c.id) ?? [],
+              ...(summary.route?.contracts.some((c) => c.source)
+                ? {
+                    files: summary.route.contracts.flatMap((c) => (c.source ? [c.source] : [])),
+                  }
                 : {}),
+              ...(summary.route?.operation ? { operation: summary.route.operation } : {}),
+              ...(summary.route?.waiting ? { waiting: true as const } : {}),
+              operator,
+              ...(!operator && summary.route?.answeredBy === 'operator'
+                ? { server: true as const }
+                : {}),
+              ...(summary.floors.length ? { floors: true as const } : {}),
               ...stops,
             },
           }
-        : summary.state === 'applied-awaiting-claim'
-          ? { code: 'apply-claim' as const, params: stops }
-          : { code: 'apply-saved' as const, params: { state: summary.state, operator, ...stops } }),
+        : summary.state === 'review-rejected'
+          ? {
+              code: 'apply-rejected' as const,
+              params: {
+                operator,
+                // Исправляет оператор: ведущий предлагает исправление (F37).
+                ...(summary.actor === 'operator'
+                  ? { operatorAnswers: true, proposed: !!summary.proposal }
+                  : {}),
+                ...stops,
+              },
+            }
+          : summary.state === 'applied-awaiting-claim'
+            ? { code: 'apply-claim' as const, params: stops }
+            : {
+                code: 'apply-saved' as const,
+                params: { state: summary.state, operator, ...stops },
+              }),
   });
 }
 
@@ -1423,7 +1714,33 @@ function hostNext(ctx: HostContext): HandoffHostNext | undefined {
   // Они — раньше решения о плане.
   // Действующее задание другой доски — тоже раньше: решение о плане не
   // срочнее работы других досок (`rank`), и шаг называет, что идёт сейчас.
-  if (step?.decision === 'plan') return liveBlocker(ctx) ?? liveJobStep(ctx, step.boardId) ?? step;
+  // Ответ владельца на вопрос ведущего — ниже вопросов исполнителя и
+  // решений о задании, выше решения о плане: удержанные им черновики ждут
+  // решения ведущего по ответу.
+  // Ожидание владельца по удержанным черновикам — тоже о будущем объёме:
+  // блокеры живой работы и задания других досок его опережают.
+  if (step?.decision === 'plan' || step?.code === 'owner-question-pending') {
+    const blocker = liveBlocker(ctx);
+    if (blocker) return blocker;
+    const live = liveJobStep(ctx, step.boardId);
+    if (live && live.action !== 'wait') return live;
+    const owner = ownerAnswerStep(ctx);
+    if (owner) return owner;
+    // Ожидание владельца не прячет работу других досок (ревью плана, старт
+    // задания): шаг — она, ожидание — когда другой работы нет.
+    if (step.code === 'owner-question-pending' && !ctx.pack.graphId) {
+      const other = ctx.state.boards
+        .filter((b) => b.id !== step.boardId)
+        .map((b) => boardStep(b.id, ctx))
+        .filter((x): x is HandoffHostNext => !!x && x.action !== 'wait')
+        .sort((a, b) => rank(a) - rank(b))[0];
+      if (other) return other;
+    }
+    return live ?? step;
+  }
+  // Режим operator: общий шаг оператора не решает ответ владельца, который
+  // ведущий превращает в решение — сначала он.
+  if (step?.code === 'operator') return ownerAnswerStep(ctx) ?? step;
   // Перенос ответа — раньше шагов очереди и ожидания (`rank` больше 0): они
   // выдали бы задачу без ответа. Решения о задании, вопросы и режим
   // оператора — прежде переноса.
@@ -1435,16 +1752,19 @@ function hostNext(ctx: HostContext): HandoffHostNext | undefined {
   // другие ожидания и шаги паузы: снятие паузы до переноса выдало бы задачу
   // без ответа.
   const carry = carryNext(ctx);
-  if (
+  const chosen =
     carry &&
     (carry.action !== 'wait' ||
       !step ||
       rank(step) >= rank(carry) ||
       step.action === 'queue_set' ||
       step.boardId === carry.boardId)
-  )
-    return carry;
-  return step ?? followUpNext(ctx);
+      ? carry
+      : step;
+  // Ответ владельца — после переноса ответа и шагов восстановления (повтор
+  // задания, пауза, перенос базы), раньше старта задания и ожиданий.
+  if (chosen && chosen.action !== 'wait' && rank(chosen) <= 1) return chosen;
+  return ownerAnswerStep(ctx) ?? chosen ?? followUpNext(ctx) ?? ownerWaitStep(ctx);
 }
 
 /**
@@ -1524,12 +1844,64 @@ function jobBlocker(ctx: HostContext): HandoffHostNext | undefined {
     .sort((a, b) => rank(a) - rank(b))[0];
 }
 
+/**
+ * Перезапуск устаревшего задания ChangeSet (F84): приёмка релиза без него
+ * не продолжится, а набор пропадал из вида ведущего. С `boardId` пакета —
+ * только наборы с этой доской. Задание ChangeSet паузу очереди не снимает и
+ * ей не мешает: шаг не зависит от паузы.
+ */
+function changesetStep(ctx: HostContext): HandoffHostNext | undefined {
+  const graph = ctx.pack.graphId;
+  const restarts = changesetRestarts(ctx.h, ctx.state).filter(
+    (r) =>
+      graph === undefined ||
+      ctx.state.changeSets.some((c) => c.id === r.changeSetId && c.boardIds.includes(graph)),
+  );
+  const first = restarts[0];
+  if (!first) return undefined;
+  // Список других наборов ограничен: шаг не растёт с их числом.
+  const rest = restarts.slice(1).map((r) => r.changeSetId);
+  const others = rest.slice(0, HANDOFF_VERIFICATIONS);
+  return withDetail(ctx.h, {
+    action: 'workflow_start',
+    job: {
+      key: first.key,
+      status: first.status,
+      stage: first.stage,
+      attempts: first.attempts,
+      maxAttempts: first.maxAttempts,
+      repairs: first.repairs,
+    },
+    code: 'changeset-restart',
+    params: {
+      changeSetId: first.changeSetId,
+      authorRuntime: first.authorRuntime,
+      ...(first.operation ? { operation: first.operation } : {}),
+      ...(others.length ? { others } : {}),
+      ...(rest.length > others.length ? { more: rest.length - others.length } : {}),
+    },
+  });
+}
+
+/** Перезапуск устаревшего задания доски в области пакета (`board-restart`). */
+function boardRestart(ctx: HostContext): HandoffHostNext | undefined {
+  return ctx
+    .invalidated()
+    .map((j) => boardStep(j.boardId, ctx))
+    .find((x) => x?.code === 'board-restart');
+}
+
 function hostStep(ctx: HostContext): HandoffHostNext | undefined {
   const { pack, view, state, h } = ctx;
   // Открытых поручений нет, но доска ещё не принята: шаг — только
   // восстановление её упавшего задания (без него ведущий не узнал бы, что
   // приёмку держит упавшее задание).
-  if (!pack.summary.open) return h.config.approvalMode === 'operator' ? undefined : jobBlocker(ctx);
+  // Перезапуск устаревших заданий досок, затем ChangeSet (F84): новое
+  // задание ChangeSet иначе ждало бы досок, чьи задания не продолжатся.
+  if (!pack.summary.open)
+    return h.config.approvalMode === 'operator'
+      ? undefined
+      : (jobBlocker(ctx) ?? boardRestart(ctx) ?? changesetStep(ctx));
   const input = inputNext(ctx);
   if (input) return input;
   if (h.config.approvalMode === 'operator')
@@ -1582,6 +1954,8 @@ function hostStep(ctx: HostContext): HandoffHostNext | undefined {
         .map((j) => boardStep(j.boardId, ctx))
         .find((x) => x?.code === 'board-restart');
       if (restart) return restart;
+      const changeset = changesetStep(ctx);
+      if (changeset) return changeset;
     }
     return chosen;
   }
@@ -1647,6 +2021,10 @@ function hostStep(ctx: HostContext): HandoffHostNext | undefined {
     // решения не обходит: её шаг — прежний.
     const restart = steps.find((x) => x.code === 'board-restart');
     if (restart && !(state.pauseReason === 'operator' && !pausedByLead(state))) return restart;
+    // Задание ChangeSet паузы не снимает и ею не держится: его перезапуск —
+    // шаг ведущего при любой паузе, раньше ожидания и снятия паузы (F84).
+    const changeset = changesetStep(ctx);
+    if (changeset) return changeset;
     // Пауза выдачи общая: её снимает любое действующее задание, чей цикл
     // снимет её — сразу или после такта, который сначала чинит задачу.
     for (const job of live)
@@ -1678,7 +2056,14 @@ function hostStep(ctx: HostContext): HandoffHostNext | undefined {
       });
     }
   }
-  return steps[0];
+  // Перезапуск устаревшего задания ChangeSet — после перезапуска задания
+  // доски и раньше старта нового, ожидания и решения о плане (F84).
+  // Перезапуск задания любой доски из кандидатов идёт раньше (его ранг тот
+  // же, что у старта задания новой доски).
+  const first = steps[0];
+  if ((!first || rank(first) >= 2) && !steps.some((x) => x.code === 'board-restart'))
+    return changesetStep(ctx) ?? first;
+  return first;
 }
 
 /**
@@ -1884,12 +2269,16 @@ export function devcontourHandoffWithin(
       // усечения текста (`boardsWaitingOf`), иначе усечённый секрет ей не узнать.
       let changesets = changesetsOf(h, state, boardId, options.redact);
       const corrections = correctionsOfHandoff(h, state, boardId);
+      let parked = parkedOf(h, state, boardId, options.redact);
+      const questions = questionsOfHandoff(state, options.redact);
       const withDiscussion = (discussion: DevContourHandoff['host']['discussion']) => ({
         ...(next ? { next } : {}),
         liveBoards,
         ...(verifications ? { verifications } : {}),
         ...(changesets ? { changesets } : {}),
+        ...(parked ? { parked } : {}),
         ...(corrections ? { corrections } : {}),
+        ...(questions ? { questions } : {}),
         ...(discussion ? { discussion } : {}),
       });
       let budget = limit
@@ -1969,16 +2358,28 @@ export function devcontourHandoffWithin(
       ) {
         changesets = changesets.map((c) => ({
           ...c,
-          waiting: {
-            ...c.waiting,
-            boards: c.waiting.boards.map((b) => ({
-              boardId: b.boardId,
-              ...(b.job ? { job: b.job } : {}),
-              blocker: errorless(b.blocker),
-            })),
-          },
+          ...(c.waiting
+            ? {
+                waiting: {
+                  ...c.waiting,
+                  boards: c.waiting.boards.map((b) => ({
+                    boardId: b.boardId,
+                    ...(b.job ? { job: b.job } : {}),
+                    blocker: errorless(b.blocker),
+                  })),
+                },
+              }
+            : {}),
         }));
         host = { ...host, changesets };
+      }
+      // Затем причины отложенных досок: id, срок и кто отложил остаются.
+      if (
+        parked &&
+        bytes(handoffResponse({ pack: fitted, host, locale }, limit.format)) > limit.bytes
+      ) {
+        parked = parked.map(({ reason, ...rest }) => (void reason, rest));
+        host = { ...host, parked };
       }
       // Последняя уступка — повторы Markdown: текст шага (`host.next.detail`)
       // и описания команд стоят в JSON того же ответа, а раздел DevContour
@@ -2057,11 +2458,18 @@ function hostMarkdown(
       (v) =>
         `- Идёт совместная проверка ChangeSet ${v.changeSetId}: ${v.verificationId}, ${v.elapsedMs < 60_000 ? '<1' : Math.floor(v.elapsedMs / 60_000)} мин (задание ${v.job.key} — ${v.job.status}, стадия ${v.job.stage})`,
     ),
-    ...(host.changesets ?? []).map(
-      (c) =>
-        `- ChangeSet ${c.changeSetId} ждёт приёмки досок (задание ${c.job.key} — ${c.job.status}, стадия ${c.job.stage}): ${c.waiting.boards
-          .map((b) => `${b.boardId} — ${blockerText(b.blocker)}`)
-          .join('; ')}${c.waiting.more ? ` и ещё ${c.waiting.more}` : ''}`,
+    ...(host.changesets ?? []).map((c) =>
+      c.stale
+        ? `- Задание ChangeSet ${c.changeSetId} (${c.job.key} — ${c.job.status}, стадия ${c.job.stage}) начато на прежнем входе${c.stale.operation ? ` (его сменила операция ${c.stale.operation})` : ''} и не продолжится — перезапуск: \`${c.stale.command}\``
+        : `- ChangeSet ${c.changeSetId} ждёт приёмки досок (задание ${c.job.key} — ${c.job.status}, стадия ${c.job.stage}): ${(
+            c.waiting?.boards ?? []
+          )
+            .map((b) => `${b.boardId} — ${blockerText(b.blocker)}`)
+            .join('; ')}${c.waiting?.more ? ` и ещё ${c.waiting.more}` : ''}`,
+    ),
+    ...(host.parked ?? []).map(
+      (p) =>
+        `- Доска ${p.boardId} отложена${p.until ? ` до ${p.until}` : ''}${p.reason ? `: ${p.reason}` : ''} — снять отметку: \`board_park {"boardId": "${p.boardId}", "parked": false}\``,
     ),
     ...(host.corrections
       ? [
@@ -2082,6 +2490,22 @@ function hostMarkdown(
                 .map((r) => `${r.taskId} (${r.id}${r.reopened ? ', есть ответ оператора' : ''})`)
                 .join(', ')}${host.discussion.nextCursor ? ' и ещё — discussion_inbox' : ''}`
             : '- Есть обращения к ведущему без обработки — discussion_inbox',
+        ]
+      : []),
+    ...(host.questions
+      ? [
+          `- Вопросы владельцу: открыто ${
+            Object.entries(host.questions.open)
+              .filter(([, n]) => n)
+              .map(([section, n]) => `${section} ${n}`)
+              .join(', ') || '0'
+          }; удержано черновиков: ${host.questions.held}${
+            host.questions.answered.length
+              ? `; ответы ждут решения ведущего (preparation_resolve): ${host.questions.answered
+                  .map((q) => `${q.id} (${q.section})`)
+                  .join(', ')}${host.questions.more ? ` и ещё ${host.questions.more}` : ''}`
+              : ''
+          }`,
         ]
       : []),
     ...(refs

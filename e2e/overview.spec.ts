@@ -7,7 +7,7 @@ import AxeBuilder from '@axe-core/playwright';
 test('Обзор открывается первым, доступен с клавиатуры и на мобильном экране', async ({ page }) => {
   const errors: string[] = [];
   page.on('pageerror', (e) => errors.push(e.message));
-  await page.goto('/');
+  await page.goto('/?tab=overview');
   await expect(
     page.getByRole('navigation', { name: 'Workspace' }).getByRole('link', { name: 'Обзор' }),
   ).toHaveAttribute('aria-current', 'page');
@@ -120,7 +120,7 @@ test('Обзор показывает ошибку с повтором и не �
         },
       }),
   );
-  await page.goto('/');
+  await page.goto('/?tab=overview');
   await expect(page.getByRole('alert')).toContainText('Сервер недоступен');
   fail = false;
   await page.getByRole('button', { name: 'Повторить' }).click();

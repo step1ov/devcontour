@@ -73,7 +73,7 @@ test('Product UI presents application scope, release selection, repository navig
     };
     await route.fulfill({ json: view });
   });
-  await page.goto('/');
+  await page.goto('/?tab=overview');
   const workspace = page.getByRole('navigation', { name: 'Workspace' });
   await workspace.getByRole('link', { name: 'Карта продукта', exact: true }).click();
   await expect(page.getByRole('heading', { name: 'Система общения', exact: true })).toBeVisible();
@@ -115,7 +115,7 @@ test('Product UI presents application scope, release selection, repository navig
 });
 
 test('Product UI explains a missing map without claiming product readiness', async ({ page }) => {
-  await page.goto('/');
+  await page.goto('/?tab=overview');
   await page
     .getByRole('navigation', { name: 'Workspace' })
     .getByRole('link', { name: 'Карта продукта', exact: true })

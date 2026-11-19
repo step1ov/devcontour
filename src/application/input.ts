@@ -29,8 +29,9 @@ import {
   type InputMessageRef,
   type InputQuestion,
   type InputRequest,
+  type ReviewRecord,
 } from 'devcontour-harness';
-import { DomainError, type Task } from '../core/model.ts';
+import { DomainError, type Contract, type Task } from '../core/model.ts';
 import { hrefs } from './panel-links.ts';
 import { hintLocaleOf, reviewLanguageInstructions, type CarryOrder } from './hint-messages.ts';
 import type { DevContour } from '../core/service.ts';
@@ -54,13 +55,55 @@ import { taskOwner } from '../core/sync-state.ts';
 import { resumeOf, type ResumeView } from './input-resume.ts';
 import {
   orderContentDigest,
+  reboundAt,
   reboundByOperation,
   reboundOf,
   waitingOperation,
+  sameChain,
   type ContractChangeTrace,
 } from './input-rebound.ts';
 import { repositories } from '../core/repositories.ts';
 import { specDigest } from '../core/task-digest.ts';
+import { orderRedactions } from '../core/service.ts';
+import type { ContractChange } from '../runner/contract-change.ts';
+import { CONTRACT_CHANGE_RULE, routeRules } from './input-route.ts';
+
+export { CONTRACT_CHANGE_RULE, routeRules };
+
+/**
+ * Маршрут отклонённого ответа к изменению контракта (F82): ответ принят как
+ * выбор, контракт меняет ведущий операцией contract-change, после
+ * перепривязки тот же ответ проходит ревью снова — оператор не отвечает
+ * заново. `operation` — операция по задаче или контракту, начатая после
+ * раунда; `waiting` — задача уже перепривязана (или в черновике) и ждёт
+ * завершения операции и утверждения.
+ */
+export interface ContractRoute {
+  round: number;
+  contracts: { id: string; title: string; source: string | null }[];
+  operation?: { id: string; status: ContractChange['status'] };
+  waiting?: true;
+  /** Кто дал ответ: ответ оператора после перепривязки проверяет проход сервера. */
+  answeredBy: 'operator' | 'lead' | 'host';
+}
+
+/** Запись операции изменения контракта с предложением (поиск операции маршрута). */
+type RouteOperation = ContractChangeTrace & Partial<Pick<ContractChange, 'proposal' | 'owner'>>;
+
+/** Контракты маршрута словами записи: ID, название и файл. */
+const routeContracts = (ids: readonly string[], contracts: readonly Contract[]) =>
+  ids.map((id) => {
+    const c = contracts.find((x) => x.id === id);
+    return { id, title: c?.title ?? id, source: c?.source ?? null };
+  });
+
+/** Причина отказа применения, пока ответу нужна поправка контракта (F82). */
+const routeProblem = (operation?: { id: string; status: string }) =>
+  (operation ? `изменение контракта ${operation.id} не доведено (${operation.status}): ` : '') +
+  'ответу нужна поправка закреплённого контракта, применить его к прежней редакции нельзя — ведущий проводит contract-change, иначе оператор исправляет ответ или снимает вопрос';
+
+/** Операции, после которых маршрут contract-change не держится: вопрос снова решает оператор. */
+const ROUTE_FAILED = new Set<ContractChange['status']>(['abandoned', 'stale']);
 
 /**
  * Начало причины движка «работа уже не в исходной остановке» (`proposeTarget`).
@@ -81,6 +124,8 @@ const contractRoute = (request: InputRequest) =>
     : '';
 
 /** Причина замены, которой применение переносит ответ после перепривязки контракта (F39). */
+const ROUTE_CARRY_REASON =
+  'Постановку задачи правили в операции contract-change маршрута ответа (F85): тот же ответ одобрен ревью на новой постановке и переносится в неё';
 const REBOUND_REASON =
   'Постановка задачи изменилась только перепривязкой контракта к новой редакции (contract-change): проверенный ответ переносится в новую редакцию';
 
@@ -168,6 +213,41 @@ const resumeNext = (resume: ResumeView): string | undefined => {
   }
 };
 
+/**
+ * Шаг ведущего по маршруту contract-change (F82): ответ принят как выбор,
+ * оператор не отвечает заново; ведущий меняет названные контракты операцией,
+ * после перепривязки и утверждения тот же ответ проходит ревью снова.
+ */
+const routeNext = (
+  request: Pick<InputRequest, 'floors' | 'answers'>,
+  route: ContractRoute | undefined,
+  agent: boolean,
+) => {
+  const named = (route?.contracts ?? [])
+    .map((c) => `${c.id} «${c.title}»${c.source ? ` (${c.source})` : ''}`)
+    .join(', ');
+  const operator = latestAnswer(request)?.actor.kind === 'operator';
+  const after =
+    'once the operation has rebound the task to the new revision and approved it again, the same answer is reviewed again on the new revision — ' +
+    (agent && operator
+      ? 'with a running server DevContour does it itself (context, review, target, apply); otherwise run input_context, input_review, input_target and input_apply'
+      : agent
+        ? 'run input_context, input_review, input_target and input_apply'
+        : 'run input_context and input_review; the operator applies the answer in the panel') +
+    '; the operator does not answer again';
+  const floors = request.floors.length
+    ? ' (the question has floors: only a completed contract-change operation started after the question counts, not a manual registration and task edit)'
+    : '';
+  const op = route?.operation;
+  if (op && op.status !== 'completed')
+    return `the answer is accepted; it needs an amendment of the pinned contract ${named}: contract-change ${op.id} is ${op.status} — continue it (devcontour contract-change --id ${op.id}${op.status === 'failed' ? `; or revise it with --revise --expected-version N, or abandon it with --abandon, which returns the question to the operator` : ''})${floors}; ${after}`;
+  if (op?.status === 'completed' && !route?.waiting)
+    return `the answer is accepted; it needs an amendment of the pinned contract ${named}, but the completed contract-change ${op.id} did not rebind this task: change the contract the task is bound to (devcontour contract-change --file proposal.json --author-runtime codex|claude)${floors}; ${after}`;
+  if (route?.waiting)
+    return `the answer is accepted; the task is rebound for the amendment of ${named} and waits for the contract-change operation to complete and for its approval (contract_change_status, workflow_start or review-plan --tasks)${floors}; ${after}`;
+  return `the answer is accepted; the reviewer found that its only conflict is an amendment of the pinned contract ${named}: change the contract — write the amended contract file and run devcontour contract-change --file proposal.json --author-runtime codex|claude (the proposal names the same title and file)${floors}; ${after}`;
+};
+
 /** Кто действует: ведущий агент (агентский API), оператор (панель) или хост от его имени (CLI `--by host`). */
 export type InputActorKind = 'lead' | 'operator' | 'host';
 
@@ -181,6 +261,7 @@ export const inputStates = [
   'answer-saved',
   'context-review',
   'review-rejected',
+  'contract-change-required',
   'ready-to-apply',
   'applied-awaiting-claim',
   'delivered',
@@ -329,6 +410,20 @@ const EARLIER_EXCERPT = 500;
 
 /** Локальные записи аренды ревью ответа (`local_workflow`), ключ — ID запроса. */
 const REVIEW_LEASE = 'input-review-lease';
+/**
+ * Раунды ревью ответа, маршрут contract-change которых признан при самом
+ * ревью (F85): ключ — `<запрос>:<раунд>`, постановка и закреплённые
+ * контракты задачи, которую ревью читало. Только эти раунды дают основание
+ * переносу ответа в правленую постановку (`routeCarry`).
+ */
+const ROUTE_ROUNDS = 'input-route-round';
+interface RouteRound {
+  requestId: string;
+  round: number;
+  specDigest: string;
+  pinned: string[];
+  contracts: string[];
+}
 type InputReviewLease = { token: string; startedAt: string; leaseUntil: number };
 
 /**
@@ -499,6 +594,7 @@ export class InputService {
     approved?: boolean;
     round?: number;
     problems?: string[];
+    route?: ContractRoute;
   } {
     if (request.lifecycle === 'pending') return { state: 'awaiting-answer' };
     if (request.lifecycle === 'cancelled') return { state: 'cancelled' };
@@ -511,25 +607,60 @@ export class InputService {
     // answered
     const answer = latestAnswer(request);
     const last = inputReviewRounds(view, request.id).at(-1);
-    if (
-      !answer ||
-      !task ||
-      !last ||
-      last.digest !== inputReviewDigest(this.h, task, request.id, answer.digest)
-    )
-      return { state: 'answer-saved' };
-    // Отклонённое ревью — своё состояние: в режиме оператора применить его
-    // можно, но только осознанно (вердикт и находки видны, нужно подтверждение).
-    if (!last.approved) {
-      const proposed =
-        this.h.config.approvalMode === 'operator'
-          ? this.proposed(view, request, last.contextDigest ?? null)
-          : undefined;
+    if (!answer || !task || !last) return { state: 'answer-saved' };
+    const current = last.digest === inputReviewDigest(this.h, task, request.id, answer.digest);
+    // Маршрут contract-change (F82): ответ — выбор, которому нужна только
+    // поправка закреплённого контракта; ход ведущего, карточка оператора
+    // закрыта. Брошенная или устаревшая операция возвращает вопрос оператору.
+    const contracts = last.approved ? [] : executionOf(this.h).store.stateOf(view).contracts;
+    const route = last.approved ? undefined : this.routeOf(request, task, last, current, contracts);
+    const failed = !!route?.operation && ROUTE_FAILED.has(route.operation.status);
+    const routed = (waiting: boolean) => ({
+      state: 'contract-change-required' as const,
+      approved: false,
+      round: last.round,
+      route: {
+        round: last.round,
+        answeredBy: answer.actor.kind,
+        contracts: routeContracts(route!.ids, contracts),
+        ...(route!.operation
+          ? { operation: { id: route!.operation.id, status: route!.operation.status } }
+          : {}),
+        ...(waiting ? { waiting: true as const } : {}),
+      },
+    });
+    // Брошенная или устаревшая операция маршрута — до и после смены
+    // основания одинаково: ответ, которому нужна поправка контракта, снова
+    // решает оператор, причина названа.
+    if (route && failed)
       return {
         state: 'review-rejected',
         approved: false,
         round: last.round,
-        ...(proposed?.problems.length ? { problems: proposed.problems } : {}),
+        problems: [routeProblem(route.operation)],
+      };
+    if (!current) {
+      // Задача уже перепривязана или в черновике, операция или утверждение
+      // ещё впереди — ход ведущего, а не ревью того же ответа до новой
+      // редакции. После утверждения (`rebound`) — обычное «сохранён»: проход
+      // сервера или ведущий проводит ревью того же ответа на новой редакции.
+      if (route && this.originOf(view, request) === 'pending') return routed(true);
+      return { state: 'answer-saved' };
+    }
+    // Отклонённое ревью — своё состояние: в режиме оператора применить его
+    // можно, но только осознанно (вердикт и находки видны, нужно подтверждение).
+    if (!last.approved) {
+      if (route) return routed(false);
+      const proposed =
+        this.h.config.approvalMode === 'operator'
+          ? this.proposed(view, request, last.contextDigest ?? null)
+          : undefined;
+      const problems = proposed?.problems ?? [];
+      return {
+        state: 'review-rejected',
+        approved: false,
+        round: last.round,
+        ...(problems.length ? { problems } : {}),
       };
     }
     const proposed = this.proposed(view, request, last.contextDigest ?? null);
@@ -583,8 +714,172 @@ export class InputService {
   /** Записи операций изменения контракта всех компонентов (только нужные проверке поля). */
   private operations() {
     return repositories(this.h.config).flatMap((r) =>
-      Object.values(this.h.store.localRecords<ContractChangeTrace>('contract-change', r.id)),
+      Object.values(this.h.store.localRecords<RouteOperation>('contract-change', r.id)),
     );
+  }
+
+  /**
+   * Маршрут раунда (F82), если он относится к последнему ответу и к
+   * закреплённым контрактам: снимок раунда несёт последний ответ (новый
+   * ответ маршрут прежнего не наследует), каждый названный контракт
+   * закреплён за задачей, а после смены основания (`current: false`) —
+   * закреплён или заменён в задаче более поздней редакцией той же цепочки
+   * (порядок утверждения). `operation` — операция этого контракта после раунда.
+   */
+  private routeOf(
+    request: InputRequest,
+    task: Task,
+    round: ReviewRecord,
+    current: boolean,
+    contracts: readonly Contract[],
+  ) {
+    const ids = routeRules(round, request);
+    if (!ids || !round.contextDigest || !this.carries(request, round.contextDigest).ok)
+      return undefined;
+    const pinned = (id: string) => {
+      if (task.contracts.includes(id)) return true;
+      if (current) return false;
+      const named = contracts.find((c) => c.id === id);
+      if (!named) return false;
+      return task.contracts.some((t) => {
+        const now = contracts.find((c) => c.id === t);
+        if (!now || !sameChain(now, named)) return false;
+        const chain = orderRedactions(contracts.filter((c) => sameChain(c, now)));
+        return chain.indexOf(now) > chain.indexOf(named) && chain.indexOf(named) >= 0;
+      });
+    };
+    if (!ids.every(pinned)) return undefined;
+    return { ids, operation: this.routeOperation(round, ids, contracts) };
+  }
+
+  /**
+   * Предмет маршрута, который держит применение (F82): последний раунд по
+   * текущему основанию назвал маршрут для последнего ответа. Держит и после
+   * брошенной операции: применять ответ к прежней редакции нельзя.
+   */
+  private routeHolds(view: ExecutionView, request: InputRequest, task: Task) {
+    const answer = latestAnswer(request);
+    const last = inputReviewRounds(view, request.id).at(-1);
+    if (!answer || !last || last.approved) return false;
+    if (last.digest !== inputReviewDigest(this.h, task, request.id, answer.digest)) return false;
+    const contracts = executionOf(this.h).store.stateOf(view).contracts;
+    return !!this.routeOf(request, task, last, true, contracts);
+  }
+
+  /**
+   * Перенос ответа маршрута contract-change в правленую постановку (F85):
+   * ревью плана операции потребовало правки постановки задачи вопроса, и
+   * исходная остановка уже не держится (`moved`), хотя ответ — тот же
+   * ответ, которому маршрут назвал только поправку контракта. Тогда выход —
+   * не решение оператора (замена критического вопроса), а перенос его же
+   * ответа ведущим или проходом сервера: ответ снова проходит ревью на
+   * правленой постановке, и только одобренный раунд по текущей постановке
+   * переносится (`input_apply`: замена той же задачей и перенос одной
+   * записью). Основание — снимки, а не журнал правок (правка, отмена
+   * утверждения или импорт Git sync меняют digest постановки любым путём):
+   *
+   * - маршрут раунда признан при самом ревью (`ROUTE_ROUNDS`) на постановке
+   *   времени вопроса, и снимок раунда несёт последний ответ;
+   * - операция маршрута завершена, её редакция закреплена за задачей, и она
+   *   перепривязала задачу после вопроса с той же постановкой, что была при
+   *   вопросе (`reboundSpecs`: правка до операции — другое решение);
+   * - постановка сейчас — та, что утверждена при завершении операции
+   *   (`approvedSpecs`): позже её не меняли ни правкой, ни возвратом в
+   *   черновик, ни синхронизацией;
+   * - другой попытки после вопроса не было, задача на исходной остановке, а
+   *   последний раунд по текущей постановке не отклонён.
+   *
+   * Новый ответ маршрут прежнего не наследует. Только чтение.
+   */
+  routeCarry(view: ExecutionView, request: InputRequest) {
+    if (request.kind !== 'question' || !request.blocking || request.lifecycle !== 'answered')
+      return false;
+    const answer = latestAnswer(request);
+    if (answer?.kind !== 'clarification') return false;
+    const work = view.work(request.workId);
+    if (!work || view.attempts(work.id).at(-1)?.id !== request.runId) return false;
+    const atOrigin =
+      (work.status === 'failed' && work.failureKind === 'needs-input') || work.status === 'ready';
+    if (!atOrigin) return false;
+    if (this.originOf(view, request) !== 'moved') return false;
+    const state = executionOf(this.h).store.stateOf(view);
+    const task = state.tasks.find((t) => t.id === request.workId);
+    if (!task?.approvedDigest || specDigest(task) !== task.approvedDigest) return false;
+    const rounds = inputReviewRounds(view, request.id);
+    // Отклонение на правленой постановке — обычное отклонение: ответ
+    // исправляет оператор, а выход из сдвинутой остановки снова его.
+    const last = rounds.at(-1);
+    if (
+      last &&
+      !last.approved &&
+      last.digest === inputReviewDigest(this.h, task, request.id, answer.digest)
+    )
+      return false;
+    const origin = request.originBasis.orderDigest;
+    return rounds.some((round) => {
+      const valid = this.h.store.localRecord<RouteRound>(
+        ROUTE_ROUNDS,
+        undefined,
+        `${request.id}:${round.round}`,
+      );
+      if (!valid || valid.specDigest !== origin || !round.contextDigest) return false;
+      if (!this.carries(request, round.contextDigest).ok) return false;
+      const op = this.routeOperation(round, valid.contracts, state.contracts);
+      if (op?.status !== 'completed' || !op.contractId) return false;
+      if (!task.contracts.includes(op.contractId) || !op.rebound?.includes(task.id)) return false;
+      if (reboundAt(op) < request.createdAt) return false;
+      return (
+        op.reboundSpecs?.[task.id] === origin && op.approvedSpecs?.[task.id] === task.approvedDigest
+      );
+    });
+  }
+
+  /**
+   * Ревью ответа снова нужно потому, что маршрут contract-change сменил
+   * основание (F82): последний раунд назвал проверенный маршрут для этого
+   * ответа, а задача с тех пор перепривязана к новой редакции и утверждена
+   * (`rebound`). Отклонённые по прежнему основанию ревью прохода сервера
+   * тогда предела не тратят. Только чтение.
+   */
+  routeRebased(view: ExecutionView, request: InputRequest, task: Task) {
+    const answer = latestAnswer(request);
+    const last = inputReviewRounds(view, request.id).at(-1);
+    if (!answer || !last || last.approved) return false;
+    if (last.digest === inputReviewDigest(this.h, task, request.id, answer.digest)) return false;
+    if (this.originOf(view, request) !== 'rebound') return this.routeCarry(view, request);
+    const contracts = executionOf(this.h).store.stateOf(view).contracts;
+    return !!this.routeOf(request, task, last, false, contracts);
+  }
+
+  /**
+   * Операция изменения контракта маршрута (F82): начата после раунда,
+   * который назвал маршрут, и меняет один из названных контрактов — тот же
+   * компонент и файл (без файла — название) или новая редакция той же
+   * цепочки. Последняя по началу; пересмотренная (`superseded`) уступает
+   * преемнику.
+   */
+  private routeOperation(
+    round: ReviewRecord,
+    ids: readonly string[],
+    contracts: readonly Contract[],
+  ) {
+    const named = ids.flatMap((id) => contracts.filter((c) => c.id === id));
+    const fallback = repositories(this.h.config).some((r) => r.id === 'main')
+      ? 'main'
+      : repositories(this.h.config)[0].id;
+    return this.operations()
+      .filter((op) => {
+        if (op.status === 'superseded' || op.startedAt < round.at) return false;
+        const produced = op.contractId ? contracts.find((c) => c.id === op.contractId) : undefined;
+        return named.some(
+          (c) =>
+            (produced && sameChain(produced, c)) ||
+            (op.owner === (c.repositoryId ?? fallback) &&
+              (c.source ? op.proposal?.file === c.source : op.proposal?.title === c.title)),
+        );
+      })
+      .sort((a, b) => a.startedAt.localeCompare(b.startedAt))
+      .at(-1);
   }
 
   /**
@@ -607,7 +902,8 @@ export class InputService {
       request.kind === 'question' &&
       request.blocking &&
       request.lifecycle === 'answered' &&
-      this.originOf(view, request) === 'moved'
+      this.originOf(view, request) === 'moved' &&
+      !this.routeCarry(view, request)
     );
   }
 
@@ -620,7 +916,10 @@ export class InputService {
     const proposed = this.engine.proposeTarget(request.id, contextDigest);
     const origin = this.originOf(view, request);
     const answer = latestAnswer(request);
-    const rebound = origin === 'rebound' && answer?.kind === 'clarification';
+    // Перенос ответа маршрута в правленую постановку (F85) — как перепривязка.
+    const rebound =
+      (origin === 'rebound' && answer?.kind === 'clarification') ||
+      (origin === 'moved' && this.routeCarry(view, request));
     const waiting = origin === 'pending' ? this.waitingProblem(request.workId) : undefined;
     return {
       ...proposed,
@@ -644,7 +943,7 @@ export class InputService {
     proposed = false,
     resume?: ResumeView,
     /** Причины, по которым применение сейчас откажет, и исходная остановка (F39). */
-    blocked: { problems?: string[]; moved?: boolean } = {},
+    blocked: { problems?: string[]; moved?: boolean; route?: ContractRoute } = {},
   ) {
     const agent = this.h.config.approvalMode === 'agent';
     const lead = this.leadMayDecide(request);
@@ -749,6 +1048,8 @@ export class InputService {
                   ? `the reviewer rejected the answer: read the findings in the panel (${hrefs.input(request.workId)}); confirm the lead's proposed correction, correct the answer, or apply only with explicit confirmation`
                   : `the reviewer rejected the answer: read the findings in the panel (${hrefs.input(request.workId)}); correct the answer, or apply only with explicit confirmation; the lead may propose a corrected answer (input_propose)`,
               };
+      case 'contract-change-required':
+        return { actor: 'lead' as const, next: routeNext(request, blocked.route, agent) };
       case 'applied-awaiting-claim':
         return { actor: 'lead' as const, next: 'wait for the next attempt of the task' };
       default:
@@ -763,7 +1064,7 @@ export class InputService {
    * фильтрует все попытки на каждый запрос.
    */
   private summaryContext() {
-    const current = this.h.store.read();
+    const current = this.h.store.view();
     const tasks = new Map(current.tasks.map((t) => [t.id, t]));
     const runs = new Map<string, (typeof current.runs)[number][]>();
     for (const r of current.runs) {
@@ -795,6 +1096,7 @@ export class InputService {
       context.boards.get(request.workId),
       Date.now(),
       moved ? (this.leadMayDecide(request) ? 'lead' : 'operator') : undefined,
+      !!task && state.state === 'answer-saved' && this.routeRebased(view, request, task),
     );
     // Повторные остановки вопросом по задаче: сигнал оператору и ведущему.
     // Сводка несёт только счёт и предел (вперёд, по текущему `maxAttempts`).
@@ -840,6 +1142,7 @@ export class InputService {
       ...this.nextOf(request, state.state, task, !!proposal?.current, resume, {
         problems: state.problems,
         moved,
+        ...(state.route ? { route: state.route } : {}),
       }),
     };
   }
@@ -1673,6 +1976,14 @@ export class InputService {
         JSON.stringify({ question: q.question, options: q.options, recommended: q.recommended }),
       `The answer is in the pinned context file input/${request.id}.md (revision ${answer.revision}, ${answer.kind}).`,
       'Return approved=false with a concrete blocking finding when the answer changes the approved specification.',
+      // Маршрут contract-change (F82): ответ на вопрос о контракте, которому
+      // нужна только поправка закреплённого контракта, — не ошибка ответа, а
+      // ход ведущего; правило находки называет контракт.
+      ...(q.affects.includes('contract')
+        ? [
+            `Contract route: this question affects a registered contract. When the answer is a consistent, complete choice and its only conflict with the approved task is that it explicitly amends one or more contracts pinned to the task (ids from contracts above), return approved=false and report exactly one blocking finding per amended contract with rule "${CONTRACT_CHANGE_RULE}<contract id>" and the needed amendment in its message, and no other blocking finding. The lead then changes the contract (contract-change), the task is rebound to the new revision and the same answer is reviewed again. The amendment of the contract document is that step of the lead, not a change by the writer of this task: a contract file outside the write scope of the role is no reason for an ordinary finding on this route. Any other problem — an inconsistent or incomplete answer, a change of title, goal, acceptance criteria or write scope, a contract not pinned to the task — is an ordinary blocking finding without this rule.`,
+          ]
+        : []),
       // Итог ревью ответа читает оператор в центре внимания: на его языке.
       ...reviewLanguageInstructions(hintLocaleOf(this.h.config)),
     ];
@@ -1702,7 +2013,27 @@ export class InputService {
             : AbortSignal.timeout(this.h.config.runTimeoutMs),
         },
       );
+      // Маршрут, признанный на постановке, которую ревью читало (F85): позже
+      // задача может закрепить и другие контракты, основание — этот снимок.
+      const routed = record.approved
+        ? undefined
+        : this.routeOf(request, task, record, true, this.h.store.read().contracts);
+      if (routed)
+        this.h.store.atomic(() =>
+          this.h.store.saveLocal(ROUTE_ROUNDS, undefined, `${request.id}:${record.round}`, {
+            requestId: request.id,
+            round: record.round,
+            specDigest: specDigest(task),
+            pinned: [...task.contracts],
+            contracts: routed.ids,
+          } satisfies RouteRound),
+        );
       const active = this.activeInGraph(task.id);
+      // Маршрут раунда (F82) — по записи, тем же правилом, что у сводки.
+      const after = this.engine.read((view) =>
+        this.stateOf(view, this.request(request.id), this.task(task.id)),
+      );
+      const route = after.state === 'contract-change-required' ? after.route : undefined;
       return {
         requestId: request.id,
         round: record.round,
@@ -1715,8 +2046,12 @@ export class InputService {
         // Отклонённый ответ на вопрос, который ведущий не решает, ведёт
         // оператор: шаг — тот же, что у `input_show` (`nextOf`), без операций
         // ведущего (input_supersede такого вопроса — только оператору, F38).
-        nextStep:
-          record.approved || this.h.config.approvalMode === 'operator'
+        ...(route
+          ? { route: 'contract-change' as const, contracts: route.contracts.map((c) => c.id) }
+          : {}),
+        nextStep: route
+          ? routeNext(request, route, this.h.config.approvalMode === 'agent')
+          : record.approved || this.h.config.approvalMode === 'operator'
             ? 'input_target'
             : this.leadMayDecide(request)
               ? 'the answer changes the approved spec: reopen and respecify the task, approve it, then input_supersede with the same task' +
@@ -1775,7 +2110,11 @@ export class InputService {
           ? { ...this.engine.proposeCarry(request.id, input.contextDigest), rebound: false }
           : this.engine.read((view) => this.proposed(view, request, input.contextDigest));
       const scope = this.carryScopeProblem(request, task);
-      const own = scope ? [scope] : [];
+      // Ответу нужна поправка контракта (F82): применение откажет оператору.
+      const routed =
+        request.lifecycle !== 'superseded' &&
+        this.engine.read((view) => this.routeHolds(view, request, task));
+      const own = [...(scope ? [scope] : []), ...(routed ? [routeProblem()] : [])];
       return {
         requestId: request.id,
         mode: request.lifecycle === 'superseded' ? 'carry' : 'apply',
@@ -1850,6 +2189,13 @@ export class InputService {
                 ? `Ревью ответа на запрос ${input.requestId} (раунд ${last.round}) отклонило его: ${last.summary.slice(0, 300)}. Применение — только с явным подтверждением этого раунда`
                 : `Подтверждён раунд ${options.confirmRejectedRound}, а последний раунд ревью — ${last.round}: прочитайте его находки и подтвердите заново`,
             );
+          // Ответу нужна поправка контракта (F82): применение к прежней
+          // редакции — не «ревьюер ошибся»; сначала contract-change ведущего.
+          if (this.routeHolds(ht.tx, request, task))
+            throw refuse(
+              'CONTRACT_CHANGE_REQUIRED',
+              `Ответу на запрос ${input.requestId} нужна поправка закреплённого контракта: ведущий проводит contract-change, затем тот же ответ проходит ревью на новой редакции. Применить его к прежней редакции нельзя; исправьте ответ или снимите вопрос`,
+            );
         }
         if (request.lifecycle === 'superseded') {
           const carried = engine.carryInput(request.id, {
@@ -1878,11 +2224,17 @@ export class InputService {
         // и раунд его ревью те же, цель — та, что назвал input_target.
         const current = engine.inputRequest(request.id);
         const answer = latestAnswer(current);
-        if (
-          current.lifecycle === 'answered' &&
-          answer?.kind === 'clarification' &&
-          engine.read((view) => this.originOf(view, current)) === 'rebound'
-        ) {
+        const carriedBy =
+          current.lifecycle === 'answered' && answer?.kind === 'clarification'
+            ? engine.read((view) =>
+                this.originOf(view, current) === 'rebound'
+                  ? REBOUND_REASON
+                  : this.routeCarry(view, current)
+                    ? ROUTE_CARRY_REASON
+                    : undefined,
+              )
+            : undefined;
+        if (carriedBy && answer) {
           if (answer.digest !== input.answerDigest)
             throw refuse(
               'APPROVAL_STALE',
@@ -1890,7 +2242,7 @@ export class InputService {
             );
           const superseded = engine.supersedeInput(
             request.id,
-            { by: actor, reason: REBOUND_REASON, successor: request.workId },
+            { by: actor, reason: carriedBy, successor: request.workId },
             input.expectedVersion,
           );
           const carried = engine.carryInput(request.id, {
@@ -2036,6 +2388,25 @@ export class InputService {
   cancelInTask(taskId: string, requestId: string, raw: unknown) {
     this.ofTask(taskId, requestId);
     return this.cancel({ ...(raw as object), requestId }, 'operator');
+  }
+
+  /**
+   * Замена вопроса оператором той же задачей из центра внимания (F85):
+   * исходная остановка не держится, ответ сохраняется и переносится ведущим.
+   */
+  supersedeInTask(taskId: string, requestId: string, raw: unknown) {
+    this.ofTask(taskId, requestId);
+    const { expectedVersion } = z.strictObject({ expectedVersion: version }).parse(raw);
+    return this.supersede(
+      {
+        requestId,
+        successorTaskId: taskId,
+        reason:
+          'Постановка задачи изменилась после вопроса: оператор заменил вопрос той же задачей, ответ переносится',
+        expectedVersion,
+      },
+      'operator',
+    );
   }
 
   /**

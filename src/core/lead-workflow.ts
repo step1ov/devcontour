@@ -1,3 +1,4 @@
+import { assertNotHeld } from './owner-questions.ts';
 import { assertAnyDevelopmentReady, assertTaskPreparation } from './preparation.ts';
 import { carriedTaskIds } from './work-status.ts';
 import { z } from 'zod';
@@ -16,6 +17,7 @@ import { boardOwner } from './sync-state.ts';
 import { Workspace } from './workspace.ts';
 import { repositories } from './repositories.ts';
 import { technicalReviewer } from '../harness/policy.ts';
+import { assertNotParked } from './board-hold.ts';
 
 /** Текст очереди harness для задания, исчерпавшего попытки стадии. */
 const STAGE_ATTEMPTS_EXHAUSTED = 'Исчерпаны попытки стадии';
@@ -216,8 +218,7 @@ export class LeadWorkflow {
    * где восстановление уже прекращено навсегда. Fencing-поля наружу не идут —
    * интерфейсу они не нужны и не должны быть доступны.
    */
-  view() {
-    const state = this.h.store.read();
+  view(state: Readonly<DevContourState> = this.h.store.view()) {
     const stale = this.staleBoards(state);
     return [undefined, ...repositories(this.h.config).map((r) => r.id)].flatMap((owner) =>
       this.list(owner).map((job) => ({
@@ -408,6 +409,7 @@ export class LeadWorkflow {
    */
   staleBoards(s: DevContourState = this.h.store.read()) {
     const stale = new Map<string, { key: string; reason: string; hint: string }>();
+    const starts = new Map<string, string>();
     const fresh = new Set<string>();
     const inputs = new Map<string, { digest: string; owner?: string } | undefined>();
     const bound = (id: string) => {
@@ -426,13 +428,17 @@ export class LeadWorkflow {
         const input = bound(job.id);
         if (!input) continue;
         if (input.digest === job.inputDigest && input.owner === job.owner) fresh.add(job.id);
-        else
+        // Из нескольких действующих заданий доски — последнее по старту, а
+        // не по порядку хранения (F84): по нему сверяется `invalidated`.
+        else if (!stale.has(job.id) || job.startedAt > (starts.get(job.id) ?? '')) {
+          starts.set(job.id, job.startedAt);
           stale.set(job.id, {
             key: job.key,
             reason:
               'Задание доски начато по прежнему входу: после него изменились политика исполнения (роли, ревьюеры, gates), постановка или контракт',
             hint: `Начните новое задание доски ${job.id} (workflow_start, kind board); прежнее закроется как stale, а план при другой политике утверждает review-plan`,
           });
+        }
       }
     for (const id of fresh) stale.delete(id);
     return stale;
@@ -451,7 +457,7 @@ export class LeadWorkflow {
   invalidated(
     boardIds: readonly string[] | undefined,
     s: DevContourState = this.h.store.read(),
-    rebound: (boardId: string, since: string) => boolean = () => false,
+    rebound: (boardId: string, since: string, job: WorkflowJob) => boolean = () => false,
   ) {
     const active = this.staleBoards(s);
     const fresh = new Set<string>();
@@ -489,7 +495,7 @@ export class LeadWorkflow {
           !!bound(job.id) &&
           !closed(job.id) &&
           (active.get(job.id)?.key === job.key ||
-            (job.status === 'stale' && rebound(job.id, job.startedAt))),
+            (job.status === 'stale' && rebound(job.id, job.startedAt, job))),
       )
       .map((job) => ({
         boardId: job.id,
@@ -498,6 +504,60 @@ export class LeadWorkflow {
         status: job.status,
         stage: job.stage,
         startedAt: job.startedAt,
+        ...(job.finishedAt ? { finishedAt: job.finishedAt } : {}),
+        authorRuntime: job.authorRuntime,
+      }));
+  }
+  /**
+   * Задания ChangeSet, которые уже не продолжатся (F84), — то же правило,
+   * что `invalidated` для досок: последнее задание набора, если по текущему
+   * входу задания нет, и оно действует (queued, running) по прежнему входу —
+   * очередь закроет его `stale` при следующем взятии стадии — или уже
+   * закрыто `stale`, и `rebound` относит его к записанной операции (вход
+   * сменила перепривязка или перенастройка операции изменения контракта).
+   * Принятый набор и набор, вход которого не построить, не входят. Чтение,
+   * без записи.
+   */
+  invalidatedChangesets(
+    s: DevContourState = this.h.store.read(),
+    rebound: (changeSetId: string, since: string, job: WorkflowJob) => boolean = () => false,
+  ) {
+    const latest = new Map<string, WorkflowJob>();
+    const fresh = new Set<string>();
+    const inputs = new Map<string, string | undefined>();
+    const bound = (id: string) => {
+      if (!inputs.has(id))
+        try {
+          inputs.set(id, this.input('changeset', id, s).digest);
+        } catch (error) {
+          if (!(error instanceof DomainError)) throw error;
+          inputs.set(id, undefined);
+        }
+      return inputs.get(id);
+    };
+    for (const owner of [undefined, ...repositories(this.h.config).map((r) => r.id)])
+      for (const job of this.list(owner)) {
+        if (job.kind !== 'changeset') continue;
+        const seen = latest.get(job.id);
+        if (!seen || job.startedAt > seen.startedAt) latest.set(job.id, job);
+        if (bound(job.id) === job.inputDigest) fresh.add(job.id);
+      }
+    return [...latest.values()]
+      .filter((job) => {
+        if (fresh.has(job.id) || !bound(job.id)) return false;
+        if (s.changeSets.find((c) => c.id === job.id)?.acceptance) return false;
+        return (
+          ['queued', 'running'].includes(job.status) ||
+          (job.status === 'stale' && rebound(job.id, job.startedAt, job))
+        );
+      })
+      .map((job) => ({
+        changeSetId: job.id,
+        key: job.key,
+        status: job.status,
+        stage: job.stage,
+        startedAt: job.startedAt,
+        ...(job.finishedAt ? { finishedAt: job.finishedAt } : {}),
         authorRuntime: job.authorRuntime,
       }));
   }
@@ -506,6 +566,38 @@ export class LeadWorkflow {
   }
   start(raw: unknown) {
     const input = workflowInput.parse(raw);
+    // Отложенная доска (F86) заданий не ведёт: старт ждёт снятия отметки.
+    if (input.kind === 'board') assertNotParked(this.h, input.id, 'workflow_start');
+    // Задание доски с неутверждённым планом отправит на ревью весь план, а
+    // черновик, который держит вопрос владельцу, ревью не выпустит: отказ
+    // 409 QUESTION_PENDING до регистрации задания.
+    // Повтор для действующего задания того же входа возвращает его
+    // (идемпотентность очереди): удержание отклоняет только регистрацию
+    // нового задания, в том числе на изменившийся вход доски.
+    if (input.kind === 'board') {
+      const s = this.h.store.read();
+      let current: string | undefined;
+      try {
+        current = this.input('board', input.id, s).digest;
+      } catch {
+        current = undefined;
+      }
+      const same = [undefined, ...repositories(this.h.config).map((r) => r.id)]
+        .flatMap((owner) => this.list(owner))
+        .some(
+          (j) =>
+            j.kind === 'board' &&
+            j.id === input.id &&
+            j.inputDigest === current &&
+            (j.status === 'queued' || j.status === 'running'),
+        );
+      const revision = s.boards.find((b) => b.id === input.id)?.revisions.at(-1);
+      if (!same && revision && revision.status !== 'accepted')
+        assertNotHeld(
+          s,
+          revision.taskIds.filter((id) => s.tasks.find((t) => t.id === id)?.status === 'draft'),
+        );
+    }
     return domain(() => this.queue().start(input)) as WorkflowJob;
   }
   /**
