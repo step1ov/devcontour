@@ -12,6 +12,7 @@ import {
   operationLiveness,
   queueStopView,
   heldBaseWait,
+  leadLiftsPause,
   runLiveness,
   type OperationLiveness,
   type RunLiveness,
@@ -56,7 +57,10 @@ export function baseWaitOf(h: DevContour | undefined, state: Readonly<DevContour
   const byEngine =
     Boolean(h) &&
     (h!.config.approvalMode ?? 'agent') === 'agent' &&
-    state.pauseReason === 'base-check' &&
+    // Пауза ведущего поверх неудержанного ожидания (F93, `leadResumeOf`
+    // `keeps-base-check`): ведущий снимает свою паузу, ожидание проверяет
+    // цикл задания — действия человека нет, как в `queueStopView`.
+    (state.pauseReason === 'base-check' || leadLiftsPause(state)) &&
     Boolean(state.baseMoves) &&
     !held &&
     !failed &&

@@ -26,6 +26,7 @@ import { AttentionCount, useAttentionScreen } from './AttentionProvider.tsx';
 import { navigate } from './navigation.ts';
 import { useNow } from './now.ts';
 import { COST_ESTIMATE_RU } from '../core/usage.ts';
+import { budgetNames, budgetTail } from '../core/budget-line.ts';
 import {
   GateTrendChart,
   HourlyChart,
@@ -119,11 +120,6 @@ const changeSetNames = {
   failed: 'проверка не прошла',
   open: 'в работе',
 } as const;
-const budgetNames: Record<NonNullable<HomeHarness['budget']>['state'], string> = {
-  within: 'в пределах',
-  exceeded: 'исчерпан',
-  undetermined: 'не определён',
-};
 
 /** «N мин назад» по общим часам панели. */
 function ago(at: string | null | undefined, now: number) {
@@ -135,7 +131,6 @@ function ago(at: string | null | undefined, now: number) {
   if (hours < 48) return `${hours} ч назад`;
   return `${Math.round(hours / 24)} дн назад`;
 }
-const minutes = (ms: number) => `${Math.round(ms / 60_000)} мин`;
 const asOfText = (at: string) =>
   `на ${new Date(at).toLocaleTimeString('ru-RU', { hour: '2-digit', minute: '2-digit' })}`;
 
@@ -760,16 +755,6 @@ const kindNames: Record<string, string> = {
   other: 'прочие',
 };
 
-const money = (v: number) => '~$' + (v >= 100 ? v.toFixed(0) : v.toFixed(2));
-// Предел — как задан: копейки не теряются и у больших сумм.
-const limitText = (v: number) => '$' + (Number.isInteger(v) ? v.toFixed(0) : v.toFixed(2));
-/** Доля предела: округление, но «100 %» — только у достигнутого предела. */
-const percentOf = (spent: number, limit: number) => {
-  const p = Math.round((spent / limit) * 100);
-  return spent < limit ? Math.min(p, 99) : p;
-};
-const callsText = (n: number) => `${n} ${plural(n, 'вызова', 'вызовов', 'вызовов')}`;
-
 /**
  * Бюджеты строкой на область: состояние, оценка из предела, время и вызовы с
  * неизвестной стоимостью. Красный — только исчерпанный, янтарный — не
@@ -805,16 +790,7 @@ function BudgetLines({
               {budgetNames[b.state]}
             </PanelLink>
             {' · '}
-            {money(b.spentUsd)}
-            {b.limitUsd !== undefined
-              ? ` из ${limitText(b.limitUsd)} (${percentOf(b.spentUsd, b.limitUsd)} %)`
-              : ''}
-            {b.limitMs !== undefined
-              ? `; время ${minutes(b.spentMs ?? 0)} из ${minutes(b.limitMs)}`
-              : ''}
-            {b.unknownCalls
-              ? `; у ${callsText(b.unknownCalls)} стоимость неизвестна — сумма занижена`
-              : ''}
+            {budgetTail(b)}
           </li>
         ))}
         {hidden > 0 && <li className="text-muted-foreground">и ещё бюджетов: {hidden}</li>}

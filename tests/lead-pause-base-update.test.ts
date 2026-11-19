@@ -18,6 +18,8 @@ import { BASE_HELD_DETAIL } from '../src/runner/base-check.ts';
 import { repositorySchema, type DevContourState } from '../src/core/model.ts';
 import { git } from '../src/runner/process.ts';
 import { leadLiftsPause, leadResumeOf, queueStopView } from '../src/core/work-status.ts';
+import { LeadWorkflow } from '../src/core/lead-workflow.ts';
+import { homeView } from '../src/application/home.ts';
 
 /** Репозиторий, рабочая ветка которого на коммит впереди базы прогонов. */
 async function behindBase(root: string) {
@@ -111,6 +113,80 @@ test('F89: base-update поверх паузы ведущего — пауза �
     assert.equal(after.paused, true);
     assert.equal(after.pauseReason, 'base-check');
     assert.ok(after.waits?.some((w) => w.kind === 'base-check'));
+  });
+});
+
+/** Центр внимания и главная одного снимка. */
+async function views(h: DevContour) {
+  const attention = await new AttentionService(h.store, h).active();
+  const home = homeView({
+    state: h.store.read(),
+    h,
+    attention,
+    revision: h.store.revision(),
+    now: Date.now(),
+    events: h.store.events(),
+  });
+  return { attention, queue: home.sections.development.queue };
+}
+
+test('F93: lead pause over an unheld base check with a board job — no operator action in attention or home; home names the lead and its reason', async () => {
+  await withRepo(async ({ h, data }) => {
+    const b = h.createBoard('Board');
+    h.addTask(b.id, input('Task'));
+    h.approve(b.id);
+    h.pause(false);
+    // Доску ведёт задание: неудержанное ожидание проверит его цикл.
+    new LeadWorkflow(h).start({ kind: 'board', id: b.id, authorRuntime: 'codex' });
+    const agent = new AgentService(h, data);
+    const reason = 'Guides refresh and the change record commit';
+    await agent.run({ operation: 'queue_set', input: { paused: true, reason } });
+    await baseUpdateOperation(h, data, { by: 'host' });
+    const state = h.store.read();
+    assert.equal(leadResumeOf(state), 'keeps-base-check');
+    const { attention, queue } = await views(h);
+    // Ни карточки переноса базы, ни действия оператора: паузу снимает
+    // ведущий, базу проверяет цикл задания (как host.next и карточка ведущего).
+    assert.equal(
+      attention.items.find((i) => i.sourceKey === 'wait:base-check'),
+      undefined,
+      JSON.stringify(attention.items.map((i) => [i.sourceKey, i.actor, i.title])),
+    );
+    for (const item of attention.items.filter((i) => i.actor === 'operator'))
+      assert.ok(
+        !item.actions.some((a) => a.id === 'resume'),
+        `${item.sourceKey}: ${item.title} offers the operator a resume`,
+      );
+    assert.equal(attention.items.find((i) => i.sourceKey === 'queue')?.actor, 'lead');
+    // Главная говорит то же: пауза ведущего с его причиной, действия оператора нет.
+    assert.equal(queue.reason, `Выдачу остановил ведущий агент: ${reason}`);
+    assert.doesNotMatch(queue.hint ?? '', /Проверьте базу gates|«Нужно действие»/);
+    assert.match(queue.hint ?? '', /ведущий агент снимает сам; затем он проверит базу/);
+    // Ведущий снял паузу: ожидание проверяет цикл, у оператора действия нет.
+    await agent.run({ operation: 'queue_set', input: { paused: false } });
+    const lifted = await views(h);
+    assert.equal(
+      lifted.attention.items.find((i) => i.sourceKey === 'wait:base-check'),
+      undefined,
+    );
+    assert.equal(lifted.queue.hint, 'Ведущий агент проверит базу и продолжит выдачу сам.');
+  });
+});
+
+test('F93: a human pause over the same base check keeps the operator action', async () => {
+  await withRepo(async ({ h, data }) => {
+    const b = h.createBoard('Board');
+    h.addTask(b.id, input('Task'));
+    h.approve(b.id);
+    h.pause(false);
+    new LeadWorkflow(h).start({ kind: 'board', id: b.id, authorRuntime: 'codex' });
+    h.pause(true);
+    await baseUpdateOperation(h, data, { by: 'host' });
+    const { attention, queue } = await views(h);
+    const card = attention.items.find((i) => i.sourceKey === 'queue');
+    assert.equal(card?.actor, 'operator');
+    assert.ok(card?.actions.some((a) => a.id === 'resume'));
+    assert.match(queue.hint ?? '', /Проверьте базу gates и запустите очередь/);
   });
 });
 

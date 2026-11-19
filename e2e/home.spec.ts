@@ -223,6 +223,7 @@ test('Route fixtures: exhausted budget, failing gate, startupError and long titl
       reason: 'Бюджет workspace исчерпан: время и сумма',
       spentUsd: 7.25,
       unknownCalls: 2,
+      text: 'Бюджет workspace: исчерпан · ~$7.25',
       complete: false,
       exceeded: 1,
       total: 3,
@@ -236,6 +237,7 @@ test('Route fixtures: exhausted budget, failing gate, startupError and long titl
           reason: 'Бюджет workspace исчерпан: время и сумма',
           spentUsd: 7.25,
           unknownCalls: 2,
+          text: 'Бюджет workspace: исчерпан · ~$7.25',
         },
         {
           state: 'undetermined',
@@ -244,6 +246,7 @@ test('Route fixtures: exhausted budget, failing gate, startupError and long titl
           spentUsd: 1014.1558,
           unknownCalls: 227,
           reason: 'Бюджет доски не определён: у 1 попытки вызовы не записаны',
+          text: 'Бюджет board B-1: не определён · ~$1014',
         },
       ],
       asOf: home.generatedAt,
@@ -381,13 +384,17 @@ test('Charts: overall progress, agent load and hourly attempts render from route
     '70',
   );
   const load = page.getByRole('figure', { name: /Нагрузка агентов за сутки/ });
-  // Время пика — начало 57-го интервала в часовом поясе браузера.
-  const peakAt = await page.evaluate(() =>
-    new Date(
-      Date.parse('2026-11-19T12:00:00.000Z') - 24 * 3_600_000 + 56 * 900_000,
-    ).toLocaleTimeString('ru-RU', { hour: '2-digit', minute: '2-digit' }),
-  );
-  await expect(load).toContainText(`Пик 3 агента в ${peakAt}, сейчас 1; слотов 2.`);
+  // Время пика — начало 57-го интервала в часовом поясе браузера; день
+  // окна, отличный от сегодняшнего, назван (F92).
+  const [peakAt, peakDay] = await page.evaluate(() => {
+    const to = new Date('2026-11-19T12:00:00.000Z');
+    const at = new Date(to.getTime() - 24 * 3_600_000 + 56 * 900_000);
+    return [
+      at.toLocaleTimeString('ru-RU', { hour: '2-digit', minute: '2-digit' }),
+      at.getDate() === to.getDate() ? '' : 'вчера ',
+    ];
+  });
+  await expect(load).toContainText(`Пик 3 агента ${peakDay}в ${peakAt}, сейчас 1; слотов 2.`);
   // Столбики нарисованы: интервал пика — три сегмента стека, текущий — один.
   await expect(
     load.locator('svg g').nth(56).locator('rect[fill]:not([fill="transparent"])'),
@@ -601,6 +608,65 @@ test('Rings and compact tiles: preparation tiles with rings and a one-line not-a
   await page.setViewportSize({ width: 390, height: 844 });
   expect(await noHorizontalScroll(page)).toBe(true);
   await axeClean(page);
+});
+
+test.describe('Charts in UTC', () => {
+  test.use({ timezoneId: 'UTC' });
+  test('Times outside today carry the day: peaks and axis ends of the 24 h charts (F92)', async ({
+    page,
+  }) => {
+    await page.route('**/api/home*', async (route) => {
+      const response = await route.fetch({ url: route.request().url().replace(/\?.*$/, '') });
+      const home = (await response.json()) as HomeView & { etag: string };
+      const harness = home.harness!;
+      home.etag = 'charts-day';
+      const to = Date.parse('2026-11-19T12:00:00.000Z');
+      const from = new Date(to - 24 * 3_600_000).toISOString();
+      const peaks = Array.from({ length: 96 }, (): [number, number, number, number] => [
+        0, 0, 0, 0,
+      ]);
+      peaks[0] = [0, 2, 0, 0]; // вчера 12:00 — пик 2
+      peaks[90] = [1, 0, 0, 0]; // сегодня 10:30
+      const hourly = Array.from({ length: 24 }, (): [number, number] => [0, 0]);
+      hourly[0] = [6, 0];
+      hourly[23] = [1, 0];
+      harness.concurrency = 2;
+      harness.load = {
+        from,
+        to: new Date(to).toISOString(),
+        bucketMs: 900_000,
+        peaks,
+        hourly,
+        current: 1,
+        asOf: home.generatedAt,
+      };
+      const gates = Array.from({ length: 24 }, (): [number, number, number] => [0, 0, 0]);
+      gates[22] = [1, 2, 0]; // сегодня 10:00 — без дня
+      harness.gateTrend = {
+        from,
+        to: new Date(to).toISOString(),
+        hourly: gates,
+        asOf: home.generatedAt,
+      };
+      await route.fulfill({ json: home });
+    });
+    await page.goto('/');
+    const load = page.getByRole('figure', { name: /Нагрузка агентов за сутки/ });
+    await expect(load).toContainText('Пик 2 агента вчера в 12:00, сейчас 1; слотов 2.');
+    // Ось: левый край — вчера, правый — сегодня без дня.
+    const axis = load.locator('div.justify-between span');
+    await expect(axis).toHaveText(['вчера 12:00', '00:00', '12:00']);
+    await expect(load.locator('table tbody tr').first().locator('th')).toHaveText(
+      'вчера 12:00–12:15',
+    );
+    const hourlyChart = page.getByRole('figure', { name: /Попытки по часам/ });
+    await expect(hourlyChart).toContainText('больше всего вчера в 12:00 (6)');
+    await expect(hourlyChart.locator('table tbody tr').first().locator('th')).toHaveText(
+      'вчера 12:00',
+    );
+    const gateChart = page.getByRole('figure', { name: /Проверки по часам/ });
+    await expect(gateChart).toContainText('больше всего отказов в 10:00 (2)');
+  });
 });
 
 test.describe('A browser in another time zone', () => {

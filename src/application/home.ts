@@ -28,6 +28,7 @@ import { harnessVersion } from '../harness/index.ts';
 import { configApplyKeys, reconfigureSlotBusy } from '../runner/reconfigure.ts';
 import type { ProductView } from '../core/product-map.ts';
 import { knownCost, type UsageRecord } from '../core/usage.ts';
+import { budgetLine } from '../core/budget-line.ts';
 
 /**
  * Главная панели (`GET /api/home`): по плитке на раздел — продукт,
@@ -312,7 +313,10 @@ export interface BudgetScope {
   spentMs?: number;
   spentUsd: number;
   unknownCalls: number;
+  /** Сырой текст расчёта (для «подробнее»); строка оператора — `text`. */
   reason?: string;
+  /** Строка бюджета словами оператора, как на панели (`budgetLine`). */
+  text: string;
 }
 /** Исполнение: попытки, проверки, сбои, бюджет и здоровье сервера. */
 export interface HomeHarness {
@@ -347,6 +351,8 @@ export interface HomeHarness {
     exceeded: number;
     total: number;
     reason?: string;
+    /** Строка оператора верхней области (`budgetLine`); `reason` — сырой текст расчёта. */
+    text: string;
     /**
      * Строка на область бюджета: держащие работу — первыми, до
      * `HOME_LIMITS.budgetScopes`; `reason` — сырой текст расчёта для
@@ -654,6 +660,8 @@ export interface QueueFacts {
   approvalMode?: 'agent' | 'operator';
   /** Есть задание ведущего, которое продвинет цикл `serve` (queued/running). */
   workflowActive: boolean;
+  /** Маска текстов центра внимания: причина паузы ведущего — его свободный текст. */
+  redact?: (text: string) => string;
 }
 
 /**
@@ -665,7 +673,8 @@ export interface QueueFacts {
  */
 export function operatorQueue(
   queue: { reason?: string; stopReason?: string; failed?: true; by?: 'lead' },
-  state: Pick<DevContourState, 'pauseFailures' | 'waits' | 'paused'>,
+  state: Pick<DevContourState, 'pauseFailures' | 'waits' | 'paused'> &
+    Partial<Pick<DevContourState, 'pauseActor'>>,
   facts: QueueFacts,
 ): { reason: string; hint: string } {
   const agent = (facts.approvalMode ?? 'agent') === 'agent';
@@ -682,6 +691,13 @@ export function operatorQueue(
   const own = (fallback: string) =>
     queue.stopReason && !LEAD_COMMAND.test(queue.stopReason) ? queue.stopReason : fallback;
   const sentence = (text: string) => text[0].toUpperCase() + text.slice(1) + '.';
+  // Пауза ведущего — его причиной (`queue_set {"reason"}`), если она есть и
+  // не называет команд ведущего: оператор видит, зачем выдачу остановили.
+  // `by: lead` — уже `pausedByLead` (`queueStopView`).
+  const note = queue.by === 'lead' ? state.pauseActor?.reason : undefined;
+  const leadReason =
+    'Выдачу остановил ведущий агент' +
+    (note && !LEAD_COMMAND.test(note) ? `: ${(facts.redact ?? ((t: string) => t))(note)}` : '');
   const wait = state.waits?.find((w) => w.kind === 'base-check')?.detail;
   const held = Boolean(heldBaseOf(state));
   const checkFailed = Boolean(wait?.startsWith('Проверка базы не пройдена'));
@@ -711,6 +727,15 @@ export function operatorQueue(
         reason: own('Проверка базы не пройдена'),
         hint: `Базу нужно исправить до запуска очереди: ${attention}.`,
       };
+    // Пауза ведущего над неудержанным ожиданием (F93, `leadResumeOf`
+    // `keeps-base-check`): ведущий снимает свою паузу, базу проверяет цикл
+    // ведущего — у оператора действия нет, как в `queueStopView` и центре
+    // внимания.
+    if (byLead && queue.by === 'lead' && queue.reason === 'operator' && !queue.failed)
+      return {
+        reason: leadReason,
+        hint: 'Свою паузу ведущий агент снимает сам; затем он проверит базу и продолжит выдачу.',
+      };
     // Ожидание под паузой человека или сбоем — снимает не цикл ведущего.
     const underPause = queue.reason === 'operator' || queue.failed;
     return {
@@ -730,7 +755,7 @@ export function operatorQueue(
     case 'operator':
       if (queue.by === 'lead')
         return {
-          reason: 'Выдачу остановил ведущий агент',
+          reason: leadReason,
           hint: agent
             ? `Свою паузу ведущий агент снимает сам; запустить раньше — ${start}.`
             : sentence(start),
@@ -859,6 +884,7 @@ function development(
       ? operatorQueue(queue, state, {
           approvalMode: h.config.approvalMode,
           workflowActive: jobs.some((j) => j.status === 'queued' || j.status === 'running'),
+          redact,
         })
       : undefined;
   const ready = h ? readyTasks(state, holds).length : 0;
@@ -1471,7 +1497,11 @@ export function budgetOf(
     const kind = x.scope.kind === 'task' ? 'задачи' : 'доски';
     return clip(`${kind} «${name ? clip(name, 60) : x.scope.id}»`);
   };
-  const line = (x: Budgets['budgets'][number]): BudgetScope => ({
+  const line = (x: Budgets['budgets'][number]): BudgetScope => {
+    const scope: Omit<BudgetScope, 'text'> = fields(x);
+    return { ...scope, text: clip(budgetLine(scope), HOME_LIMITS.startupError) };
+  };
+  const fields = (x: Budgets['budgets'][number]): Omit<BudgetScope, 'text'> => ({
     state: x.state,
     ...(labelOf(x) ? { label: labelOf(x)! } : {}),
     scope: clip(
