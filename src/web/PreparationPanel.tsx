@@ -332,7 +332,7 @@ function Questions({
             q.choices ?? q.options.map((label) => ({ label, consequence: undefined }));
           const pick = q.id + ':' + (q.version ?? '');
           const picked = chosen[pick];
-          const text = (drafts[q.id] ?? '').trim();
+          const text = (drafts[pick] ?? '').trim();
           const blocks = q.blocks?.taskIds ?? [];
           const links = q.links?.taskIds ?? [];
           return (
@@ -444,8 +444,8 @@ function Questions({
                         id={'answer-' + q.id}
                         rows={2}
                         maxLength={3000}
-                        value={drafts[q.id] ?? ''}
-                        onChange={(e) => setDrafts({ ...drafts, [q.id]: e.target.value })}
+                        value={drafts[pick] ?? ''}
+                        onChange={(e) => setDrafts({ ...drafts, [pick]: e.target.value })}
                       />
                       <div>
                         <Button

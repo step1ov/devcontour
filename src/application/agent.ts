@@ -710,12 +710,10 @@ export class AgentService {
     if (operation in preparationInputs) {
       // Решение по вопросу ссылается на операцию изменения контракта этого
       // workspace: её записи — в хранилище движка, не в подготовке.
-      if (operation === 'preparation_resolve') {
-        const ref = preparationInputs.preparation_resolve.parse(input).refs?.contractChangeId;
-        if (ref && !new ContractChanges(h, this.root ?? '').list().some((op) => op.id === ref))
-          throw new DomainError('Изменение контракта не найдено: ' + ref, 404);
-      }
-      return new Preparation(h.store).execute(operation as PreparationOperation, input);
+      const changes = new ContractChanges(h, this.root ?? '');
+      return new Preparation(h.store, 'lead', (id) =>
+        changes.list().some((op) => op.id === id),
+      ).execute(operation as PreparationOperation, input);
     }
     if (!readOnly(operation) && h.store.projectionKind !== 'full') attachJournal(h);
     switch (operation) {

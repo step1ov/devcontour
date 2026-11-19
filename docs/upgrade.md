@@ -2075,8 +2075,9 @@ existing}]`.
   (`version` вопроса из `preparation_status`; ответ на уточнённую после показа
   редакцию — 409 `question-stale`), действие
   `answer` карточки `prep-question` (`optionId` — индекс варианта), CLI
-  `devcontour question-answer --id Q-… [--option N] [--text …]`. Список —
-  `devcontour questions [--section …] [--all]` (только чтение).
+  `devcontour question-answer --id Q-… [--option N --version V] [--text …]`. Список —
+  `devcontour questions [--section …] [--all]` (только чтение; `version` вопроса —
+  для `--version`).
 - **Ответ возвращается ведущему.** `session_handoff` получил
   `host.questions`: открытые вопросы по разделам, до пяти ответов без решения
   ведущего (выдержки после маски секретов, выбранный вариант, ссылки,
@@ -2088,7 +2089,8 @@ existing}]`.
   вся оставшаяся работа плана удержана открытыми вопросами — `wait` с кодом
   `owner-question-pending`. `preparation_resolve` принимает `refs
 {productRevision, boardId, taskIds, contractChangeId, adr}` (названное должно
-  существовать), а этап решения по умолчанию — этап вопроса.
+  существовать; изменение контракта проверяет агентский API настроенного
+  workspace), а этап решения по умолчанию — этап вопроса.
 - **Удержание черновиков.** Черновик из `blocks.taskIds` открытого вопроса
   или отвеченного без действующего решения не выпускается: подсказка плана
   называет его в `plan.questions` вне области ревью, утверждение,

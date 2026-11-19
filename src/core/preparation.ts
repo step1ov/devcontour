@@ -472,7 +472,14 @@ function validateJournal(c: ProductChange) {
  * Ссылки и удержания вопроса указывают на существующее: задачи, доски и
  * контракты состояния; удерживать можно только черновики.
  */
-function assertQuestionRefs(s: DevContourState, q: PreparationQuestion) {
+// Проверка — при записи вопроса (add, revise): импорт истории её не
+// повторяет — удержание действует только на существующие черновики
+// (`questionHolds`), а задача вопроса могла быть отменена после него.
+function assertQuestionRefs(
+  s: DevContourState,
+  q: PreparationQuestion,
+  held: readonly string[] = [],
+) {
   const tasks = new Map(s.tasks.map((t) => [t.id, t]));
   const missing = [...(q.links?.taskIds ?? []), ...(q.blocks?.taskIds ?? [])].filter(
     (id) => !tasks.has(id),
@@ -484,7 +491,10 @@ function assertQuestionRefs(s: DevContourState, q: PreparationQuestion) {
     (id) => !s.contracts.some((x) => x.id === id),
   );
   if (contracts.length) throw new DomainError('Контракты не найдены: ' + contracts.join(', '), 404);
-  const released = (q.blocks?.taskIds ?? []).filter((id) => tasks.get(id)!.status !== 'draft');
+  // Новые удержания — только черновики; прежние остаются как записаны.
+  const released = (q.blocks?.taskIds ?? []).filter(
+    (id) => !held.includes(id) && tasks.get(id)!.status !== 'draft',
+  );
   if (released.length)
     throw new DomainError(
       'Удержать можно только черновики (выпущенную работу держит вопрос исполнителя): ' +
@@ -704,15 +714,6 @@ export function validatePreparation(s: DevContourState, previous?: DevContourSta
   );
   if (new Set(origins).size !== origins.length)
     throw new DomainError('Повтор источника вопроса (origin.ref) в workspace', 409);
-  for (const c of s.preparation.changes) {
-    const old = previous?.preparation?.changes.find((o) => o.id === c.id);
-    // Новый или изменённый открытый вопрос (и пришедший импортом) ссылается
-    // на существующее и держит только черновики; решённые — как записаны.
-    for (const q of c.questions ?? []) {
-      const before = old?.questions?.find((x) => x.id === q.id);
-      if (q.status === 'open' && (!before || hash(before) !== hash(q))) assertQuestionRefs(s, q);
-    }
-  }
   for (const c of p.changes) {
     validateJournal(c);
     validateQuick(
@@ -987,6 +988,11 @@ export class Preparation {
   constructor(
     readonly store: Store,
     readonly actor: 'operator' | 'lead' = 'lead',
+    /**
+     * Есть ли операция изменения контракта (`refs.contractChangeId` решения):
+     * её записи — в хранилище движка, проверку передаёт агентский API после setup.
+     */
+    readonly contractChangeExists?: (id: string) => boolean,
   ) {}
   enable() {
     this.store.change('preparation.enabled', (s) => {
@@ -1374,6 +1380,7 @@ export class Preparation {
               if (!q) throw new DomainError('Вопрос не найден: ' + r.id, 404);
               if (q.status !== 'open')
                 throw new DomainError('Уточнить можно только открытый вопрос: ' + r.id, 409);
+              const held = [...(q.blocks?.taskIds ?? [])];
               if (r.text !== undefined) q.text = r.text;
               if (r.why !== undefined) q.why = r.why;
               if (r.stage !== undefined || r.section !== undefined)
@@ -1401,7 +1408,7 @@ export class Preparation {
                   if (r[field] === null) delete q[field];
                   else (q as Record<string, unknown>)[field] = r[field];
                 }
-              assertQuestionRefs(s, q);
+              assertQuestionRefs(s, q, held);
               q.revisedAt = now();
             }
             for (const q of v.add) {
@@ -1469,6 +1476,16 @@ export class Preparation {
                 !c.product.some((r) => r.number === v.refs!.productRevision)
               )
                 throw new DomainError('Редакции постановки нет: ' + v.refs.productRevision, 404);
+              if (
+                v.refs?.contractChangeId &&
+                !(this.contractChangeExists?.(v.refs.contractChangeId) ?? false)
+              )
+                throw new DomainError(
+                  this.contractChangeExists
+                    ? 'Изменение контракта не найдено: ' + v.refs.contractChangeId
+                    : 'Ссылку на изменение контракта проверяет агентский API настроенного workspace (MCP или devcontour agent после setup)',
+                  this.contractChangeExists ? 404 : 409,
+                );
               if (v.refs?.boardId && !s.boards.some((b) => b.id === v.refs!.boardId))
                 throw new DomainError('Доска не найдена: ' + v.refs.boardId, 404);
               const missing = (v.refs?.taskIds ?? []).filter(

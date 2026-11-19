@@ -658,3 +658,69 @@ test('Вопросы владельцу: учётные данные в URL по
     f.cleanup();
   }
 });
+
+test('Удержание: новый вход доски — новое задание, удержание его отклоняет; доска без задания не прячется за ожиданием', () => {
+  const f = heldFixture();
+  try {
+    const workflow = new LeadWorkflow(f.h);
+    workflow.start({ kind: 'board', id: f.board.id, authorRuntime: 'codex' });
+    const qid = ask(f.p, f.changeId, [f.held.id]);
+    // Новый черновик меняет вход доски: прежнее задание не тот же вход.
+    f.h.addTask(f.board.id, { ...input('Новый черновик'), featureId: 'member-block' });
+    assert.throws(
+      () => workflow.start({ kind: 'board', id: f.board.id, authorRuntime: 'codex' }),
+      pending(qid),
+    );
+    // Вторая доска с утверждённым планом и без задания: её шаг — раньше ожидания владельца.
+    const other = heldFixture();
+    try {
+      const q2 = ask(other.p, other.changeId, [other.held.id]);
+      other.h.approve(other.board.id, [other.free.id]);
+      const b2 = other.h.createBoard('Вторая доска');
+      other.h.addTask(b2.id, { ...input('Готовая работа'), featureId: 'member-block' });
+      other.h.approve(b2.id);
+      const next = devcontourHandoff(other.h).host.next;
+      assert.notEqual(next?.code, 'owner-question-pending');
+      assert.equal(next?.boardId === other.board.id && next.action === 'wait', false);
+      assert.ok(q2);
+    } finally {
+      other.cleanup();
+    }
+  } finally {
+    f.cleanup();
+  }
+});
+
+test('Решение: ссылка на изменение контракта без проверки движка отклоняется; удержание остаётся', () => {
+  const f = heldFixture();
+  try {
+    const qid = ask(f.p, f.changeId, [f.held.id]);
+    answer(f, f.changeId, qid);
+    assert.throws(
+      () =>
+        f.p.execute('preparation_resolve', {
+          changeId: f.changeId,
+          questionId: qid,
+          statement: 'Решено через изменение контракта',
+          rationale: 'Ответ владельца',
+          refs: { contractChangeId: 'CC-missing' },
+        }),
+      /агентский API/,
+    );
+    const checked = new Preparation(f.store, 'lead', () => false);
+    assert.throws(
+      () =>
+        checked.execute('preparation_resolve', {
+          changeId: f.changeId,
+          questionId: qid,
+          statement: 'Решено через изменение контракта',
+          rationale: 'Ответ владельца',
+          refs: { contractChangeId: 'CC-missing', productRevision: 1 },
+        }),
+      /Изменение контракта не найдено: CC-missing/,
+    );
+    assert.equal(questionHolds(f.store.read()).size, 1);
+  } finally {
+    f.cleanup();
+  }
+});

@@ -1580,7 +1580,19 @@ function hostNext(ctx: HostContext): HandoffHostNext | undefined {
     if (blocker) return blocker;
     const live = liveJobStep(ctx, step.boardId);
     if (live && live.action !== 'wait') return live;
-    return ownerAnswerStep(ctx) ?? live ?? step;
+    const owner = ownerAnswerStep(ctx);
+    if (owner) return owner;
+    // Ожидание владельца не прячет работу других досок (ревью плана, старт
+    // задания): шаг — она, ожидание — когда другой работы нет.
+    if (step.code === 'owner-question-pending' && !ctx.pack.graphId) {
+      const other = ctx.state.boards
+        .filter((b) => b.id !== step.boardId)
+        .map((b) => boardStep(b.id, ctx))
+        .filter((x): x is HandoffHostNext => !!x && x.action !== 'wait')
+        .sort((a, b) => rank(a) - rank(b))[0];
+      if (other) return other;
+    }
+    return live ?? step;
   }
   // Режим operator: общий шаг оператора не решает ответ владельца, который
   // ведущий превращает в решение — сначала он.

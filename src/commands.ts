@@ -13,6 +13,7 @@ import {
   answeredPending,
   choicesOf,
   maskUrlCredentials,
+  questionVersion,
   sectionOf,
 } from './core/owner-questions.ts';
 import { preparationInputs } from './core/preparation-model.ts';
@@ -424,7 +425,15 @@ async function main() {
       typeof request === 'object' &&
       'operation' in request &&
       typeof request.operation === 'string' &&
-      request.operation in preparationInputs
+      request.operation in preparationInputs &&
+      // Ссылку решения на изменение контракта проверяет агентский API
+      // настроенного workspace: такой запрос идёт общим путём ниже.
+      !(
+        request.operation === 'preparation_resolve' &&
+        (await exists(join(root, 'config.json'))) &&
+        (request as { input?: { refs?: { contractChangeId?: unknown } } }).input?.refs
+          ?.contractChangeId !== undefined
+      )
     ) {
       const store = preparationStore(root);
       try {
@@ -457,6 +466,8 @@ async function main() {
             section: sectionOf(q),
             stage: q.stage,
             status: q.status,
+            // Редакция для ответа: question-answer --version.
+            version: questionVersion(q),
             ...(answeredPending(c, q) ? { pendingLead: true } : {}),
             text: q.text,
             ...(q.why ? { why: q.why } : {}),
@@ -488,9 +499,15 @@ async function main() {
       const choice = args.includes('--option') ? Number(option('--option', '')) : undefined;
       if (choice !== undefined && !Number.isInteger(choice))
         throw new Error('--option: номер варианта с 0');
+      // Номер варианта — по прочитанной редакции вопроса (version из
+      // devcontour questions): уточнённый после чтения вопрос ответ отклонит.
+      const version = args.includes('--version') ? option('--version', '') : undefined;
+      if (choice !== undefined && !version)
+        throw new Error('С --option укажите --version из devcontour questions');
       new Preparation(store, 'operator').answer({
         changeId: change.id,
         questionId,
+        ...(version ? { expectedVersion: version } : {}),
         ...(text ? { text } : {}),
         ...(choice !== undefined ? { choice } : {}),
       });

@@ -73,11 +73,15 @@ test('Owner question: answered in the product section with the recommended optio
     await expect(recommended).toContainText('Рекомендация ведущего');
     const submit = question.getByRole('button', { name: 'Ответить' });
     await expect(submit).toBeDisabled();
-    await recommended.getByRole('radio').check();
+    // Владелец выбирает не рекомендацию: ответ — его выбор, а не рекомендация.
+    await question
+      .locator('label', { hasText: 'Обещаем в первом релизе' })
+      .getByRole('radio')
+      .check();
     await submit.click();
     await expect(question).toContainText('Отвечено');
     await expect(question).toContainText('Ваш ответ');
-    await expect(block).toContainText('Убираем из постановки');
+    await expect(block).toContainText('Обещаем в первом релизе');
 
     const status = (await agent('preparation_status', { changeId })) as {
       current: {
@@ -86,7 +90,7 @@ test('Owner question: answered in the product section with the recommended optio
     };
     const saved = status.current.questions.find((q) => q.id === productQ)!;
     expect(saved.status).toBe('answered');
-    expect(saved.answer).toMatchObject({ choice: 1, text: 'Убираем из постановки' });
+    expect(saved.answer).toMatchObject({ choice: 0, text: 'Обещаем в первом релизе' });
 
     // Вопрос разработки отвечается на вкладке «Разработка».
     await page.goto(`${app.url}/?change=${changeId}&stage=development#questions-development`);
