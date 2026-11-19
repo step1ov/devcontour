@@ -18,9 +18,10 @@ import {
 } from '../src/application/handoff.ts';
 import { LeadWorkflow } from '../src/core/lead-workflow.ts';
 import { LeadRunner } from '../src/runner/lead-workflow.ts';
+import { recordsFromState, stateFromRecords } from '../src/core/sync-state.ts';
 import { DomainError } from '../src/core/model.ts';
 import { closeDeadJob, parkOf, parkedHold, setPark } from '../src/core/board-hold.ts';
-import { DevContour } from '../src/core/service.ts';
+import { DevContour, specDigest } from '../src/core/service.ts';
 import { Store } from '../src/core/store.ts';
 
 type F = ReturnType<typeof fixture>;
@@ -409,27 +410,33 @@ test('workflow_close: закрытие относится к одному эпи
   }
 });
 
-test('workflow_close: отмена без актёра (из Git sync, без локальных прогонов) — не closable и не закрывается ведущим', async () => {
+test('workflow_close: отмена, пришедшая через Git sync (без актёра), — не closable и не закрывается ведущим', async () => {
   const f = fixture();
   try {
     const b = f.h.createBoard('Synced cancellation', '', 'main');
-    const local = f.h.addTask(b.id, input('Local issued task'));
-    const imported = f.h.addTask(b.id, input('Imported cancelled task'));
+    const first = f.h.addTask(b.id, input('First task'));
+    const second = f.h.addTask(b.id, input('Second task'));
     f.h.approve(b.id);
     const flow = new LeadWorkflow(f.h);
     const job = flow.start({ kind: 'board', id: b.id, authorRuntime: 'codex' });
     f.h.pause(false);
     const run = f.h.claim('test')!;
-    assert.equal(run.taskId, local.id);
+    const local = run.taskId;
+    const imported = local === first.id ? second.id : first.id;
     f.h.fail(run.id, run.token, 'gate failed', false, 'gate');
-    f.h.cancel(local.id, 'Replanned on another board', 'host');
-    f.h.cancel(imported.id, 'Cancelled by a teammate', 'operator');
-    // Запись из Git: актёр отмены — локальное поле, в синхронизированной задаче его нет.
-    f.store.change('test.synced', (s) => {
-      const t = s.tasks.find((x) => x.id === imported.id)!;
-      delete t.cancelledBy;
-      t.failureKind = 'budget';
+    // Участник команды отменил вторую задачу; её отмена приходит записями Git
+    // (recordsFromState → stateFromRecords, как git sync): актёр — локальное
+    // поле и не переносится.
+    f.store.change('git.synchronized', (state) => {
+      const remote = structuredClone(state);
+      remote.tasks.find((t) => t.id === imported)!.status = 'cancelled';
+      Object.assign(state, stateFromRecords(f.h, state, recordsFromState(f.h, remote), new Map()));
     });
+    const synced = f.store.read().tasks.find((t) => t.id === imported)!;
+    assert.equal(synced.status, 'cancelled');
+    assert.equal(synced.cancelledBy, undefined);
+    assert.equal(synced.failureKind, undefined, 'не бюджет: проверяется только актёр');
+    f.h.cancel(local, 'Replanned on another board', 'host');
     await loop(f);
     assert.equal(flow.get(job.key, job.owner).status, 'failed');
     const step = nextOf(f, b.id);
@@ -437,10 +444,99 @@ test('workflow_close: отмена без актёра (из Git sync, без л
     assert.equal((step.params as { closable?: true }).closable, undefined);
     assert.throws(
       () => closeDeadJob(f.h, b.id, 'Work was replanned on another board', 'lead'),
-      (e: unknown) => e instanceof DomainError && e.message.includes(imported.id),
+      (e: unknown) => e instanceof DomainError && e.message.includes(imported),
     );
+    closeDeadJob(f.h, b.id, 'Work was replanned on another board', 'operator');
+    assert.equal(nextOf(f, b.id), undefined);
   } finally {
     f.cleanup();
+  }
+});
+
+test('workflow_close: возврат в черновик и новое утверждение той же постановки не возвращают закрытие', async () => {
+  const f = fixture();
+  try {
+    const { board, stopped } = await deadBoard(f);
+    closeDeadJob(f.h, board, 'Work was replanned on another board', 'lead');
+    assert.equal(nextOf(f, board), undefined);
+    f.h.reopen(stopped, 'Back to a draft to look again');
+    f.h.approve(board);
+    f.h.cancel(stopped, 'Replanned on another board', 'host');
+    const step = nextOf(f, board);
+    assert.equal(step?.code, 'job-cancelled-task', JSON.stringify(step));
+  } finally {
+    f.cleanup();
+  }
+});
+
+test('board_park поверх закрытия: повтор задания или задачи с новой остановкой снимает и закрытие, и отметку', async () => {
+  for (const variant of ['workflow-retry', 'task-retry'] as const) {
+    const f = fixture();
+    try {
+      const { board, stopped, job } = await deadBoard(f);
+      closeDeadJob(f.h, board, 'Work was replanned on another board', 'lead');
+      setPark(f.h, board, { parked: true, reason: 'Owner: after the release' }, 'lead');
+      assert.ok(parkedHold(f.h, f.h.store.read(), board));
+      assert.equal(nextOf(f, board), undefined);
+      const flow = new LeadWorkflow(f.h);
+      if (variant === 'workflow-retry') {
+        flow.retry(job.key, job.owner);
+        await loop(f);
+        assert.equal(flow.get(job.key, job.owner).status, 'failed');
+      } else {
+        f.h.retry(stopped, undefined, 'host', { lead: true });
+        f.h.cancel(stopped, 'The user drops it after all', 'operator');
+      }
+      assert.equal(parkedHold(f.h, f.h.store.read(), board), undefined, variant);
+      const step = nextOf(f, board);
+      assert.equal(step?.code, 'job-cancelled-task', `${variant}: ${JSON.stringify(step)}`);
+      assert.ok(
+        (await cards(f)).some((c) => c.sourceKey === `board:${board}`),
+        variant,
+      );
+    } finally {
+      f.cleanup();
+    }
+  }
+});
+
+test('board_park: утверждение, пришедшее через Git sync, снимает отметку навсегда — и после возврата в черновик или отмены', () => {
+  for (const after of ['reopen', 'cancel'] as const) {
+    const f = fixture();
+    try {
+      const b = f.h.createBoard('Approved by a teammate', '', 'main');
+      const t = f.h.addTask(b.id, input('Deferred, then approved remotely'));
+      f.h.addTask(b.id, input('Still a draft'));
+      setPark(f.h, b.id, { parked: true, reason: 'Owner: after the release' }, 'lead');
+      assert.equal(nextOf(f), undefined);
+      // Утверждение участника команды: записи Git, без события board.approved.
+      f.store.change('git.synchronized', (state) => {
+        const remote = structuredClone(state);
+        const r = remote.tasks.find((x) => x.id === t.id)!;
+        r.status = 'ready';
+        r.approvedDigest = specDigest(r);
+        r.approval = { actor: 'operator', digest: r.approvedDigest };
+        Object.assign(
+          state,
+          stateFromRecords(f.h, state, recordsFromState(f.h, remote), new Map()),
+        );
+      });
+      assert.equal(f.store.read().tasks.find((x) => x.id === t.id)?.status, 'ready');
+      assert.equal(parkedHold(f.h, f.h.store.read(), b.id), undefined);
+      if (after === 'reopen') f.h.reopen(t.id, 'Back to a draft for now');
+      else f.h.cancel(t.id, 'Not needed before the release', 'host');
+      assert.ok(
+        ['draft', 'cancelled'].includes(f.store.read().tasks.find((x) => x.id === t.id)!.status),
+      );
+      assert.equal(
+        parkedHold(f.h, f.h.store.read(), b.id),
+        undefined,
+        `${after}: отметка не вернулась`,
+      );
+      assert.equal(nextOf(f)?.code, 'plan-unapproved', after);
+    } finally {
+      f.cleanup();
+    }
   }
 });
 

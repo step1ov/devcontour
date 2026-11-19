@@ -2092,6 +2092,22 @@ export class Store {
       : rows.map((e) => ({ ...e, data: JSON.parse(e.data) as unknown }));
   }
   /**
+   * События названных типов с номером журнала больше `after`, по
+   * возрастанию. Порядок — последовательность журнала, а не время записи:
+   * перевод часов назад её не ломает.
+   */
+  eventsAfterOfTypes(after: number, types: readonly string[]): AuditEvent[] {
+    if (!types.length) return [];
+    const rows = this.db
+      .prepare(
+        `SELECT * FROM main.events WHERE id > ? AND type IN (${types.map(() => '?').join(',')}) ORDER BY id`,
+      )
+      .all(after, ...types) as unknown as { id: number; at: string; type: string; data: string }[];
+    return this.components
+      ? this.components.events(rows)
+      : rows.map((e) => ({ ...e, data: JSON.parse(e.data) as unknown }));
+  }
+  /**
    * События названных типов не раньше `at`, новые сначала, без окна
    * `latestEvents`: для редкой выборки с известным началом (сбросы счёта
    * попыток с первой нужной попытки истории). Индекса нет — вызывающий
