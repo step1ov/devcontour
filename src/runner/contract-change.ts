@@ -433,21 +433,20 @@ export class ContractChanges {
     // находки, которые операция оставила вне ревью (F81), сначала
     // разбираются, переносятся или отменяются.
     const s = this.h.store.read();
-    const untriaged = (op.findingDrafts ?? []).filter((id) => {
+    // Все неразобранные находки этих досок, не только перепривязанные:
+    // ревью нового задания видит весь план.
+    const untriaged = [
+      ...new Set(
+        jobs.flatMap(
+          (j) => s.boards.find((b) => b.id === j.boardId)?.revisions.at(-1)?.taskIds ?? [],
+        ),
+      ),
+    ].filter((id) => {
       const t = s.tasks.find((x) => x.id === id);
-      return (
-        t?.status === 'draft' &&
-        unverifiedFinding(t) &&
-        jobs.some((j) =>
-          s.boards
-            .find((b) => b.id === j.boardId)
-            ?.revisions.at(-1)
-            ?.taskIds.includes(id),
-        )
-      );
+      return t?.status === 'draft' && unverifiedFinding(t);
     });
     const first = untriaged.length
-      ? ` Сначала разберите (edit-task), перенесите (task_move) или отмените (cancel --by host) неразобранные находки этих досок, оставленные вне ревью: ${untriaged.join(', ')} — новое задание отправит на ревью весь план доски, и ревьюер отверг бы их.`
+      ? ` Сначала разберите (edit-task), перенесите (task_move) или отмените (cancel --by host) неразобранные находки этих досок: ${untriaged.join(', ')} — новое задание отправит на ревью весь план доски, и ревьюер отверг бы их.`
       : '';
     return {
       jobs,

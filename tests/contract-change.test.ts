@@ -94,8 +94,15 @@ test('F81: untriaged finding drafts are rebound but stay drafts outside the plan
       role: 'backend',
       contracts: [s.c1.id],
     });
+    // An untriaged finding without the changed contract: not rebound, but
+    // the restarted job would review it with the whole plan.
+    const unrelated = s.h.addTask(findings.id, {
+      ...input('Unrelated finding'),
+      role: 'backend',
+    });
     mark(untriaged.id, false);
     mark(triaged.id, true);
+    mark(unrelated.id, false);
     // A live job of the findings board: the rebind invalidates it, and the
     // restart advice must not send the kept finding into its whole-plan review.
     const lead = new LeadWorkflow(s.h);
@@ -159,7 +166,9 @@ test('F81: untriaged finding drafts are rebound but stay drafts outside the plan
       done.boardJobs?.next ?? '',
       new RegExp(`Сначала разберите \\(edit-task\\).*${untriaged.id}.*workflow_start`),
     );
+    assert.ok(done.boardJobs?.next.includes(unrelated.id), 'every untriaged finding of the board');
     assert.ok(!done.boardJobs?.next.includes(triaged.id), 'only untriaged drafts are named');
+    assert.deepEqual(done.findingDrafts, [untriaged.id], 'the unrelated one was not rebound');
   } finally {
     await s.remove();
   }

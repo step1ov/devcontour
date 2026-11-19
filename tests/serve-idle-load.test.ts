@@ -162,27 +162,28 @@ test('F79: свои продления сроков и такт ожидающе
       await interval();
       assert.equal(budget.count, 1, 'первый такт выдаёт');
       const before = f.store.version();
-      // Продление под видом heartbeat, меняющее документ (срок поставки,
-      // совместной проверки), — счётчик сроков, не выдача.
-      const heartbeat = (i: number) =>
-        f.store.update('heartbeat', (draft) => {
-          draft.edit().pausedAt = `2026-01-01T00:00:0${i}.000Z`;
-        });
       for (let i = 0; i < 5; i++) {
         waitingStage();
         driverBeat();
-        heartbeat(i);
         await interval();
       }
       const after = f.store.version();
       // Поломка, которую ловит: ревизия не росла бы — тогда тест ничего не
       // проверял бы (шлюз держал бы и по `version()`).
       assert.ok(after.revision >= before.revision + 15, 'такты задания подняли ревизию данных');
-      assert.ok(
-        after.lease >= before.lease + 10,
-        'отметка прохода и heartbeat документа подняли счётчик сроков',
-      );
+      assert.ok(after.lease >= before.lease + 5, 'отметка прохода подняла счётчик сроков');
       assert.equal(budget.count, 1, 'свои нейтральные записи выдачу не открыли');
+
+      // Документ, изменённый под видом heartbeat, открывает выдачу: в такой
+      // транзакции движок может записать и то, что её меняет (снятое
+      // удержание). Поломка: «любой heartbeat — продление».
+      f.store.update('heartbeat', (draft) => {
+        draft.edit().pausedAt = '2026-01-01T00:00:00.000Z';
+      });
+      await interval();
+      assert.equal(budget.count, 2, 'heartbeat с изменённым документом открыл выдачу');
+      await interval();
+      assert.equal(budget.count, 2, 'и снова стоит');
 
       // Чужой процесс той же базы продлил то же задание — шлюз открыт: его
       // записи этот процесс не знает.
@@ -195,14 +196,14 @@ test('F79: свои продления сроков и такт ожидающе
         other.close();
       }
       await interval();
-      assert.equal(budget.count, 2, 'запись другого процесса открыла выдачу');
+      assert.equal(budget.count, 3, 'запись другого процесса открыла выдачу');
       await interval();
-      assert.equal(budget.count, 2, 'и снова стоит');
+      assert.equal(budget.count, 3, 'и снова стоит');
 
       // Своя локальная запись данных вне задания ведущего — открывает.
       f.store.atomic(() => f.store.saveLocal('signals', undefined, 'f79', { at: Date.now() }));
       await interval();
-      assert.equal(budget.count, 3, 'своя запись данных открыла выдачу');
+      assert.equal(budget.count, 4, 'своя запись данных открыла выдачу');
 
       // Откат нейтральной записи снимает и её учёт. Поломка: учёт оставался,
       // версия шлюза уходила на единицу назад, и следующая настоящая запись
