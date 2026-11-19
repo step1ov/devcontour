@@ -156,6 +156,8 @@ export interface QuestionSummarySection {
   answeredPendingLead: number;
   blockedTasks: number;
   items: QuestionSummaryItem[];
+  /** Записей больше предела. */
+  more: boolean;
 }
 
 const clip = (text: string, n: number) => {
@@ -172,12 +174,20 @@ export function questionSummary(
   s: Readonly<DevContourState>,
   href: (changeId: string, stage: QuestionStage, anchor: string) => string,
   redact: (text: string) => string = maskUrlCredentials,
+  /** Записей на раздел (главная панели показывает три). */
+  limit = SUMMARY_ITEMS,
 ): Record<QuestionSection, QuestionSummarySection> {
   const holds = questionHolds(s);
   const sections = Object.fromEntries(
     questionSections.map((x) => [
       x,
-      { open: 0, answeredPendingLead: 0, blockedTasks: 0, items: [] as QuestionSummaryItem[] },
+      {
+        open: 0,
+        answeredPendingLead: 0,
+        blockedTasks: 0,
+        items: [] as QuestionSummaryItem[],
+        more: false,
+      },
     ]),
   ) as Record<QuestionSection, QuestionSummarySection>;
   const rows: (QuestionSummaryItem & { section: QuestionSection })[] = [];
@@ -212,6 +222,7 @@ export function questionSummary(
       (a.status === b.status ? 0 : a.status === 'open' ? -1 : 1) || a.since.localeCompare(b.since),
   );
   for (const { section, ...row } of rows)
-    if (sections[section].items.length < SUMMARY_ITEMS) sections[section].items.push(row);
+    if (sections[section].items.length < limit) sections[section].items.push(row);
+    else sections[section].more = true;
   return sections;
 }

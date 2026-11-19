@@ -459,6 +459,13 @@ test('Сводка вопросов по разделам: счёт, удерж�
     assert.equal(sections.product.items[0].recommended, 'Убираем из постановки');
     assert.deepEqual(sections.product.items[0].blocks, [f.held.id]);
     assert.deepEqual(sections.development.items[0].links, { boardIds: [f.board.id] });
+    assert.equal(sections.product.more, false);
+    // Предел записей главной: лишние отмечены `more`, счёт прежний.
+    const short = questionSummary(f.store.read(), hrefs.preparation, undefined, 0);
+    assert.deepEqual(
+      [short.product.items.length, short.product.more, short.product.answeredPendingLead],
+      [0, true, 1],
+    );
     const app = await serve(f.h, new Scheduler(f.h, f.root), { port: 0 });
     try {
       const before = f.store.revision();

@@ -463,19 +463,17 @@ export async function serve(
         // До setup и после него; только чтение.
         if (req.method === 'GET' && path === '/api/questions/summary' && preparationStore) {
           const store = preparationStore;
-          json(
-            res,
-            200,
-            store.snapshot(() => ({
-              revision: store.revision(),
-              generatedAt: new Date().toISOString(),
-              sections: questionSummary(
-                store.read(),
-                hrefs.preparation,
-                attentionOf(store).redactor(),
-              ),
-            })),
-          );
+          // Замороженный общий снимок: опрос главной не разбирает документ заново.
+          const shared = store.readShared();
+          json(res, 200, {
+            revision: shared.revision,
+            generatedAt: new Date().toISOString(),
+            sections: questionSummary(
+              shared.state,
+              hrefs.preparation,
+              attentionOf(store).redactor(),
+            ),
+          });
           return;
         }
         // Отметки «прочитано» и «увидел» — локальные записи оператора, не решение.

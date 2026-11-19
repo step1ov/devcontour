@@ -2111,7 +2111,7 @@ taskIds}`, у задачи причина `owner_question_pending`. Правка
 - **Сводка вопросов.** `GET /api/questions/summary` (до setup и после,
   только чтение): по разделам — открытые, ответы без решения ведущего,
   удержанные черновики и до пяти записей `{id, changeId, kind, status, title,
-since, href, recommended, blocks, links}`.
+since, href, recommended, blocks, links}` и `more` (записей больше предела).
 
 ### 0.4.0-alpha.50
 
