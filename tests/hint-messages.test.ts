@@ -210,6 +210,22 @@ const samples: { [C in HintCode]: (HintSubject & Extract<HintOf, { code: C }>)[]
       job,
       loop: { step: 'stop' as const, taskId: 't-1', reason: 'cancelled' },
     })),
+    // Мёртвая доска, остановки — решения ведущего: закрытие задания (F86).
+    {
+      code: 'job-cancelled-task' as const,
+      params: {
+        taskId: 't-1',
+        by: 'host' as const,
+        budget: false,
+        live: false,
+        allCancelled: true as const,
+        closable: true as const,
+        error: 'boom',
+      },
+      boardId: 'board-1',
+      job,
+      loop: { step: 'stop' as const, taskId: 't-1', reason: 'cancelled' },
+    },
   ],
   'job-retry': [
     {
@@ -235,6 +251,12 @@ const samples: { [C in HintCode]: (HintSubject & Extract<HintOf, { code: C }>)[]
       job: { ...job, repositoryId: undefined },
     },
     { code: 'job-exhausted', params: { error: 'boom' }, boardId: 'board-1', job },
+    {
+      code: 'job-exhausted',
+      params: { error: 'boom', closable: true },
+      boardId: 'board-1',
+      job,
+    },
   ],
   'job-settled': [
     { code: 'job-settled', params: {}, boardId: 'board-1', job: { ...job, status: 'stale' } },
@@ -260,6 +282,24 @@ const samples: { [C in HintCode]: (HintSubject & Extract<HintOf, { code: C }>)[]
         leadPause: { reason: 'waiting for the schema' },
       },
       boardId: 'board-1',
+      job,
+    },
+  ],
+  'changeset-restart': [
+    {
+      code: 'changeset-restart',
+      params: {
+        changeSetId: 'CHG-1',
+        authorRuntime: 'codex',
+        operation: 'CC-1',
+        others: ['CHG-2'],
+        more: 3,
+      },
+      job: { ...job, status: 'stale' },
+    },
+    {
+      code: 'changeset-restart',
+      params: { changeSetId: 'CHG-1', authorRuntime: 'claude' },
       job,
     },
   ],
@@ -349,6 +389,34 @@ const samples: { [C in HintCode]: (HintSubject & Extract<HintOf, { code: C }>)[]
     {
       code: 'apply-rejected',
       params: { operator: true, operatorAnswers: true, proposed: true },
+      input: input1,
+    },
+  ],
+  'contract-change-required': [
+    {
+      code: 'contract-change-required',
+      params: {
+        contracts: ['contract-v1'],
+        files: ['docs/contracts/format.md'],
+        operator: false,
+        server: true,
+        floors: true,
+      },
+      input: input1,
+    },
+    {
+      code: 'contract-change-required',
+      params: {
+        contracts: ['contract-v1'],
+        operation: { id: 'CC-1', status: 'failed' },
+        operator: false,
+        stops,
+      },
+      input: input1,
+    },
+    {
+      code: 'contract-change-required',
+      params: { contracts: ['contract-v1', 'contract-w1'], waiting: true, operator: true },
       input: input1,
     },
   ],
@@ -611,8 +679,15 @@ test('Подсказки шага: новая конфигурация setup п�
  * выдачи»: черновик, отменённый человеком, тоже останавливает задание.
  * Намеренное изменение (F80): `plan.misrouted` говорит, что правка одной
  * роли оставляет находку неразобранной (для ждущей решения владельца).
+ * Намеренное изменение (F83): новый код `contract-change-required` — ответ
+ * принят как выбор, которому нужна поправка закреплённого контракта.
+ * Намеренное изменение (F84): новый код `changeset-restart` — перезапуск
+ * устаревшего задания ChangeSet.
+ * Намеренное изменение (F86): добавлены образцы `job-cancelled-task` и
+ * `job-exhausted` с `closable` (закрытие задания мёртвой доски,
+ * workflow_close); прежние образцы байтово прежние.
  */
-const ENGLISH_SAMPLES_SHA256 = 'be1aac0f25021981cf3b5abb181409c65a444ac3a9be2225b3a22f6b79c8c3f6';
+const ENGLISH_SAMPLES_SHA256 = '53b2d096975a858ad412a218ccd00cc886504d32df104eba92f2b8f2b81fde7e';
 
 test('Подсказки шага: английские тексты образцов закреплены', () => {
   assert.equal(

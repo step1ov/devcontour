@@ -26,6 +26,7 @@ import {
   type ContractChange,
 } from '../runner/contract-change.ts';
 import { boardTasks, planApproved, unapprovedTasks } from '../runner/lead-outlook.ts';
+import { parkedHold } from '../core/board-hold.ts';
 import {
   boardStep,
   exhaustedOnCancelled,
@@ -532,6 +533,7 @@ const inputActionable = new Set([
   'awaiting-answer',
   'answer-saved',
   'review-rejected',
+  'contract-change-required',
   'stale',
   'context-review',
   'ready-to-apply',
@@ -607,6 +609,10 @@ const inputSource: AttentionSourceRule = {
             !!proposal &&
             proposalText.length <= ATTENTION_LIMITS.prompt &&
             ctx.redact(proposalText) === proposalText;
+          // Исходная остановка не держится, а вопрос решает оператор (F39,
+          // F85): выход — его замена той же задачей одним действием, затем
+          // ведущий переносит тот же ответ в новую постановку.
+          const supersede = operator && !!r.moved && r.kind !== 'follow-up';
           let findings = '';
           if (rejected)
             engine.read((v) => {
@@ -620,7 +626,10 @@ const inputSource: AttentionSourceRule = {
             sourceVersion:
               `${r.version}:${r.state}:${r.round ?? 0}` +
               (proposal ? `:p${proposal.digest.slice(0, 12)}` : '') +
-              (r.resume ? `:r-${r.resume.phase}` : ''),
+              (r.resume ? `:r-${r.resume.phase}` : '') +
+              (r.route
+                ? `:cc${r.route.waiting ? '-w' : ''}${r.route.operation ? `-${r.route.operation.id}-${r.route.operation.status}` : ''}`
+                : ''),
             source: 'input',
             category: operator ? 'question' : 'technical',
             actor: operator ? 'operator' : 'lead',
@@ -630,9 +639,11 @@ const inputSource: AttentionSourceRule = {
                 ? `Исполнитель спрашивает по задаче «${title}»`
                 : apply
                   ? `Ответ по задаче «${title}» готов к применению`
-                  : r.resume
-                    ? `Ответ по задаче «${title}»: DevContour не может продолжить сам`
-                    : `Вопрос исполнителя по задаче «${title}»: ${inputStateLabels[r.state] ?? r.state}`,
+                  : r.state === 'contract-change-required'
+                    ? `Ответ по задаче «${title}» принят: нужно изменение контракта — ведёт ведущий`
+                    : r.resume
+                      ? `Ответ по задаче «${title}»: DevContour не может продолжить сам`
+                      : `Вопрос исполнителя по задаче «${title}»: ${inputStateLabels[r.state] ?? r.state}`,
             // Следующий шаг — словами оператора: поле `next` сводки — указание
             // ведущему агенту по-английски, с операциями агентского API.
             // Повторные остановки вопросом — первой строкой: длинный вопрос
@@ -648,6 +659,14 @@ const inputSource: AttentionSourceRule = {
                       : ': он длинный или содержит скрытые данные — прочитайте и подтвердите его в карточке задачи. ')
                   : '') +
                 (rejected ? `Ревью отклонило ответ (раунд ${r.round}): ${findings} — ` : '') +
+                // Маршрут contract-change (F83): какие контракты и чья операция.
+                (r.route
+                  ? `Ответ — выбор, которому нужна поправка закреплённого контракта ${r.route.contracts.map((c) => `«${c.title}»`).join(', ')}` +
+                    (r.route.operation
+                      ? ` (операция ${r.route.operation.id}: ${r.route.operation.status})`
+                      : '') +
+                    '. '
+                  : '') +
                 (question ? `${question} — ` : '') +
                 `Дальше: ${inputNextText({ ...r, operatorMode })}.`,
             ),
@@ -700,6 +719,16 @@ const inputSource: AttentionSourceRule = {
                       ...(rejected && r.round !== undefined
                         ? { round: r.round, prompt: findings }
                         : {}),
+                    },
+                  ]
+                : []),
+              ...(supersede
+                ? [
+                    {
+                      id: 'supersede',
+                      kind: 'domain' as const,
+                      label: 'Заменить вопрос той же задачей',
+                      input: 'confirm' as const,
                     },
                   ]
                 : []),
@@ -1584,7 +1613,10 @@ const planSource: AttentionSourceRule = {
         covered: unclaimed(ctx, why.drafts),
         boards: [board.id],
       };
-      if (!approvable.length)
+      if (!approvable.length) {
+        // Отложенная доска (F86): карточки ведущего нет и здесь; решение
+        // оператора об утверждении ниже отметка не прячет.
+        if (parkedHold(h, s, board.id)) return [];
         return [
           {
             ...base,
@@ -1595,6 +1627,7 @@ const planSource: AttentionSourceRule = {
             actions: [handoffOf(ctx)],
           },
         ];
+      }
       return [
         {
           ...base,
@@ -2120,6 +2153,7 @@ const ownCas = new Set([
   'input/answer',
   'input/confirm-proposal',
   'input/apply',
+  'input/supersede',
   'corpus/approve',
   'changeset/deploy-preview',
 ]);
@@ -2297,6 +2331,15 @@ const actionHandlers: Record<string, (a: ActContext) => ActOutcome> = {
         ...(input.confirmRejectedRound !== undefined
           ? { confirmRejectedRound: input.confirmRejectedRound }
           : {}),
+      }),
+    };
+  },
+  // Замена вопроса той же задачей (F85): право и сверка версии — в операции.
+  'input/supersede': ({ ctx, item, root }) => {
+    const b = basisOf<{ taskId: string; requestId: string; expectedVersion: number }>(item);
+    return {
+      result: new InputService(ctx.h!, root).supersedeInTask(b.taskId, b.requestId, {
+        expectedVersion: b.expectedVersion,
       }),
     };
   },

@@ -233,5 +233,22 @@
 // предела ответа md — раздел DevContour ссылается на host.next.detail и
 // commands того же ответа вместо повтора их текста; прочие операции
 // байтово прежние.
-export const CATALOG_DIGEST = '400fda86407382ab00f5e5b5d6058a6b5ea23adc3ee4812c932d3412f9d90d3d';
+// Намеренное изменение (F83): состояние вопроса contract-change-required в
+// фильтре input_list; описания input_list, input_review и session_handoff
+// называют маршрут contract-change (правило находки contract-change:<id>,
+// route и contracts результата ревью, код шага contract-change-required);
+// прочие операции байтово прежние.
+// Намеренное изменение (F84): описание contract_change_status называет
+// boardJobs.changesets (задания ChangeSet, устаревшие после перепривязки или
+// перезакрепления контекста), session_handoff — устаревшие задания в
+// host.changesets (stale.command, stale.operation) и код шага
+// changeset-restart; прочие операции байтово прежние.
+// Намеренное изменение (F86): новые пишущие операции workflow_close (закрыть
+// упавшее задание мёртвой доски) после workflow_retry и board_park (отложить
+// доску или снять отметку) после board_create; описание session_handoff
+// называет params.closable, отложенные доски без шага и host.parked;
+// прочие операции байтово прежние. Ревью 1: причина до 300 знаков, until —
+// строгая дата ISO 8601, описания называют эпизод закрытия и снятие отметки
+// навсегда.
+export const CATALOG_DIGEST = '08c2f9cf0e935bbd817e42a888bbfe954cfe45987b55dfd231638619c03a2849';
 export const SNAPSHOT_VERSION = '0.4.0-alpha.7';

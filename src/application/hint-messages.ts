@@ -66,10 +66,16 @@ export interface HintParamMap {
      * задачи. Нет поля — в ревизии есть неотменённые задачи.
      */
     allCancelled?: true;
+    /**
+     * Доска мертва (все задачи отменены), и каждую выданную отменённую
+     * задачу отменил ведущий или граф: ведущий может закрыть упавшее
+     * задание (`workflow_close`, F86), если работа уже перепланирована.
+     */
+    closable?: true;
     error?: string;
   };
-  /** Попытки задания исчерпаны. */
-  'job-exhausted': { error?: string };
+  /** Попытки задания исчерпаны; `closable` — как у `job-cancelled-task`. */
+  'job-exhausted': { error?: string; closable?: true };
   /** Задание текущего входа уже stale или completed. */
   'job-settled': None;
   /** Задание не продолжается (применение политики, другой процесс). */
@@ -90,6 +96,20 @@ export interface HintParamMap {
     leadPause?: { reason?: string };
     operation?: string;
     others?: string[];
+  };
+  /**
+   * Задание ChangeSet `changeSetId` начато по прежнему входу и не
+   * продолжится (F84): вход набора сменился после его старта (`operation` —
+   * завершённая операция изменения контракта, чья перепривязка или
+   * перенастройка его сменила); `others` — другие наборы с таким же заданием.
+   */
+  'changeset-restart': {
+    changeSetId: string;
+    authorRuntime: string;
+    operation?: string;
+    others?: string[];
+    /** Сколько ещё таких наборов сверх `others`. */
+    more?: number;
   };
   /** Пауза выдачи, её снимет действующее задание; `pause` — причина паузы. */
   'pause-lift': { pause: string; stage: number };
@@ -128,6 +148,24 @@ export interface HintParamMap {
    * `proposed` — предложение исправления уже ждёт оператора (F37).
    */
   'apply-rejected': { operator: boolean; operatorAnswers?: boolean; proposed?: boolean } & Stops;
+  /**
+   * Ревью приняло ответ как выбор, которому нужна только поправка закреплённых
+   * контрактов (F83): ход ведущего — contract-change. `contracts` — ID,
+   * `files` — их файлы; `operation` — операция после раунда; `waiting` —
+   * задача перепривязана и ждёт завершения операции и утверждения;
+   * `operator` — approvalMode operator (ответ применяет оператор);
+   * `server` — ответ дал оператор: после перепривязки ревью того же ответа
+   * проводит проход сервера; `floors` — засчитывается только операция.
+   */
+  'contract-change-required': {
+    contracts: string[];
+    files?: string[];
+    operation?: { id: string; status: string };
+    waiting?: true;
+    operator: boolean;
+    server?: true;
+    floors?: true;
+  } & Stops;
   /** Ответ применён, задача ждёт следующей попытки. */
   'apply-claim': Stops;
   /** Ответ сохранён, но не применён (`state`). */
@@ -310,6 +348,9 @@ function planEn(p: HintParamMap['plan-unapproved'], s: HintSubject) {
 }
 
 const failedEn = (error: string | undefined) => (error ? ': ' + error : '');
+/** Закрытие задания мёртвой доски ведущим (`closable`, F86). */
+const closeEn = (board: string) =>
+  ` Every task of this board is cancelled by the lead or the graph: if the work was replanned elsewhere or dropped, close this dead job instead — workflow_close {"boardId": ${JSON.stringify(board)}, "reason": "…"} (devcontour workflow-close --board ${board} --reason … --by host); it accepts nothing and leaves host.next and the attention center.`;
 
 const en: Catalog = {
   // operator-only: шаг только режима `approvalMode: operator` (OPERATOR_ONLY_HINTS).
@@ -358,12 +399,12 @@ const en: Catalog = {
     const second = p.allCancelled
       ? `(2) every task of the revision is cancelled, so the board cannot be accepted: when the user decides so, the lead plans the work on a new board (plan_import without boardId, then workflow_start {"kind": "board"}; plan_import with boardId waits for an accepted revision)`
       : `(2) the operator accepts the revision without task ${task} in the panel (the accept action on the board page) once its other tasks are done; (3) a replacement goes on a new board (plan_import without boardId, then workflow_start {"kind": "board"} for it; move drafts that belong there with task_move): a task added to this revision would run with no job to repair or accept it`;
-    return `The lead workflow job of board ${s.boardId!} ${p.live ? 'stops at its next step' : 'stopped'}${failedEn(p.error)}: task ${task} was ${who}${p.budget ? ' when it hit a budget' : ''}, and an issued task does not leave the job (D46, docs/decisions.md), so workflow_retry and workflow_start do not move it. Recovery paths: ${first}; ${second}. ${owner}`;
+    return `The lead workflow job of board ${s.boardId!} ${p.live ? 'stops at its next step' : 'stopped'}${failedEn(p.error)}: task ${task} was ${who}${p.budget ? ' when it hit a budget' : ''}, and an issued task does not leave the job (D46, docs/decisions.md), so workflow_retry and workflow_start do not move it. Recovery paths: ${first}; ${second}. ${owner}${p.closable ? closeEn(s.boardId!) : ''}`;
   },
   'job-retry': (p, s) =>
     `The lead workflow job of board ${s.boardId!} failed${failedEn(p.error)}. On retry the job loop ${loopEn(s.loop!)}: workflow_retry ${retryArgs(s)}.`,
   'job-exhausted': (p, s) =>
-    `The lead workflow job of board ${s.boardId!} used all ${s.job!.maxAttempts} attempts${failedEn(p.error)}. workflow_start returns this failed job until the board input changes: diagnose, then change the board or its tasks (a new input registers a new job) or ask the user.`,
+    `The lead workflow job of board ${s.boardId!} used all ${s.job!.maxAttempts} attempts${failedEn(p.error)}. workflow_start returns this failed job until the board input changes: diagnose, then change the board or its tasks (a new input registers a new job) or ask the user.${p.closable ? closeEn(s.boardId!) : ''}`,
   'job-settled': (_, s) =>
     `A lead workflow job for exactly the current input of board ${s.boardId!} is already ${s.job!.status}${s.job!.status === 'stale' ? ' (the input changed and then returned to it)' : ''}; workflow_start returns it unchanged and it will not run. Change the board or its tasks to register a new job, or continue by hand (queue_set {"paused": false} or devcontour queue --start --by host, devcontour retry --by host, accept; docs/cli.md), or ask the user.`,
   'job-idle': (_, s) =>
@@ -380,6 +421,11 @@ const en: Catalog = {
       : '') +
     (p.others?.length ? ` Restart the jobs of boards ${p.others.join(', ')} the same way.` : '') +
     (p.running ? ' An attempt is running: the server finishes it without a job.' : ''),
+  'changeset-restart': (p, s) =>
+    `The lead workflow job of ChangeSet ${p.changeSetId}${s.job ? ` (${s.job.status}, key ${s.job.key})` : ''} was started on an earlier input: ${p.operation ? `contract-change ${p.operation} rebound the tasks of its boards or repinned the context` : 'the tasks of its boards, their contracts or the execution policy changed'} after it started, so it will not continue (it closes as stale), and release acceptance has no job. Start a new job: workflow_start {"kind": "changeset", "id": ${JSON.stringify(p.changeSetId)}, "authorRuntime": ${JSON.stringify(p.authorRuntime)}} with the DevContour server running; it waits for its boards again (host.changesets) and runs the joint verification; it neither needs nor lifts a queue pause.` +
+    (p.others?.length
+      ? ` Restart the jobs of ChangeSets ${p.others.join(', ')}${p.more ? ` and ${p.more} more (workflow_status)` : ''} the same way.`
+      : ''),
   'pause-lift': (p, s) =>
     `Dispatch is paused (${p.pause}); the lead workflow job of board ${s.boardId!} lifts the pause at stage ${p.stage}${s.loop!.step === 'lift-pause' ? '' : ' after it ' + loopEn(s.loop!)}. ${SERVER_EN}`,
   'pause-operator': (p, s) =>
@@ -432,6 +478,30 @@ const en: Catalog = {
           : 'the operator corrects the answer; propose a corrected answer with input_propose for the operator to confirm, or reopen and respecify the task'
         : 'correct the answer, or reopen and respecify the task') +
       `${p.operator ? '; the operator may apply it only with explicit confirmation' : ''}.` +
+      repeatedEn(taskId, p.stops)
+    );
+  },
+  'contract-change-required': (p, s) => {
+    const { requestId, taskId } = s.input!;
+    const named = p.contracts.join(', ') + (p.files?.length ? ` (${p.files.join(', ')})` : '');
+    const op = p.operation;
+    const step =
+      op && op.status !== 'completed'
+        ? `contract-change ${op.id} is ${op.status}: continue it (devcontour contract-change --id ${op.id})${op.status === 'failed' ? ', revise it (--revise --expected-version N) or abandon it (--abandon; the question then returns to the operator)' : ''}`
+        : p.waiting
+          ? 'the task is rebound and waits for the operation to complete and for its approval (contract_change_status, workflow_start or review-plan --tasks)'
+          : 'write the amended contract file and run devcontour contract-change --file proposal.json --author-runtime codex|claude (the same title and file)';
+    const after = p.operator
+      ? 'input_context and input_review with the same answer; the operator applies it in the panel'
+      : p.server
+        ? 'DevContour reviews and applies the same answer itself when the server runs (otherwise input_context, input_review, input_target, input_apply)'
+        : 'input_context, input_review, input_target, input_apply with the same answer';
+    return (
+      `The answer to ${requestId} is accepted; its only conflict is an amendment of the pinned contract ${named}, so the lead changes the contract: ${step}.` +
+      (p.floors
+        ? ' The question has floors: only a completed contract-change operation counts, not a manual registration and task edit.'
+        : '') +
+      ` After the rebinding and the re-approval of task ${taskId}: ${after}. The operator does not answer again.` +
       repeatedEn(taskId, p.stops)
     );
   },
@@ -578,6 +648,9 @@ function planRu(p: HintParamMap['plan-unapproved'], s: HintSubject) {
 }
 
 const failedRu = (error: string | undefined) => (error ? ': ' + error : '');
+/** Закрытие задания мёртвой доски ведущим (`closable`, F86). */
+const closeRu = (board: string) =>
+  ` Все задачи доски отменены ведущим или графом: если работа уже перепланирована или не нужна, закройте мёртвое задание — workflow_close {"boardId": ${JSON.stringify(board)}, "reason": "…"} (devcontour workflow-close --board ${board} --reason … --by host); закрытие ничего не принимает и убирает задание из host.next и центра внимания.`;
 
 const ru: Catalog = {
   // operator-only: шаг только режима `approvalMode: operator` (OPERATOR_ONLY_HINTS).
@@ -624,12 +697,12 @@ const ru: Catalog = {
     const second = p.allCancelled
       ? `(2) все задачи ревизии отменены, принимать нечего: по решению пользователя ведущий планирует работу на новой доске (plan_import без boardId, затем workflow_start {"kind": "board"}; plan_import с boardId ждёт принятой ревизии)`
       : `(2) оператор принимает ревизию без задачи ${task} в панели (страница доски, «Принять доску»), когда остальные задачи готовы; (3) замена — на новой доске (plan_import без boardId, затем для неё workflow_start {"kind": "board"}; черновики, которым место там, переносит task_move): задача, добавленная в эту ревизию, пошла бы без задания, которое её чинит и принимает`;
-    return `Задание ведущего доски ${s.boardId!} ${p.live ? 'остановится на следующем такте' : 'остановлено'}${failedRu(p.error)}: задача ${task} ${who}${p.budget ? ', когда упёрлась в бюджет' : ''}, а выданная задача из работы задания не выпадает (D46, docs/decisions.md), поэтому workflow_retry и workflow_start его не продвинут. Пути восстановления: ${first}; ${second}. ${owner}`;
+    return `Задание ведущего доски ${s.boardId!} ${p.live ? 'остановится на следующем такте' : 'остановлено'}${failedRu(p.error)}: задача ${task} ${who}${p.budget ? ', когда упёрлась в бюджет' : ''}, а выданная задача из работы задания не выпадает (D46, docs/decisions.md), поэтому workflow_retry и workflow_start его не продвинут. Пути восстановления: ${first}; ${second}. ${owner}${p.closable ? closeRu(s.boardId!) : ''}`;
   },
   'job-retry': (p, s) =>
     `Задание ведущего доски ${s.boardId!} упало${failedRu(p.error)}. После workflow_retry цикл задания ${loopRu(s.loop!)}: workflow_retry ${retryArgs(s)}.`,
   'job-exhausted': (p, s) =>
-    `Задание ведущего доски ${s.boardId!} израсходовало все попытки (${s.job!.maxAttempts})${failedRu(p.error)}. Пока вход доски не изменится, workflow_start возвращает это упавшее задание: разберите причину, затем измените доску или её задачи (новый вход регистрирует новое задание) либо спросите пользователя.`,
+    `Задание ведущего доски ${s.boardId!} израсходовало все попытки (${s.job!.maxAttempts})${failedRu(p.error)}. Пока вход доски не изменится, workflow_start возвращает это упавшее задание: разберите причину, затем измените доску или её задачи (новый вход регистрирует новое задание) либо спросите пользователя.${p.closable ? closeRu(s.boardId!) : ''}`,
   'job-settled': (_, s) =>
     `Задание ведущего для точно такого же текущего входа доски ${s.boardId!} уже в состоянии ${s.job!.status}${s.job!.status === 'stale' ? ' (вход менялся и вернулся к прежнему)' : ''}; workflow_start вернёт его без изменений, и оно не будет исполняться. Измените доску или её задачи, чтобы зарегистрировать новое задание, или продолжайте вручную (queue_set {"paused": false} или devcontour queue --start --by host, devcontour retry --by host, accept; docs/cli.md), или спросите пользователя.`,
   'job-idle': (_, s) =>
@@ -646,6 +719,11 @@ const ru: Catalog = {
       : '') +
     (p.others?.length ? ` Так же перезапустите задания досок ${p.others.join(', ')}.` : '') +
     (p.running ? ' Идёт попытка: сервер завершит её и без задания.' : ''),
+  'changeset-restart': (p, s) =>
+    `Задание ведущего ChangeSet ${p.changeSetId}${s.job ? ` (${s.job.status}, ключ ${s.job.key})` : ''} начато на прежнем входе: ${p.operation ? `операция contract-change ${p.operation} перепривязала задачи его досок или перезакрепила контекст` : 'после его старта изменились задачи его досок, их контракты или политика исполнения'}, поэтому оно не продолжится (закроется как stale), и у приёмки релиза нет задания. Начните новое задание: workflow_start {"kind": "changeset", "id": ${JSON.stringify(p.changeSetId)}, "authorRuntime": ${JSON.stringify(p.authorRuntime)}} при работающем сервере DevContour; оно снова ждёт приёмки своих досок (host.changesets) и проводит совместную проверку; пауза очереди ему не мешает, и он её не снимает.` +
+    (p.others?.length
+      ? ` Так же перезапустите задания ChangeSet ${p.others.join(', ')}${p.more ? ` и ещё ${p.more} (workflow_status)` : ''}.`
+      : ''),
   'pause-lift': (p, s) =>
     `Выдача на паузе (${p.pause}); задание ведущего доски ${s.boardId!} снимет паузу на стадии ${p.stage}${s.loop!.step === 'lift-pause' ? '' : '; до этого цикл задания ' + loopRu(s.loop!)}. ${SERVER_RU}`,
   'pause-operator': (p, s) =>
@@ -698,6 +776,30 @@ const ru: Catalog = {
           : 'ответ исправляет оператор; предложите исправленный ответ через input_propose, чтобы оператор подтвердил его, или переоткройте задачу с новой постановкой'
         : 'исправьте ответ или переоткройте задачу с новой постановкой') +
       `${p.operator ? '; оператор может применить его только с явным подтверждением' : ''}.` +
+      repeatedRu(taskId, p.stops)
+    );
+  },
+  'contract-change-required': (p, s) => {
+    const { requestId, taskId } = s.input!;
+    const named = p.contracts.join(', ') + (p.files?.length ? ` (${p.files.join(', ')})` : '');
+    const op = p.operation;
+    const step =
+      op && op.status !== 'completed'
+        ? `contract-change ${op.id} в состоянии ${op.status}: продолжите её (devcontour contract-change --id ${op.id})${op.status === 'failed' ? ', пересмотрите (--revise --expected-version N) или отмените (--abandon; тогда вопрос вернётся оператору)' : ''}`
+        : p.waiting
+          ? 'задача перепривязана и ждёт завершения операции и утверждения (contract_change_status, workflow_start или review-plan --tasks)'
+          : 'запишите исправленный файл контракта и выполните devcontour contract-change --file proposal.json --author-runtime codex|claude (то же название и файл)';
+    const after = p.operator
+      ? 'input_context и input_review с тем же ответом; применяет оператор в панели'
+      : p.server
+        ? 'тот же ответ DevContour проверит и применит сам, пока работает сервер (иначе input_context, input_review, input_target, input_apply)'
+        : 'input_context, input_review, input_target, input_apply с тем же ответом';
+    return (
+      `Ответ на ${requestId} принят; его единственный конфликт — поправка закреплённого контракта ${named}, поэтому контракт меняет ведущий: ${step}.` +
+      (p.floors
+        ? ' У вопроса есть минимумы: засчитывается только завершённая операция contract-change, а не ручная регистрация и правка задачи.'
+        : '') +
+      ` После перепривязки и нового утверждения задачи ${taskId}: ${after}. Оператор заново не отвечает.` +
       repeatedRu(taskId, p.stops)
     );
   },

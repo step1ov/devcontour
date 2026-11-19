@@ -8,14 +8,16 @@ import { checksWarnings } from '../src/runner/agent-control.ts';
 import {
   ContractChanges,
   clipAtBoundary,
+  invalidates,
   type ContractChange,
 } from '../src/runner/contract-change.ts';
+import { Workspace } from '../src/core/workspace.ts';
 import { contractImpact } from '../src/runner/contract-impact.ts';
 import { STALE_BASE } from '../src/runner/base-update.ts';
 import { type AgentAdapter, type AgentRequest } from '../src/runner/adapters.ts';
 import { readyTasks } from '../src/core/graph.ts';
 import { command } from '../src/runner/process.ts';
-import { reviewers, stage } from './contract-change-fixture.ts';
+import { reviewers, stage, withContextPack } from './contract-change-fixture.ts';
 import { input, withQuotedGitPaths } from './helpers.ts';
 import { LeadWorkflow } from '../src/core/lead-workflow.ts';
 import { devcontourHandoff } from '../src/application/handoff.ts';
@@ -737,4 +739,306 @@ test('F66: a rebind that invalidates a running board job names the job and the r
   } finally {
     await s.remove();
   }
+});
+
+test('F84: a contract change reports the ChangeSet job it made stale; session_handoff keeps it with the restart', async () => {
+  const s = await stage();
+  try {
+    const lead = new LeadWorkflow(s.h);
+    const boardJob = lead.start({ kind: 'board', id: s.board.id, authorRuntime: 'codex' });
+    assert.equal(lead.claim(boardJob.key, boardJob.owner)?.status, 'running');
+    const release = new Workspace(s.h).create({
+      title: 'Release r1',
+      description: 'Joint verification of the catalog board.',
+      boardIds: [s.board.id],
+    });
+    const csJob = lead.start({ kind: 'changeset', id: release.id, authorRuntime: 'claude' });
+    // The serve loop takes the ChangeSet stage every tick: right after the
+    // rebind the queue closes the job as stale, before the operation ends —
+    // the job the old view never named.
+    const started = await s.changes().start(s.proposal, 'codex');
+    const done = await s
+      .changes((step) => {
+        if (step === 'rebind') assert.equal(lead.claim(csJob.key, csJob.owner), undefined);
+      })
+      .advance((started as { operation: ContractChange }).operation.id);
+    assert.equal(done.status, 'completed', done.error);
+    const closed = lead.get(csJob.key, csJob.owner);
+    assert.equal(closed.status, 'stale', 'the queue closed the ChangeSet job during the operation');
+    assert.ok(closed.finishedAt! >= done.startedAt && closed.finishedAt! <= done.finishedAt!);
+    assert.deepEqual(
+      done.boardJobs?.jobs.map((j) => j.boardId),
+      [s.board.id],
+    );
+    assert.deepEqual(
+      done.boardJobs?.changesets?.map((j) => ({ id: j.changeSetId, key: j.key, status: j.status })),
+      [{ id: release.id, key: csJob.key, status: 'stale' }],
+    );
+    const restart = `workflow_start {"kind": "changeset", "id": "${release.id}", "authorRuntime": "claude"}`;
+    assert.ok(done.boardJobs?.next.includes(restart), done.boardJobs?.next);
+    // The history keeps the record after the restarts.
+    const event = done.history.find((e) => e.event === 'jobs-invalidated');
+    assert.match(
+      event?.detail ?? '',
+      new RegExp(`changeset ${release.id} ${csJob.key.slice(0, 8)} stale`),
+    );
+    assert.match(event?.detail ?? '', new RegExp(`board ${s.board.id}`));
+
+    // session_handoff: the stale ChangeSet stays in host.changesets with
+    // the restart, and host.next names the board restart first.
+    let handoff = devcontourHandoff(s.h, {});
+    assert.deepEqual(handoff.host.changesets, [
+      {
+        changeSetId: release.id,
+        job: { key: csJob.key, status: 'stale', stage: 0, attempts: 0 },
+        stale: { operation: done.id, command: restart },
+      },
+    ]);
+    assert.equal(handoff.host.next?.code, 'board-restart', JSON.stringify(handoff.host.next));
+    // The same under the lead's pause over the base-check wait the moved
+    // base left (the order of the field run): the board restart, not
+    // queue_set — the lead pause no job lifts.
+    s.h.pause(true, 'operator', 'lead', 'contract change');
+    s.store.change('fixture.wait', (st) => {
+      st.waits = [{ kind: 'base-check', at: new Date().toISOString(), detail: 'База перенесена' }];
+      return {};
+    });
+    handoff = devcontourHandoff(s.h, {});
+    assert.equal(handoff.host.next?.code, 'board-restart', JSON.stringify(handoff.host.next));
+    s.store.change('fixture.wait', (st) => {
+      st.waits = [];
+      return {};
+    });
+    s.h.pause(false, 'operator', 'lead');
+    // The board job restarted: the ChangeSet restart is the next step, with
+    // the operation, under a lead pause too (the ChangeSet job lifts none).
+    lead.start({ kind: 'board', id: s.board.id, authorRuntime: 'codex' });
+    s.h.pause(true, 'operator', 'lead', 'waiting for the release');
+    handoff = devcontourHandoff(s.h, {});
+    const next = handoff.host.next;
+    assert.equal(next?.action, 'workflow_start', JSON.stringify(next));
+    assert.equal(next?.code, 'changeset-restart');
+    assert.equal(next?.job?.key, csJob.key);
+    assert.deepEqual(next?.params, {
+      changeSetId: release.id,
+      authorRuntime: 'claude',
+      operation: done.id,
+    });
+    assert.ok(next?.detail.includes(restart), next?.detail);
+    // A board-scoped pack of another board does not name it.
+    const other = s.h.createBoard('Elsewhere');
+    s.h.addTask(other.id, input('Elsewhere task'));
+    s.h.approve(other.id);
+    assert.equal(devcontourHandoff(s.h, { boardId: other.id }).host.changesets, undefined);
+    // The new ChangeSet job: no stale entry, no restart step, nothing in the operation view.
+    const fresh = lead.start({ kind: 'changeset', id: release.id, authorRuntime: 'claude' });
+    handoff = devcontourHandoff(s.h, {});
+    assert.notEqual(handoff.host.next?.code, 'changeset-restart');
+    assert.ok(
+      !handoff.host.changesets?.some((c) => c.stale),
+      JSON.stringify(handoff.host.changesets),
+    );
+    assert.ok(handoff.host.changesets?.some((c) => c.job.key === fresh.key));
+    assert.equal(s.changes().view(s.changes().get(done.id)).boardJobs, undefined);
+  } finally {
+    await s.remove();
+  }
+});
+
+test('F84: a contract change that repinned the context invalidates the jobs of every board and ChangeSet started before it; a job started after the repin is not its', async () => {
+  const s = await stage();
+  try {
+    const ctx = await withContextPack(s);
+    const lead = new LeadWorkflow(s.h);
+    // A board without the changed contract: the rebind does not touch it,
+    // the repin of the context changes its execution policy.
+    const other = s.h.createBoard('Entries');
+    s.h.addTask(other.id, input('Entries task'));
+    s.h.approve(other.id);
+    const otherJob = lead.start({ kind: 'board', id: other.id, authorRuntime: 'claude' });
+    const release = new Workspace(s.h).create({
+      title: 'Release r2',
+      description: 'Only the entries board.',
+      boardIds: [other.id],
+    });
+    const csJob = lead.start({ kind: 'changeset', id: release.id, authorRuntime: 'claude' });
+    // A third board whose job was already stale before the operation: its
+    // staleness is not the operation's.
+    const old = s.h.createBoard('Old');
+    s.h.addTask(old.id, input('Old task'));
+    s.h.approve(old.id);
+    const oldJob = lead.start({ kind: 'board', id: old.id, authorRuntime: 'codex' });
+    s.store.change('fixture.edit', (st) => {
+      st.boards.find((b) => b.id === old.id)!.description = 'Edited before the change';
+    });
+    const before = ctx.digest();
+    const started = await s.changes().start(s.proposal, 'codex');
+    const id = (started as { operation: ContractChange }).operation.id;
+    let fresh: ReturnType<LeadWorkflow['start']> | undefined;
+    const done = await s
+      .changes((step) => {
+        // Right after the repin: a ChangeSet job on the new input (the
+        // lead restarted it early) is current at completion.
+        if (step === 'reconfigure') {
+          const r3 = new Workspace(s.h).create({
+            title: 'Release r3',
+            description: 'Started after the repin.',
+            boardIds: [other.id],
+          });
+          fresh = lead.start({ kind: 'changeset', id: r3.id, authorRuntime: 'codex' });
+        }
+      })
+      .advance(id);
+    assert.equal(done.status, 'completed', done.error);
+    assert.notEqual(ctx.digest(), before, 'the operation repinned the context');
+    assert.ok(done.config?.after);
+    assert.ok(!done.boards.includes(other.id));
+    assert.ok(s.changes().get(id).staleBefore?.includes(oldJob.key), 'stale before the operation');
+    // The completion record: the entries board job and its ChangeSet job,
+    // not the job stale before it, not the job started after the repin.
+    assert.ok(done.invalidated?.boards.some((j) => j.key === otherJob.key));
+    assert.ok(!done.invalidated?.boards.some((j) => j.key === oldJob.key));
+    assert.deepEqual(
+      done.invalidated?.changesets.map((j) => j.key),
+      [csJob.key],
+    );
+    assert.ok(
+      done.boardJobs?.jobs.some((j) => j.boardId === other.id && j.key === otherJob.key),
+      JSON.stringify(done.boardJobs),
+    );
+    assert.ok(!done.boardJobs?.jobs.some((j) => j.key === oldJob.key));
+    assert.deepEqual(
+      done.boardJobs?.changesets?.map((j) => j.key),
+      [csJob.key],
+    );
+    assert.match(done.boardJobs?.next ?? '', /перенастройка контекста/);
+    const event = done.history.find((e) => e.event === 'jobs-invalidated');
+    assert.match(
+      event?.detail ?? '',
+      new RegExp(`changeset ${release.id} ${csJob.key.slice(0, 8)}`),
+    );
+    assert.match(event?.detail ?? '', new RegExp(`board ${other.id} ${otherJob.key.slice(0, 8)}`));
+    // An unrelated edit after the completion makes the early ChangeSet job
+    // stale: the completed operation does not claim it.
+    s.store.change('fixture.later', (st) => {
+      st.boards.find((b) => b.id === other.id)!.description = 'Independent edit after completion';
+    });
+    assert.equal(lead.claim(fresh!.key, fresh!.owner), undefined);
+    assert.equal(lead.get(fresh!.key, fresh!.owner).status, 'stale');
+    const view = s.changes().view(s.changes().get(id));
+    assert.ok(!view.boardJobs?.changesets?.some((j) => j.key === fresh!.key));
+    const handoff = devcontourHandoff(s.h, {});
+    assert.ok(
+      !handoff.host.changesets?.some((c) => c.job.key === fresh!.key && c.stale),
+      JSON.stringify(handoff.host.changesets),
+    );
+    assert.equal(handoff.host.next?.code, 'board-restart', JSON.stringify(handoff.host.next));
+    // Board restarts first, also when another board only needs a start
+    // (same rank): the ChangeSet restart waits for the board restarts.
+    // (the job stale before the operation is still a board restart, without
+    // the operation named)
+    const oldStep = devcontourHandoff(s.h, { boardId: old.id }).host.next;
+    assert.equal(oldStep?.code, 'board-restart');
+    assert.equal(oldStep?.params.operation, undefined);
+    for (const j of done.boardJobs?.jobs ?? [])
+      if (j.boardId !== other.id)
+        lead.start({ kind: 'board', id: j.boardId, authorRuntime: j.authorRuntime });
+    lead.start({ kind: 'board', id: old.id, authorRuntime: 'codex' });
+    const idle = s.h.createBoard('Idle');
+    s.h.addTask(idle.id, input('Idle task'));
+    s.h.approve(idle.id);
+    assert.equal(devcontourHandoff(s.h, {}).host.next?.code, 'board-restart');
+    lead.start({ kind: 'board', id: other.id, authorRuntime: 'claude' });
+    const next = devcontourHandoff(s.h, {}).host.next;
+    assert.equal(next?.code, 'changeset-restart', JSON.stringify(next));
+    assert.equal(next?.params.changeSetId, release.id);
+    assert.equal(next?.params.operation, id);
+  } finally {
+    await s.remove();
+  }
+});
+
+test('F84: invalidates — a job started after the operation, or stale at its start, is not its', () => {
+  const op = {
+    status: 'completed' as const,
+    startedAt: '2026-01-01T10:00:00.000Z',
+    finishedAt: '2026-01-01T10:05:00.000Z',
+    boards: ['B-1'],
+    staleBefore: ['K-old'],
+  };
+  const live = { key: 'K-1', startedAt: '2026-01-01T09:00:00.000Z' };
+  assert.equal(invalidates(op, ['B-1'], live), true);
+  assert.equal(invalidates(op, ['B-2'], live), false, 'another board without a reconfigure');
+  assert.equal(
+    invalidates({ ...op, config: { before: 'x', after: 'y' } }, ['B-2'], live),
+    true,
+    'a reconfigure changes every board',
+  );
+  assert.equal(invalidates({ ...op, config: { before: 'x' } }, ['B-2'], live), false);
+  assert.equal(
+    invalidates(op, ['B-1'], { key: 'K-2', startedAt: '2026-01-01T10:06:00.000Z' }),
+    false,
+    'started after the operation ended',
+  );
+  assert.equal(invalidates(op, ['B-1'], { ...live, key: 'K-old' }), false, 'stale at its start');
+  assert.equal(invalidates({ ...op, status: 'failed' as const }, ['B-1'], live), false);
+});
+
+test('F84 r2: staleBefore keeps a closed stale job whose input returned, stays out of the view; the newest live job of a board is the stale one; a continuation inherits the repin', async () => {
+  const s = await stage();
+  try {
+    const lead = new LeadWorkflow(s.h);
+    const other = s.h.createBoard('Reverted');
+    s.h.addTask(other.id, input('Reverted task'));
+    s.h.approve(other.id);
+    const job = lead.start({ kind: 'board', id: other.id, authorRuntime: 'codex' });
+    const describe = (text: string) =>
+      s.store.change('fixture.edit', (st) => {
+        st.boards.find((b) => b.id === other.id)!.description = text;
+      });
+    const original = s.store.read().boards.find((b) => b.id === other.id)!.description;
+    describe('Changed');
+    assert.equal(lead.claim(job.key, job.owner), undefined, 'the queue closes it stale');
+    describe(original);
+    // Two live jobs of the catalog board: the newer one is the stale one
+    // whichever the storage order.
+    const a = lead.start({ kind: 'board', id: s.board.id, authorRuntime: 'codex' });
+    s.store.change('fixture.edit', (st) => {
+      st.boards.find((x) => x.id === s.board.id)!.description = 'Second input';
+    });
+    const b = lead.start({ kind: 'board', id: s.board.id, authorRuntime: 'claude' });
+    assert.notEqual(a.key, b.key);
+    const started = await s.changes().start(s.proposal, 'codex');
+    const op = (started as { operation: ContractChange }).operation;
+    assert.ok(s.changes().get(op.id).staleBefore?.includes(job.key));
+    assert.equal(
+      (s.changes().view(s.changes().get(op.id)) as Record<string, unknown>).staleBefore,
+      undefined,
+    );
+    const newest = b;
+    void a;
+    const done = await s.changes().advance(op.id);
+    assert.equal(done.status, 'completed', done.error);
+    assert.equal(lead.staleBoards().get(s.board.id)?.key, newest.key);
+    assert.ok(!done.invalidated?.boards.some((j) => j.key === job.key), 'closed before the start');
+    assert.ok(done.invalidated?.boards.some((j) => j.key === newest.key));
+  } finally {
+    await s.remove();
+  }
+  const op = {
+    status: 'completed' as const,
+    startedAt: '2026-01-01T10:00:00.000Z',
+    finishedAt: '2026-01-01T10:05:00.000Z',
+    boards: [],
+  };
+  const live = { key: 'K-1', startedAt: '2026-01-01T09:00:00.000Z' };
+  assert.equal(
+    invalidates({ ...op, inherited: { repinned: true, boards: [] } }, ['B-9'], live),
+    true,
+  );
+  assert.equal(
+    invalidates({ ...op, inherited: { repinned: false, boards: ['B-9'] } }, ['B-9'], live),
+    true,
+  );
+  assert.equal(invalidates(op, ['B-9'], live), false);
 });

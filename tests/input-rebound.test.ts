@@ -402,6 +402,7 @@ test('F39: with a running server a moved stop stops the pass with the real actor
     )!;
     assert.equal(card.actor, 'operator');
     assert.match(card.reason, /Снять вопрос/);
+    assert.ok(card.actions.some((a) => a.id === 'supersede'));
     await lead.tick();
     await lead.settled();
     assert.equal(reviews(prompts), before, 'проход ревью не вызывает');

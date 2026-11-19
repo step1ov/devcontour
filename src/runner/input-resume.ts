@@ -29,7 +29,7 @@ import {
   needsReview,
   resumeAuthor,
   resumeHeld,
-  resumeRecord,
+  resumeRecordFor,
   type ResumeRecord,
 } from '../application/input-resume.ts';
 import { adapters, type AgentAdapter } from './adapters.ts';
@@ -210,8 +210,12 @@ export class InputResumer {
       .requests.find((r) => r.requestId === requestId);
     if (!summary?.resume || summary.resume.trigger !== 'operator') return;
     const state = summary.state;
-    const saved = resumeRecord(this.h, requestId);
-    const prior = saved?.answerDigest === answer.digest ? saved : undefined;
+    // Ревью маршрута contract-change по прежнему основанию предел не тратят (F83).
+    const prior = resumeRecordFor(
+      this.h,
+      request,
+      engine.read((view) => service.routeRebased(view, request, task)),
+    );
     const author = prior?.author ?? resumeAuthor(this.h, task, summary.boardId ?? undefined);
     if (!author) return;
     const base: Omit<ResumeRecord, 'phase' | 'at'> = {
