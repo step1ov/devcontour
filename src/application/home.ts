@@ -5,6 +5,7 @@ import { Preparation } from '../core/preparation.ts';
 import { LeadWorkflow, type WorkflowJob } from '../core/lead-workflow.ts';
 import { boardPhase, type BoardPhase } from '../core/work-status.ts';
 import { readyTasks } from '../core/graph.ts';
+import { repositories } from '../core/repositories.ts';
 import type { AttentionItem } from '../core/attention-model.ts';
 import type { AttentionView } from './attention.ts';
 import { inputHolds } from './input.ts';
@@ -278,7 +279,10 @@ function preparationSections(
   const references = change?.references?.at(-1);
   const concept = change?.concept?.at(-1)?.content;
   const design = change?.design?.at(-1)?.content;
-  const notApplicable = references?.status === 'approved' && !references.content.applicable;
+  // Отказ от дизайна действует, пока референсы относятся к текущей
+  // архитектуре: устаревший отказ — снова вопрос, а не «не применяется».
+  const notApplicable =
+    references?.status === 'approved' && !references.content.applicable && fresh.references;
   const steps = (['references', 'concept', 'design'] as const).map((key) => ({
     key,
     state:
@@ -373,7 +377,14 @@ function development(
   const boardTitle = new Map(state.boards.map((b) => [b.id, b.title]));
   const changeSetTitle = new Map(state.changeSets.map((c) => [c.id, c.title]));
 
-  const jobs = h ? new LeadWorkflow(h).view(state) : [];
+  // Заданиям плитки нужны предмет, стадия и статус: список без вида задания
+  // (ожиданий и свежести входа), который втрое дороже на большой истории.
+  const workflow = h && new LeadWorkflow(h);
+  const jobs = workflow
+    ? [undefined, ...repositories(h.config).map((r) => r.id)].flatMap((owner) =>
+        workflow.list(owner),
+      )
+    : [];
   // Задание предмета — последнее по времени: прежние упавшие уже сменены.
   const latest = new Map<string, (typeof jobs)[number]>();
   for (const j of jobs) {
@@ -381,7 +392,13 @@ function development(
     const seen = latest.get(key);
     if (!seen || seen.startedAt <= j.startedAt) latest.set(key, j);
   }
-  const current = [...latest.values()];
+  // Упавшее задание принятой доски или принятого ChangeSet уже не держит
+  // работу: его предмет закрыт другим путём (вручную).
+  const accepted = (j: WorkflowJob) =>
+    j.kind === 'board'
+      ? state.boards.find((b) => b.id === j.id)?.revisions.at(-1)?.status === 'accepted'
+      : Boolean(state.changeSets.find((c) => c.id === j.id)?.acceptance);
+  const current = [...latest.values()].filter((j) => j.status !== 'failed' || !accepted(j));
   const rank = (s: WorkflowJob['status']) =>
     s === 'running' ? 0 : s === 'queued' ? 1 : s === 'failed' ? 2 : 3;
   const shownJobs = current
@@ -405,11 +422,13 @@ function development(
     .filter((i) => i.impact.waiting > 0)
     .sort((a, b) => b.impact.waiting - a.impact.waiting)[0];
   const open = state.tasks.filter((t) => t.status === 'ready' && !t.activeRunId).length;
+  const failedTasks = state.tasks.filter((t) => t.status === 'failed').length;
 
   let devState: DevelopmentState;
   let blocker: string | undefined;
   if (!h) {
-    devState = prep.enabled && prep.developmentReady ? 'setting-up' : 'not-allowed';
+    // Изменения независимы: setup разрешён, если готово хоть одно.
+    devState = prep.enabled && prep.readyChanges.length ? 'setting-up' : 'not-allowed';
     blocker =
       devState === 'setting-up'
         ? (ctx.startupError ?? 'Настройка контура: движок разработки ещё не подключён')
@@ -420,6 +439,10 @@ function development(
   else if (queue?.paused) {
     devState = queue.failed ? 'blocked' : 'paused';
     blocker = queue.stopReason;
+  } else if (!ready && failedTasks) {
+    // Очередь идёт, но выдавать нечего: работу держат упавшие задачи.
+    devState = 'blocked';
+    blocker = `Задачи с ошибкой: ${failedTasks}; зависимые от них не выдаются`;
   } else devState = 'idle';
 
   return {
@@ -491,9 +514,12 @@ function development(
     questions: questionsOf(cards),
     // Разработка внутри оболочки подготовки — с view=boards; без подготовки —
     // своя оболочка панели. Доска — первая показанная.
+    // До подключения движка досок нет: ссылка — этап «Разработка» подготовки.
     href:
-      (prep.enabled ? '/?view=boards&tab=kanban' : '/?tab=kanban') +
-      (live[0] ? `&board=${encodeURIComponent(live[0].board.id)}` : ''),
+      !h && prep.enabled
+        ? hrefs.preparation(prep.current?.id, 'development').replace(/^\/$/, '/?stage=development')
+        : (prep.enabled ? '/?view=boards&tab=kanban' : '/?tab=kanban') +
+          (live[0] ? `&board=${encodeURIComponent(live[0].board.id)}` : ''),
   };
 }
 
@@ -523,6 +549,14 @@ export function homeView(ctx: HomeContext): HomeView {
       ? prep.current.binding.fresh
       : { architecture: false, references: false, concept: false, design: false };
   const shell: HomeView['shell'] = h ? 'development' : change ? 'preparation' : 'bootstrap';
+  const sections = {
+    ...preparationSections(change, fresh, bySection, h ? state.contracts.length : undefined),
+    development: development(ctx, prep, bySection.development),
+  };
+  // Центр внимания перечислил не все карточки: вопросы разделов неполны, и
+  // каждый раздел зовёт в центр внимания («ещё»).
+  if (attention.truncated)
+    for (const section of Object.values(sections)) section.questions.more = true;
   return {
     generatedAt: new Date(ctx.now).toISOString(),
     revision: ctx.revision,
@@ -539,10 +573,7 @@ export function homeView(ctx: HomeContext): HomeView {
           },
         }
       : {}),
-    sections: {
-      ...preparationSections(change, fresh, bySection, h ? state.contracts.length : undefined),
-      development: development(ctx, prep, bySection.development),
-    },
+    sections,
     attention: {
       active: attention.counts.active,
       unread: attention.counts.unread,

@@ -1,16 +1,24 @@
-import { after, test } from 'node:test';
+import { after, mock, test } from 'node:test';
 import assert from 'node:assert/strict';
 import { mkdtempSync, rmSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { dirname, join } from 'node:path';
 import { complete, fixture, input } from './helpers.ts';
-import { approvePreparation, approveProductOnly } from './preparation-fixture.ts';
+import {
+  approveArchitectureOnly,
+  approvePreparation,
+  approveProductOnly,
+  approveStage,
+  architecture,
+  references,
+} from './preparation-fixture.ts';
 import { LARGE, amplifyHistory, completedDemo } from './large-history.ts';
 import { demoPool } from './demo-pool.ts';
 import { Store } from '../src/core/store.ts';
 import { DevContour } from '../src/core/service.ts';
 import { loadConfig } from '../src/runner/config.ts';
 import { Preparation } from '../src/core/preparation.ts';
+import { LeadWorkflow } from '../src/core/lead-workflow.ts';
 import { attentionSources, type AttentionItem } from '../src/core/attention-model.ts';
 import { AttentionService, type AttentionView } from '../src/application/attention.ts';
 import { HOME_LIMITS, homeView, sectionOf, type HomeView } from '../src/application/home.ts';
@@ -497,5 +505,138 @@ test('Home: on a large history the response stays bounded; per-revision cost is 
     await app.close();
     store.close();
     seed.release();
+  }
+});
+
+test('Home: a stale "design not applicable" is not reported as not applicable', async () => {
+  const s = await bootstrapServer(() => Promise.resolve(undefined));
+  try {
+    const p = new Preparation(s.store);
+    const changeId = approveArchitectureOnly(p);
+    p.execute('preparation_references', {
+      changeId,
+      expectedDigest: null,
+      reason: 'Интерфейс не затронут',
+      content: { ...references, applicable: false, reason: 'Изменение без интерфейса' },
+    });
+    approveStage(p, changeId, 'references');
+    const { body: skipped } = await s.get();
+    assert.equal(skipped.sections.design.state, 'not-applicable');
+    assert.deepEqual(
+      skipped.sections.design.design!.steps.map((x) => x.state),
+      ['approved', 'not-applicable', 'not-applicable'],
+    );
+    // Новая архитектура утверждена: отказ от дизайна относится к прежней.
+    const view = p.status(changeId);
+    if (!view.enabled) throw new Error('preparation');
+    p.execute('preparation_architecture', {
+      changeId,
+      expectedDigest: view.current!.architecture!.digest,
+      reason: 'Вторая архитектура',
+      content: { ...architecture, summary: architecture.summary + ' Уточнено.' },
+    });
+    approveStage(p, changeId, 'architecture');
+    const { body: stale } = await s.get();
+    assert.equal(stale.sections.design.state, 'stale');
+    assert.equal(stale.sections.design.design!.steps[0].state, 'stale');
+    assert.match(stale.sections.design.href, /stage=references$/);
+  } finally {
+    await s.close();
+  }
+});
+
+test('Home: before setup one approved change is enough to set up, and development links to the stage', async () => {
+  const s = await bootstrapServer(() => Promise.resolve(undefined));
+  try {
+    const p = new Preparation(s.store);
+    approvePreparation(p);
+    p.execute('preparation_create', { title: 'Второе изменение' });
+    const { body } = await s.get();
+    assert.equal(body.change!.title, 'Второе изменение');
+    assert.equal(body.sections.product.state, 'absent');
+    assert.equal(body.sections.development.state, 'setting-up');
+    assert.match(body.sections.development.href, /^\/\?change=[^&]+&stage=development$/);
+  } finally {
+    await s.close();
+  }
+});
+
+test('Home: a running queue held by a failed task is blocked, not idle', async () => {
+  const f = fixture();
+  const board = f.h.createBoard('Доска', '', 'main');
+  const first = f.h.addTask(board.id, input('Первая'));
+  f.h.addTask(board.id, input('Зависимая', [first.id]));
+  f.h.approve(board.id);
+  f.store.change('test.failed', (s) => {
+    s.tasks.find((t) => t.id === first.id)!.status = 'failed';
+  });
+  f.h.pause(false);
+  const app = await serve(f.h, new Scheduler(f.h, f.root), { port: 0 });
+  try {
+    const dev = (await getter(app.url)()).body.sections.development;
+    assert.equal(dev.queue.paused, false);
+    assert.equal(dev.queue.ready, 0);
+    assert.equal(dev.state, 'blocked');
+    assert.match(dev.blocker!, /ошибкой: 1/);
+  } finally {
+    await app.close();
+    f.cleanup();
+  }
+});
+
+test('Home: a failed job of an accepted board is settled; a truncated attention marks every section incomplete', () => {
+  const f = fixture();
+  const board = f.h.createBoard('Доска', '', 'main');
+  const other = f.h.createBoard('Другая', '', 'main');
+  const job = (id: string, status: string, startedAt: string) =>
+    ({
+      kind: 'board',
+      id,
+      key: id,
+      stage: 1,
+      status,
+      startedAt,
+      attempts: 1,
+      history: [],
+    }) as never;
+  const list = mock.method(LeadWorkflow.prototype, 'list', (owner?: string) =>
+    owner
+      ? []
+      : [
+          job(board.id, 'running', '2026-11-19T00:00:00.000Z'),
+          job(board.id, 'failed', '2026-11-19T01:00:00.000Z'),
+          job(other.id, 'failed', '2026-11-19T00:00:00.000Z'),
+        ],
+  );
+  try {
+    const attention: AttentionView = {
+      revision: 1,
+      generatedAt: '2026-11-19T00:00:00.000Z',
+      engineConnected: true,
+      lead: { present: false, lastActivityAt: null },
+      counts: {
+        active: 201,
+        unread: 0,
+        byActor: { operator: { active: 201, unread: 0 }, lead: { active: 0, unread: 0 } },
+      },
+      items: [],
+      truncated: { count: 201 },
+    };
+    const at = () =>
+      homeView({ state: f.store.view(), h: f.h, attention, revision: 1, now: Date.now() });
+    // Последнее задание доски — упавшее; прежнее идущее им сменено.
+    let jobs = at().sections.development.jobs;
+    assert.deepEqual([jobs.running, jobs.failed], [0, 2]);
+    f.store.change('test.accepted', (s) => {
+      s.boards.find((b) => b.id === board.id)!.revisions.at(-1)!.status = 'accepted';
+    });
+    const home = at();
+    jobs = home.sections.development.jobs;
+    assert.deepEqual([jobs.failed, jobs.top.map((j) => j.id)], [1, [other.id]]);
+    for (const section of Object.values(home.sections)) assert.equal(section.questions.more, true);
+    assert.equal(home.attention.truncated, 201);
+  } finally {
+    list.mock.restore();
+    f.cleanup();
   }
 });

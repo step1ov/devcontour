@@ -495,9 +495,11 @@ export async function serve(
             (previous) => {
               let value: Promise<Etagged> | undefined = undefined;
               value = (async () => {
+                // Движок — тот, для которого считалась версия кэша (deps), а не
+                // подключённый за время ожидания центра внимания.
+                const engine = h;
                 const before = await previous?.catch(() => undefined);
                 const { view } = await attention;
-                const engine = h;
                 const home = store.snapshot(() =>
                   homeView({
                     state: store.view(),
@@ -514,6 +516,9 @@ export async function serve(
                 if (value) {
                   const until = attentionUntil(store, view);
                   if (until !== undefined) homes.limit('home', value, until);
+                  // Запись между центром внимания и снимком: плитки и вопросы
+                  // разных версий. Ответ отдаётся, но следующий опрос считает заново.
+                  if (home.revision !== view.revision) homes.limit('home', value, Date.now());
                 }
                 // Ревизия — момент чтения, как и время: запись, не изменившая
                 // плиток, оставляет метку, и опрос получает «без изменений».
