@@ -408,13 +408,16 @@ test('F88: the stage screen polls with its etag, backs off while unchanged and s
   try {
     await page.goto(app.url + '/?stage=product');
     await expect(page.getByRole('heading', { name: 'От запроса к разработке' })).toBeVisible();
-    // Без перемен: опрос с меткой и реже, чем раз в 1,5 с.
+    // Без перемен: опрос с меткой, интервал растёт вдвое до 6 с.
     const start = Date.now();
-    await page.waitForTimeout(12_000);
+    await page.waitForTimeout(14_000);
     const visible = since(start);
-    expect(visible.length).toBeGreaterThanOrEqual(2);
+    expect(visible.length).toBeGreaterThanOrEqual(3);
     expect(visible.length).toBeLessThanOrEqual(5);
     expect(visible.every((p) => p.path.includes('etag='))).toBe(true);
+    const gaps = visible.slice(1).map((p, i) => p.at - visible[i].at);
+    expect(Math.max(...gaps)).toBeGreaterThanOrEqual(5_000);
+    expect(gaps.every((g, i) => i === 0 || g >= gaps[i - 1] - 300)).toBe(true);
 
     // Скрытая вкладка не опрашивает.
     await setHidden(true);
@@ -427,9 +430,18 @@ test('F88: the stage screen polls with its etag, backs off while unchanged and s
     const shownAt = Date.now();
     await setHidden(false);
     await expect.poll(() => since(shownAt).length, { timeout: 3_000 }).toBeGreaterThanOrEqual(1);
+    // Дать опросу снова разойтись, затем действие оператора: после него
+    // частый опрос с меткой возвращается (не через 6 с).
+    await page.waitForTimeout(6_000);
     await page.getByLabel('Новое изменение').fill('Опрос экрана');
     await page.getByRole('button', { name: 'Создать изменение', exact: true }).click();
     await expect(page.getByRole('heading', { name: 'Опрос экрана' })).toBeVisible();
+    const actedAt = Date.now();
+    await expect
+      .poll(() => since(actedAt).filter((p) => p.path.includes('etag=')).length, {
+        timeout: 3_500,
+      })
+      .toBeGreaterThanOrEqual(1);
   } finally {
     await app.close();
     rmSync(root, { recursive: true, force: true });

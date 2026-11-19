@@ -172,6 +172,12 @@ test('F60: опрос обзора, центра внимания, сводки 
     const fresh = await get('/api/overview?etag=' + overview.etag);
     assert.notEqual(fresh.etag, overview.etag);
     assert.ok((fresh.changes as { title: string }[]).some((c) => c.title === 'Новое изменение'));
+    // Экран этапа: перемена очереди — полный ответ и новая метка по старой.
+    f.h.pause(!f.store.read().paused);
+    const changed = await get('/api/preparation?etag=' + preparation.etag);
+    assert.equal(changed.unchanged, undefined);
+    assert.notEqual(changed.etag, preparation.etag);
+    assert.notDeepEqual(changed.queue, preparation.queue);
     const next = await get('/api/summary?revision=' + String(summary.revision));
     assert.equal(next.unchanged, undefined);
     assert.equal((next.boards as unknown[]).length, 1);

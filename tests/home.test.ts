@@ -21,6 +21,7 @@ import { Preparation } from '../src/core/preparation.ts';
 import { LeadWorkflow } from '../src/core/lead-workflow.ts';
 import { LeadRunner } from '../src/runner/lead-workflow.ts';
 import { closeDeadJob, setPark } from '../src/core/board-hold.ts';
+import { devcontourHandoff } from '../src/application/handoff.ts';
 import {
   attentionSections,
   attentionSources,
@@ -744,9 +745,12 @@ test('F90: a closed dead job is not a failed job on the home; a parked board say
     );
     assert.equal(d.queue.drafts, 2);
     assert.equal(d.boards.parked, 0);
+    const next = (boardId: string) => devcontourHandoff(f.h, { boardId }).host.next;
+    assert.ok(next(dead.id), 'до закрытия остановка — шаг host.next');
 
     // workflow_close: остановка — не шаг host.next, и главная её не считает.
     closeDeadJob(f.h, dead.id, 'Work was replanned on another board', 'lead');
+    assert.equal(next(dead.id), undefined);
     d = dev();
     assert.deepEqual([d.jobs.failed, d.jobs.closed], [0, 1]);
     assert.deepEqual(d.jobs.top, []);
@@ -770,6 +774,47 @@ test('F90: a closed dead job is not a failed job on the home; a parked board say
     d = dev();
     assert.equal(d.boards.parked, 0);
     assert.equal(d.boards.top.find((b) => b.id === later.id)?.parked, undefined);
+
+    // Отложенная пустая доска не живая, но отметка в счёте; истёкшая отметка
+    // без записи снимается и с главной.
+    const empty = f.h.createBoard('Пустая доска', '', 'main');
+    setPark(f.h, empty.id, { parked: true, reason: 'Пока не планируем работу' }, 'operator');
+    const soon = new Date(Date.now() + 1_500).toISOString();
+    setPark(f.h, plain.id, { parked: true, reason: 'Ждём дизайн экрана', until: soon }, 'lead');
+    d = dev();
+    assert.equal(d.boards.parked, 2);
+    assert.equal(d.queue.drafts, 0);
+    assert.equal(
+      d.boards.top.find((b) => b.id === empty.id),
+      undefined,
+    );
+    await new Promise((r) => setTimeout(r, 1_700));
+    d = dev();
+    assert.equal(d.boards.parked, 1);
+    assert.equal(d.queue.drafts, 1);
+    assert.equal(d.boards.top.find((b) => b.id === plain.id)?.parked, undefined);
+
+    // Мёртвая доска, задачи которой не выдавали: у host.next шага нет, и
+    // упавшее задание не держит работу.
+    const unissued = f.h.createBoard('Брошенная доска', '', 'main');
+    const never = f.h.addTask(unissued.id, input('Не выдавалась'));
+    f.h.approve(unissued.id);
+    const other = flow.start({ kind: 'board', id: unissued.id, authorRuntime: 'codex' });
+    f.h.cancel(never.id, 'Replanned before issue', 'host');
+    flow.fail(flow.claim(other.key, other.owner)!, 'stopped before issue');
+    assert.equal(next(unissued.id), undefined);
+    d = dev();
+    assert.deepEqual([d.jobs.failed, d.jobs.closed], [0, 2]);
+
+    // Новый эпизод (повтор задачи) снимает закрытие — задание снова упавшее.
+    f.h.retry(stopped.id, undefined, 'host', { lead: true });
+    assert.ok(next(dead.id));
+    d = dev();
+    assert.deepEqual([d.jobs.failed, d.jobs.closed], [1, 1]);
+    assert.deepEqual(
+      d.jobs.top.map((j) => j.id),
+      [dead.id],
+    );
   } finally {
     f.cleanup();
   }

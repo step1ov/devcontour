@@ -6,6 +6,7 @@ import { LeadWorkflow, type WorkflowJob } from '../core/lead-workflow.ts';
 import { closureOf, parkedBoards, parkedHold, type BoardPark } from '../core/board-hold.ts';
 import { boardPhase, heldBaseOf, type BoardPhase } from '../core/work-status.ts';
 import { readyTasks } from '../core/graph.ts';
+import { boardTasks } from '../runner/lead-outlook.ts';
 import { repositories } from '../core/repositories.ts';
 import {
   attentionSections,
@@ -134,8 +135,9 @@ export interface DevelopmentSection {
     accepted: number;
     byPhase: Partial<Record<BoardPhase, number>>;
     /**
-     * Отложенные доски (`board_park`, F90): в счёте живых, но их черновик —
-     * не работа, которая ждёт решения; в списке — после остальных.
+     * Действующие отметки «отложена» (`board_park`, F90), какой бы ни была
+     * фаза доски. Живая отложенная доска в счёте живых, но её черновик — не
+     * работа, которая ждёт решения; в списке — после остальных.
      */
     parked: number;
     top: {
@@ -800,6 +802,20 @@ function development(
       )
     : [];
   // Задание предмета — последнее по времени: прежние упавшие уже сменены.
+  const unissuedDead = (boardId: string) => {
+    const tasks = boardTasks(state, boardId)?.tasks ?? [];
+    return (
+      tasks.length > 0 &&
+      tasks.every((t) => t.status === 'cancelled') &&
+      !tasks.some(
+        (t) =>
+          t.attempt > 0 ||
+          !!t.failure ||
+          !!t.neutralFailures ||
+          state.runs.some((r) => r.taskId === t.id),
+      )
+    );
+  };
   const latest = new Map<string, (typeof jobs)[number]>();
   for (const j of jobs) {
     const key = `${j.kind}:${j.id}`;
@@ -813,9 +829,11 @@ function development(
       ? state.boards.find((b) => b.id === j.id)?.revisions.at(-1)?.status === 'accepted'
       : Boolean(state.changeSets.find((c) => c.id === j.id)?.acceptance);
   // Упавшее задание, остановка которого уже не шаг `host.next` (F90):
-  // закрытое `workflow_close` или задание отложенной доски.
+  // закрытое `workflow_close`, задание отложенной доски или мёртвой доски,
+  // ни одну задачу которой не выдавали (остановки D46 у неё нет).
   const settled = (j: WorkflowJob) =>
-    j.kind === 'board' && (parked.has(j.id) || Boolean(h && closureOf(h, state, j.id, j)));
+    j.kind === 'board' &&
+    (parked.has(j.id) || unissuedDead(j.id) || Boolean(h && closureOf(h, state, j.id, j)));
   const failedLatest = [...latest.values()].filter((j) => j.status === 'failed' && !accepted(j));
   const closedJobs = failedLatest.filter(settled);
   const current = [...latest.values()].filter(
@@ -897,7 +915,7 @@ function development(
       closed: (byPhase.closed ?? 0) + (byPhase.empty ?? 0),
       accepted: byPhase.accepted ?? 0,
       byPhase,
-      parked: live.filter((p) => parked.has(p.board.id)).length,
+      parked: parked.size,
       top: live.slice(0, HOME_LIMITS.boards).map(({ board, phase }) => {
         const park = parked.get(board.id);
         return {
