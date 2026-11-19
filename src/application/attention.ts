@@ -26,6 +26,7 @@ import {
   type ContractChange,
 } from '../runner/contract-change.ts';
 import { boardTasks, planApproved, unapprovedTasks } from '../runner/lead-outlook.ts';
+import { parkedHold } from '../core/board-hold.ts';
 import {
   boardStep,
   exhaustedOnCancelled,
@@ -1598,7 +1599,10 @@ const planSource: AttentionSourceRule = {
         covered: unclaimed(ctx, why.drafts),
         boards: [board.id],
       };
-      if (!approvable.length)
+      if (!approvable.length) {
+        // Отложенная доска (F86): карточки ведущего нет и здесь; решение
+        // оператора об утверждении ниже отметка не прячет.
+        if (parkedHold(h, s, board.id)) return [];
         return [
           {
             ...base,
@@ -1609,6 +1613,7 @@ const planSource: AttentionSourceRule = {
             actions: [handoffOf(ctx)],
           },
         ];
+      }
       return [
         {
           ...base,

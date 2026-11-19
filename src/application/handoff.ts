@@ -263,9 +263,11 @@ export interface DevContourHandoff {
      */
     /**
      * Отложенные доски (F86, `board_park`): до десяти, с причиной и сроком.
-     * Их план и задание не шаг ведущего, пока отметка действует.
+     * Их план и задание не шаг ведущего, пока отметка действует. Сверх
+     * предела ответа причины уходят последними уступками (`reason`
+     * отсутствует; полная запись — пакет без предела, CLI).
      */
-    parked?: { boardId: string; reason: string; until?: string; by: string; at: string }[];
+    parked?: { boardId: string; reason?: string; until?: string; by: string; at: string }[];
     corrections?: {
       items: {
         operation: string;
@@ -326,7 +328,13 @@ function parkedOf(
     )
     .sort((a, b) => a.at.localeCompare(b.at))
     .slice(0, HANDOFF_PARKED)
-    .map((p) => ({ ...p, reason: redact(p.reason) }));
+    .map((p) => ({
+      boardId: p.boardId,
+      reason: redact(p.reason),
+      ...(p.until ? { until: p.until } : {}),
+      by: p.by,
+      at: p.at,
+    }));
   return found.length ? found : undefined;
 }
 
@@ -1038,7 +1046,7 @@ function boardDraft(boardId: string, ctx: HostContext): HostNextDraft | undefine
   if (closed) {
     if (job?.status !== 'failed') return undefined;
     // Задание мёртвой доски закрыто (`workflow_close`, F86): остановки нет.
-    if (closureOf(h, boardId, job.key)) return undefined;
+    if (closureOf(h, state, boardId, job)) return undefined;
     const { outlook: loop } = loopAhead(h, state, { ...asLead(job), status: 'queued' });
     const cancelled = cancelledStop(boardId, ctx, job, loop, error);
     if (!cancelled || job.attempts < job.maxAttempts) return cancelled;
@@ -1949,7 +1957,7 @@ export function devcontourHandoffWithin(
       // усечения текста (`boardsWaitingOf`), иначе усечённый секрет ей не узнать.
       let changesets = changesetsOf(h, state, boardId, options.redact);
       const corrections = correctionsOfHandoff(h, state, boardId);
-      const parked = parkedOf(h, state, boardId, options.redact);
+      let parked = parkedOf(h, state, boardId, options.redact);
       const withDiscussion = (discussion: DevContourHandoff['host']['discussion']) => ({
         ...(next ? { next } : {}),
         liveBoards,
@@ -2047,6 +2055,14 @@ export function devcontourHandoffWithin(
         }));
         host = { ...host, changesets };
       }
+      // Затем причины отложенных досок: id, срок и кто отложил остаются.
+      if (
+        parked &&
+        bytes(handoffResponse({ pack: fitted, host, locale }, limit.format)) > limit.bytes
+      ) {
+        parked = parked.map(({ reason, ...rest }) => (void reason, rest));
+        host = { ...host, parked };
+      }
       // Последняя уступка — повторы Markdown: текст шага (`host.next.detail`)
       // и описания команд стоят в JSON того же ответа, а раздел DevContour
       // повторял их целиком. Шаг и команды Markdown называет по полям, без
@@ -2132,7 +2148,7 @@ function hostMarkdown(
     ),
     ...(host.parked ?? []).map(
       (p) =>
-        `- Доска ${p.boardId} отложена${p.until ? ` до ${p.until}` : ''}: ${p.reason} — снять отметку: \`board_park {"boardId": "${p.boardId}", "parked": false}\``,
+        `- Доска ${p.boardId} отложена${p.until ? ` до ${p.until}` : ''}${p.reason ? `: ${p.reason}` : ''} — снять отметку: \`board_park {"boardId": "${p.boardId}", "parked": false}\``,
     ),
     ...(host.corrections
       ? [

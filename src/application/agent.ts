@@ -107,7 +107,7 @@ export const agentInputs = {
   }),
   workflow_close: z.strictObject({
     boardId: id,
-    reason: z.string().trim().min(10).max(500),
+    reason: z.string().trim().min(10).max(300),
   }),
   workflow_metrics: z.strictObject({ repositoryId: id.optional() }),
   value_report: valueReportInput,
@@ -135,7 +135,7 @@ export const agentInputs = {
     .strictObject({
       boardId: id,
       parked: z.boolean(),
-      reason: z.string().trim().min(10).max(500).optional(),
+      reason: z.string().trim().min(10).max(300).optional(),
       until: z.iso.datetime({ offset: true }).optional(),
     })
     .refine((v) => (v.parked ? v.reason !== undefined : v.reason === undefined && !v.until), {
@@ -335,7 +335,7 @@ export const descriptions: Record<AgentOperation, string> = {
   workflow_retry:
     'Retry a diagnosed failed stage within its original attempt budget. Never retries failed task implementations automatically.',
   workflow_close:
-    "Close the failed lead workflow job of a dead board: every task of its current revision is cancelled, so the board cannot be accepted and the job, stopped on a task cancelled after issue (D46), never continues — for example when the work was replanned on another board. The closure is local, records reason, and only removes the job stop from session_handoff host.next and the attention center; it accepts nothing and changes no task. Refused when a task of the revision is not cancelled (accepting without it is the user's decision), when the latest board job is not failed, and for the lead when an issued task was cancelled by a person or with no actor recorded (the user closes it: devcontour workflow-close --by operator). A task retry or a new task of the revision brings the usual steps back. CLI devcontour workflow-close --board B --reason ... [--by operator|host].",
+    "Close the failed lead workflow job of a dead board: every task of its current revision is cancelled, so the board cannot be accepted and the job, stopped on a task cancelled after issue (D46), never continues — for example when the work was replanned on another board. The closure is local, records reason, and only removes the job stop from session_handoff host.next and the attention center; it accepts nothing and changes no task. Refused when a task of the revision is not cancelled (accepting without it is the user's decision), when the latest board job is not failed, and for the lead when a cancelled task of the revision was cancelled by a person or with no actor recorded (also one synced from Git) or stopped on a budget (the user closes it: devcontour workflow-close --by operator). The closure holds for one stop episode: a job retry, a task retry, a new task or another cancellation actor brings the usual steps back for good. CLI devcontour workflow-close --board B --reason ... [--by operator|host].",
   workflow_metrics:
     'Read per-owner execution measurements, incomplete attempts and unknown cost. USD amounts and budgets are API-equivalent estimates, not subscription charges; the workspace budget counts lifetime workspace spend. No model calls.',
   value_report:
@@ -364,7 +364,7 @@ export const descriptions: Record<AgentOperation, string> = {
     "Import a draft task DAG. Without boardId it opens a new board; with boardId of an accepted board it opens the next stage as that board's next revision, so one release stays on one board. In a product change, imported tasks are bound to changeId when given, otherwise to the change of the board's tasks (next stage), otherwise to the active change; the response names changeId. This does not approve the plan or execute agents. Do not blindly retry creation after an uncertain response.",
   board_create: 'Create a draft board in the selected repository or common workspace.',
   board_park:
-    'Park a board deliberately (parked true with reason 10-500 chars and optional until, an ISO date-time) or unpark it (parked false): for example work the owner deferred to a later release. While parked, the board raises no plan decision or job step in session_handoff host.next and no lead attention card, workflow_start and plan_review of the board are refused, and host.parked lists it with the reason. Only a board whose current revision is unaccepted and holds no approved unfinished task (the queue would issue those without a job) and whose latest job is neither live nor failed (unless closed with workflow_close) can be parked. A parking past until, or one under which tasks of the revision were approved later, stops acting. The mark is local (not synced) and changes neither the plan nor the job input. CLI devcontour board-park --board B (--reason ... [--until ISO] | --unpark) [--by operator|host].',
+    'Park a board deliberately (parked true with reason 10-300 chars and optional until, a strict ISO 8601 date-time with offset) or unpark it (parked false): for example work the owner deferred to a later release. While parked, the board raises no plan decision or job step in session_handoff host.next and no lead attention card, workflow_start and plan_review of the board are refused, and host.parked lists it with the reason (dropped as a last trim over the response limit). Only a board whose current revision is unaccepted and holds no approved unfinished task (the queue would issue those without a job) and whose latest job is neither live nor failed (unless closed with workflow_close) can be parked. A parking stops acting for good past until, on a new board revision, or once tasks of the board were approved or a board job was started after it, even if those tasks are later cancelled or reopened. The mark is local (not synced) and changes neither the plan nor the job input. CLI devcontour board-park --board B (--reason ... [--until ISO] | --unpark) [--by operator|host].',
   task_create:
     "Add a draft task to an active board; DAG and component ownership are validated. In a product change the task is bound to task.preparation.changeId when given (changeId alone is enough; supplied digests must equal the current approved ones), otherwise to the change of the board's tasks, otherwise to the active change; a change other than that of the board's live tasks is refused; the response names the binding. An accepted board takes no tasks: open the next stage with plan_import and its boardId; board_correct only changes accepted results. jobStop in the response warns that a task of the revision was cancelled after issue (D46): no lead workflow job can accept the revision, so plan the replacement on a new board instead.",
   task_edit:

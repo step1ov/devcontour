@@ -242,6 +242,8 @@
 // упавшее задание мёртвой доски) после workflow_retry и board_park (отложить
 // доску или снять отметку) после board_create; описание session_handoff
 // называет params.closable, отложенные доски без шага и host.parked;
-// прочие операции байтово прежние.
-export const CATALOG_DIGEST = 'a148a0f36e252d85b48e3d1a1b5c6428fbcc18fbc3af641cc06dffefe16795cf';
+// прочие операции байтово прежние. Ревью 1: причина до 300 знаков, until —
+// строгая дата ISO 8601, описания называют эпизод закрытия и снятие отметки
+// навсегда.
+export const CATALOG_DIGEST = '499ce21cee08260cbbe762bd5aeb689355e4dc5261020e3b5893738141a7ab4f';
 export const SNAPSHOT_VERSION = '0.4.0-alpha.7';
