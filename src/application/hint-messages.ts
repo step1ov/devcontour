@@ -473,7 +473,7 @@ const en: Catalog = {
   'answer-lead': (p, s) => {
     const { requestId, taskId } = s.input!;
     return (
-      `Task ${taskId} waits for an answer to ${requestId} (no floors, approvalMode agent): answer with input_answer {"requestId": "${requestId}", "expectedVersion": ${p.version}, …} after input_show, or let the operator answer in the panel (${hrefs.input(taskId)}). The answer does not resume the task by itself.` +
+      `Task ${taskId} waits for an answer to ${requestId} (a technical question, no floors, approvalMode agent): answer with input_answer {"requestId": "${requestId}", "expectedVersion": ${p.version}, "reason": …, …} after input_show, or let the operator answer in the panel (${hrefs.input(taskId)}). The answer does not resume the task by itself.` +
       repeatedEn(taskId, p.stops)
     );
   },
@@ -784,7 +784,7 @@ const ru: Catalog = {
   'answer-lead': (p, s) => {
     const { requestId, taskId } = s.input!;
     return (
-      `Задача ${taskId} ждёт ответа на ${requestId} (минимумов нет, approvalMode agent): ответьте через input_answer {"requestId": "${requestId}", "expectedVersion": ${p.version}, …} после input_show или оставьте ответ оператору в панели (${hrefs.input(taskId)}). Сам ответ задачу не возобновляет.` +
+      `Задача ${taskId} ждёт ответа на ${requestId} (технический вопрос, минимумов нет, approvalMode agent): ответьте через input_answer {"requestId": "${requestId}", "expectedVersion": ${p.version}, "reason": …, …} после input_show или оставьте ответ оператору в панели (${hrefs.input(taskId)}). Сам ответ задачу не возобновляет.` +
       repeatedRu(taskId, p.stops)
     );
   },

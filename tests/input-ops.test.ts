@@ -403,7 +403,13 @@ test('Ревью ответа исполнителю: с hintLocale ru ревь�
   try {
     const { requestId, version } = await question(f);
     f.service.answer(
-      { requestId, text: 'Use JSON as now.', optionId: 'json', expectedVersion: version },
+      {
+        requestId,
+        text: 'Use JSON as now.',
+        optionId: 'json',
+        expectedVersion: version,
+        reason: 'Fixture: the checks read JSON today.',
+      },
       'lead',
     );
     const { contextDigest } = await f.service.context({ requestId });

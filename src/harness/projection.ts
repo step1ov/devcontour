@@ -606,10 +606,7 @@ export function putVerification(
  * все пространства договора, кроме реестра воспроизведений (он живёт в
  * документе): новое пространство harness без записи здесь не компилируется.
  */
-export const hostNamespace: Record<
-  Exclude<LocalNamespace, 'reproductions'>,
-  string
-> = {
+export const hostNamespace: Record<Exclude<LocalNamespace, 'reproductions'>, string> = {
   usage: 'usage',
   'check-suites': 'check-suites',
   'workflow-jobs': 'lead',
@@ -618,6 +615,9 @@ export const hostNamespace: Record<
   'run-keys': 'run-keys',
   delivery: 'delivery',
   reviews: 'reviews',
+  // Независимое ревью готовой ветки (`reviewCode`): DevContour его не
+  // вызывает, но пространство договора обязано иметь место в хранилище.
+  'code-reviews': 'code-reviews',
   'contract-documents': 'contract-documents',
   'input-requests': 'input-requests',
   // Сбросы предела совместных проверок набора (решение оператора).

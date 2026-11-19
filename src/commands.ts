@@ -1580,6 +1580,7 @@ async function main() {
               text: option('--text', ''),
               ...(args.includes('--option') ? { optionId: option('--option', '') } : {}),
               ...(args.includes('--kind') ? { kind: option('--kind', '') } : {}),
+              ...(args.includes('--reason') ? { reason: option('--reason', '') } : {}),
               expectedVersion,
             },
             actorOf(),

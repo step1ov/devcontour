@@ -579,6 +579,7 @@ export class DiscussionService {
       expectedVersion: number;
       optionId?: string;
       kind?: 'clarification' | 'requirement-change';
+      reason?: string;
       supersedes?: string;
       replyTo?: string;
     },
@@ -592,6 +593,8 @@ export class DiscussionService {
       requestId: v.requestId,
       optionId: v.optionId ?? null,
       answerKind: v.kind ?? 'clarification',
+      // Причина ведущего — часть ответа: другая причина под тем же ключом — другой ответ.
+      ...(v.reason ? { reason: v.reason } : {}),
       replyTo: v.replyTo ?? null,
       supersedes: v.supersedes ?? null,
     });
@@ -642,6 +645,7 @@ export class DiscussionService {
             text: v.text,
             ...(v.optionId ? { optionId: v.optionId } : {}),
             ...(v.kind ? { kind: v.kind } : {}),
+            ...(v.reason ? { reason: v.reason } : {}),
             expectedVersion: v.expectedVersion,
           },
           author,

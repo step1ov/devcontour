@@ -62,11 +62,14 @@ export async function inputFixture(
     scheduler,
     service: new InputService(h, root, runtimes),
     /** Доска с задачей, demo-исполнитель которой спрашивает (`[demo:ask]`). */
-    askingTask(title = 'Asking task', extra: { dependsOn?: string[]; boardId?: string } = {}) {
+    askingTask(
+      title = 'Asking task',
+      extra: { dependsOn?: string[]; boardId?: string; marker?: string } = {},
+    ) {
       const boardId = extra.boardId ?? h.createBoard('Input board').id;
       const task = h.addTask(boardId, {
         title,
-        description: `An observable outcome that needs a decision ${DEMO_ASK}.`,
+        description: `An observable outcome that needs a decision ${extra.marker ?? DEMO_ASK}.`,
         role,
         acceptance: ['The artifact exists.'],
         ...(extra.dependsOn ? { dependsOn: extra.dependsOn } : {}),
@@ -114,6 +117,8 @@ export function controlled(
     idleTitle?: string;
     /** Demo-исполнитель спрашивает снова и после доставленного ответа. */
     alwaysAsk?: boolean;
+    /** Влияние вопроса demo-исполнителя вместо его собственного (`null` — не указано). */
+    impact?: 'technical' | 'user-visible' | null;
   } = {},
 ): Record<string, AgentAdapter> {
   const verdict = options.verdict ?? { approve: true };
@@ -156,11 +161,13 @@ export function controlled(
       return result.then((r) => {
         const data = r.data as {
           completed: boolean;
-          inputRequest?: { affects: string[]; question: string } | null;
+          inputRequest?: { affects: string[]; question: string; impact?: string | null } | null;
           assumptions?: unknown[];
         };
         if (options.critical && data.inputRequest) data.inputRequest.affects = ['api'];
         if (options.affects && data.inputRequest) data.inputRequest.affects = options.affects;
+        if (options.impact !== undefined && data.inputRequest)
+          data.inputRequest.impact = options.impact;
         if (options.leak && data.inputRequest)
           data.inputRequest.question += ` (token seen: ${request.execution?.env[options.leak] ?? ''})`;
         if (options.assume && data.completed)
@@ -200,7 +207,13 @@ export async function prepared(
 ) {
   const request = f.service.show({ requestId });
   const answered = f.service.answer(
-    { requestId, text: 'Use JSON as now.', optionId: 'json', expectedVersion: request.version },
+    {
+      requestId,
+      text: 'Use JSON as now.',
+      optionId: 'json',
+      expectedVersion: request.version,
+      ...(actor === 'lead' ? { reason: 'The checks read JSON today.' } : {}),
+    },
     actor,
   );
   const context = await f.service.context({ requestId });

@@ -79,6 +79,8 @@ export function TaskInput({ taskId, revision }: { taskId: string; revision: stri
     optionId: string | null;
     actor: { kind: string };
     messageRef?: string;
+    basis?: string;
+    reason?: string;
   }[];
   const latest = answers.at(-1);
   const resume = current.resume;
@@ -151,6 +153,12 @@ export function TaskInput({ taskId, revision }: { taskId: string; revision: stri
         <span className="text-muted-foreground text-xs">
           серьёзность {current.severity}
           {current.floors.length ? ' · критический: ' + current.floors.join(', ') : ''}
+          {current.kind !== 'follow-up' &&
+            (q.impact === 'technical'
+              ? ' · технический вопрос'
+              : q.impact === 'user-visible'
+                ? ' · меняет результат для пользователя'
+                : '')}
         </span>
       </div>
       {/* Повторные остановки вопросом: вопросы сверх предела засчитываются
@@ -184,6 +192,11 @@ export function TaskInput({ taskId, revision }: { taskId: string; revision: stri
                       рекомендует исполнитель
                     </Badge>
                   )}
+                  {o.forUser && (
+                    <span className="block text-xs" data-for-user>
+                      Для пользователя: {o.forUser}
+                    </span>
+                  )}
                   {o.consequence && (
                     <span className="text-muted-foreground block text-xs">{o.consequence}</span>
                   )}
@@ -196,9 +209,15 @@ export function TaskInput({ taskId, revision }: { taskId: string; revision: stri
       {latest && (
         <p className="bg-raised mt-2 mb-0 rounded-md p-2" data-input-answer>
           Ответ r{latest.revision} ({kindLabels[latest.kind] ?? latest.kind},{' '}
-          {latest.actor.kind === 'operator' ? 'оператор' : 'ведущий'}
+          {latest.actor.kind === 'operator' ? 'оператор' : 'ведущий агент'}
+          {latest.basis === 'technical' ? ', технический вопрос' : ''}
           {latest.optionId ? `, вариант ${latest.optionId}` : ''}):{' '}
           <span className="whitespace-pre-wrap">{latest.text ?? latest.excerpt}</span>
+          {latest.actor.kind !== 'operator' && latest.reason && (
+            <span className="text-muted-foreground block text-xs" data-input-answer-reason>
+              Причина ведущего: {latest.reason}
+            </span>
+          )}
         </p>
       )}
       {lastReview && (

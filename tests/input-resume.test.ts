@@ -264,7 +264,13 @@ test('A lead answer is the lead own chain; requirement changes and operator mode
     const lead = new LeadRunner(f.h, f.root, runtimes);
     await tick(lead);
     f.service.answer(
-      { requestId, text: 'Keep JSON.', optionId: 'json', expectedVersion: version },
+      {
+        requestId,
+        text: 'Keep JSON.',
+        optionId: 'json',
+        expectedVersion: version,
+        reason: 'Fixture: the checks read JSON today.',
+      },
       'lead',
     );
     await tick(lead);
@@ -599,7 +605,13 @@ test('A lead apply of its own answer carries no server origin', async () => {
     const lead = new LeadRunner(f.h, f.root, runtimes);
     await tick(lead);
     f.service.answer(
-      { requestId, text: 'Keep JSON.', optionId: 'json', expectedVersion: version },
+      {
+        requestId,
+        text: 'Keep JSON.',
+        optionId: 'json',
+        expectedVersion: version,
+        reason: 'Fixture: the checks read JSON today.',
+      },
       'lead',
     );
     await tick(lead);

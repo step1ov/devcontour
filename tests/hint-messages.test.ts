@@ -725,8 +725,10 @@ test('Подсказки шага: новая конфигурация setup п�
  * (новые коды contract-change-required, changeset-restart, owner-answer,
  * owner-question-pending, образцы closable и plan.questions); тексты прежних
  * образцов байтово прежние.
+ * Намеренное изменение (harness 0.1.0-alpha.55): образец `answer-lead` называет
+ * технический вопрос и поле `reason` ответа ведущего; прочие образцы прежние.
  */
-const ENGLISH_SAMPLES_SHA256 = '24e67e66b80e8edac26c874cbbee20245b339500fc0ce515d1d48f6031f16aa8';
+const ENGLISH_SAMPLES_SHA256 = '8d30e7e1c773cc9590b6f6eb9412234c3598e52313631d462d54ceefd3df023b';
 
 test('Подсказки шага: английские тексты образцов закреплены', () => {
   assert.equal(

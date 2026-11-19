@@ -171,6 +171,8 @@ export const discussionInputs = {
         expectedVersion: z.number().int().positive(),
         optionId: z.string().max(40).optional(),
         kind: z.enum(['clarification', 'requirement-change']).optional(),
+        /** Почему ведущий выбрал ответ: обязательна на технический блокирующий вопрос. */
+        reason: z.string().trim().min(1).max(1000).optional(),
       })
       .optional(),
     replyTo: messageId.optional(),

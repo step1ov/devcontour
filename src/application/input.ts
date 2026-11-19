@@ -17,6 +17,8 @@ import {
   blocksWork,
   contextDigest,
   contextIssues,
+  forOperator,
+  impactOf,
   inputContextSource,
   inputManifestOf,
   inputSourceId,
@@ -44,6 +46,7 @@ import {
   inputReviewSubject,
 } from '../harness/input-host.ts';
 import { runtimeAdapters } from '../harness/adapters.ts';
+import { LEAD_ANSWERS, leadDecides } from '../harness/policy.ts';
 import { boardOf, UNASSIGNED_GRAPH } from '../harness/projection.ts';
 import { adapters, type AgentAdapter } from '../runner/adapters.ts';
 import { checkoutRoots } from '../runner/checkout-root.ts';
@@ -321,6 +324,12 @@ export const inputOperationInputs = {
       text: z.string().trim().min(1).max(INPUT_LIMITS.answer),
       optionId: z.string().max(40).optional(),
       kind: z.enum(['clarification', 'requirement-change']).default('clarification'),
+      /**
+       * Почему ведущий выбрал ответ: обязательна для ответа ведущего на
+       * блокирующий технический вопрос (запись ответа хранит её и показывает
+       * владельцу); у ответа оператора не нужна.
+       */
+      reason: z.string().trim().min(1).max(INPUT_LIMITS.reason).optional(),
       ...versionFields,
     })
     .meta(versionRequired)
@@ -574,10 +583,15 @@ export class InputService {
 
   /**
    * Ведущий (агентский API или CLI `--by host`) отвечает и снимает вопрос
-   * сам, только если вопрос без минимумов и режим `agent` (Q7, R7-1).
+   * сам (Q7, R7-1) только в режиме `agent`: неблокирующий запрос — без
+   * минимумов, блокирующий вопрос — только технический (`impact: technical`,
+   * без минимумов, серьёзность до 9; правило `inputPolicy.leadAnswers`
+   * harness). Вопрос, меняющий результат для пользователя, — владельцу.
    */
-  leadMayDecide(request: Pick<InputRequest, 'floors'>) {
-    return request.floors.length === 0 && this.h.config.approvalMode === 'agent';
+  leadMayDecide(
+    request: Pick<InputRequest, 'kind' | 'blocking' | 'effectiveSeverity' | 'floors' | 'question'>,
+  ) {
+    return leadDecides(this.h.config, request);
   }
 
   /* -------------------------------------------------------------- */
@@ -1238,6 +1252,8 @@ export class InputService {
                 optionId: a.optionId,
                 actor: a.actor,
                 ...(a.messageRef ? { messageRef: a.messageRef } : {}),
+                ...(a.basis ? { basis: a.basis } : {}),
+                ...(a.reason ? { reason: a.reason } : {}),
                 digest: a.digest,
                 at: a.at,
                 excerpt: a.text.slice(0, EARLIER_EXCERPT),
@@ -1282,8 +1298,19 @@ export class InputService {
         'OPERATOR_ANSWERS',
         request.floors.length
           ? `Вопрос ${request.id} критический (${request.floors.join(', ')}): отвечает оператор в панели`
-          : `В approvalMode operator на вопрос ${request.id} отвечает оператор в панели`,
+          : this.h.config.approvalMode === 'operator'
+            ? `В approvalMode operator на вопрос ${request.id} отвечает оператор в панели`
+            : impactOf(request.question) !== 'technical'
+              ? `Вопрос ${request.id} меняет результат для пользователя (impact ${request.question.impact ?? 'не указан'}): отвечает владелец в панели; ведущий может предложить ответ (input_propose)`
+              : `Вопрос ${request.id} серьёзнее порога ответов ведущего (${request.effectiveSeverity} > ${LEAD_ANSWERS.maxSeverity}): отвечает владелец в панели; ведущий может предложить ответ (input_propose)`,
         403,
+      );
+    // Технический вопрос ведущий решает с записанной причиной: её читает владелец.
+    if (actor !== 'operator' && forOperator(request) && !input.reason)
+      throw refuse(
+        'INVALID_INPUT',
+        `Вопрос ${request.id}: ответ ведущего на технический вопрос — с причиной (reason, CLI --reason): почему этот вариант`,
+        400,
       );
     // Ответ и решение за владельца — одна транзакция: записанный ответ без
     // записи решения не остаётся (вложенный `atomic`, как у ответа из обсуждения).
@@ -1305,6 +1332,8 @@ export class InputService {
           kind: input.kind,
           actor: { kind: actor },
           ...(link.messageRef ? { messageRef: link.messageRef } : {}),
+          // Причина — только у ответа ведущего: ответ оператора её не несёт.
+          ...(actor !== 'operator' && input.reason ? { reason: input.reason } : {}),
         },
         input.expectedVersion,
       );

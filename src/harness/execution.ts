@@ -75,6 +75,8 @@ const statusOf: Partial<Record<ErrorCode, number>> = {
   // Ответ reviewer вне протокола — сбой вышестоящего runtime, а не конфликт
   // состояния: перечитывание и повтор того же запроса его не устранят.
   REVIEW_PROTOCOL_INVALID: 502,
+  // Блокирующий вопрос адресован человеку: то же, что отказ OPERATOR_ANSWERS DevContour.
+  OPERATOR_ANSWER_REQUIRED: 403,
 };
 
 /** Отказ движка — ошибка прикладного слоя с тем же текстом; прочие ошибки — как есть. */
