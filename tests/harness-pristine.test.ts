@@ -3,9 +3,10 @@
 // транзакции. Здесь — что выдача на простое через хост DevContour не читает
 // историю попыток и записей вызовов, первая выдача после изменения видит
 // новый расход, а вложенная, писавшая и откаченная части `pristine` не дают.
-import { test } from 'node:test';
+import { after, test } from 'node:test';
 import assert from 'node:assert/strict';
 import { join } from 'node:path';
+import { mkdirSync } from 'node:fs';
 import { DatabaseSync } from 'node:sqlite';
 import { Engine, WORKSPACE_OWNER, type ExecutionView } from 'devcontour-harness';
 import { fixture, input } from './helpers.ts';
@@ -17,6 +18,10 @@ import { callOf } from '../src/harness/projection.ts';
 import { DevContourExecutionStore } from '../src/harness/store.ts';
 import { devcontourHost, projectionOptions } from '../src/harness/host.ts';
 import { policyFromConfig } from '../src/harness/policy.ts';
+import { executionOf } from '../src/harness/execution.ts';
+import { jointDemos, jointFixture } from './joint-fixture.ts';
+
+after(() => jointDemos.close());
 
 type Fixture = ReturnType<typeof fixture>;
 
@@ -401,9 +406,31 @@ test('pristine: попытка со сроком в документе (преж
     assert.ok(b.engine.lead('controller'));
     assert.ok(f.store.read().leader!.leaseUntil >= until);
     assert.equal(f.store.revision(), before, 'продление роли — не данные');
-    // Правка документа хостом под видом heartbeat (продление поставки) — тоже.
-    store.host('heartbeat', (ht) => void ht.state.changeSets);
+    // Правка документа хостом под видом heartbeat (продление срока) — тоже:
+    // документ меняется (растёт счётчик сроков), ревизия данных прежняя.
+    const lease = f.store.version().lease;
+    store.host('heartbeat', (ht) => {
+      ht.state.runs.find((r) => r.id === 'R-legacy')!.leaseUntil = Date.now() + 1;
+    });
+    assert.ok(f.store.version().lease > lease, 'документ изменён');
     assert.equal(f.store.revision(), before, 'правка хоста в heartbeat — продление');
+    // Запись модели, откаченная вместе с вложенной частью heartbeat, ревизию
+    // данных не поднимает: зафиксировано только продление.
+    store.transact('heartbeat', () =>
+      assert.throws(
+        () =>
+          store.transact('heartbeat', (inner) => {
+            inner.putWork({
+              ...inner.work(tasks[0])!,
+              budgetBlock: { reason: 'rolled back', at: '2026-11-01T00:00:00.000Z' },
+            });
+            throw new Error('откат вложенной части');
+          }),
+        { message: 'откат вложенной части' },
+      ),
+    );
+    assert.equal(f.store.revision(), before, 'откаченная запись модели — не данные');
+    assert.equal(f.store.read().tasks.find((t) => t.id === tasks[0])!.budgetBlock, undefined);
     store.transact('heartbeat', (tx) =>
       tx.putWork({
         ...tx.work(tasks[0])!,
@@ -452,5 +479,88 @@ test('pristine: транзакция внутри Store.atomic вызывающ�
     b.agrees('после отката вызывающего');
   } finally {
     b.f.cleanup();
+  }
+});
+
+test('pristine: прямая запись Store в транзакции движка и вид чтения внутри неё — false', () => {
+  const b = idleBoard(0);
+  try {
+    const { store, f, tasks } = b;
+    store.transact('task.retry', (tx) => {
+      assert.equal(tx.pristine?.(), true, 'нетронутая внешняя');
+      store.read((v) => assert.equal(v.pristine?.(), false, 'вид чтения внутри транзакции'));
+      assert.equal(tx.pristine?.(), true, 'чтение ничего не записало');
+      // Запись мимо вида движка, откаченная своей частью: данные прежние.
+      assert.throws(
+        () =>
+          f.store.atomic(() => {
+            f.store.saveLocal('usage', undefined, 'U-gone', call('U-gone', tasks[0], 1));
+            throw new Error('откат');
+          }),
+        { message: 'откат' },
+      );
+      assert.equal(tx.pristine?.(), true, 'откаченная прямая запись данных не изменила');
+      // Прямая запись Store в той же транзакции: данные не зафиксированы.
+      f.store.saveLocal('usage', undefined, 'U-direct', call('U-direct', tasks[0], 1));
+      assert.equal(tx.pristine?.(), false, 'прямая запись Store');
+    });
+  } finally {
+    b.f.cleanup();
+  }
+});
+
+test('pristine: продление совместной проверки (jointHeartbeat) — срок, не данные; иная правка проверки под heartbeat — данные', async () => {
+  const f = await jointFixture({ gateMs: 120_000, start: false });
+  try {
+    const v = f.workspace.start(f.change.id);
+    assert.equal(v.status, 'active');
+    const before = f.store.version();
+    const until = f.verifications().at(-1)!.leaseUntil;
+    await new Promise((r) => setTimeout(r, 5));
+    f.workspace.heartbeat(f.change.id, v.token);
+    assert.ok(f.verifications().at(-1)!.leaseUntil > until, 'срок продлён');
+    assert.ok(f.store.version().lease > before.lease, 'счётчик сроков вырос');
+    assert.equal(f.store.revision(), before.revision, 'ревизия данных прежняя');
+    // Та же запись проверки, изменённая не только сроком, — запись модели.
+    const { store } = executionOf(f.h);
+    store.transact('heartbeat', (tx) => {
+      const current = tx.verification(v.id)!;
+      tx.putVerification({
+        ...current,
+        leaseUntil: current.leaseUntil + 1,
+        specDigest: 'f'.repeat(64),
+      });
+    });
+    assert.ok(f.store.revision() > before.revision, 'запись модели поднимает ревизию данных');
+  } finally {
+    await f.cleanup();
+  }
+});
+
+test('ревизия данных растёт при миграции хранения в базы компонентов', () => {
+  const f = fixture();
+  try {
+    const coordinator = join(f.root, 'coordinator.sqlite');
+    const repo = join(f.root, 'component-main');
+    mkdirSync(repo);
+    const single = new Store(coordinator);
+    let before: number;
+    try {
+      single.atomic(() => single.saveLocal('usage', 'main', 'U-1', call('U-1', 'T-1', 1)));
+      before = single.revision();
+    } finally {
+      single.close();
+    }
+    // Локальные записи компонента переезжают в его базу: процесс, открывший
+    // базу раньше, должен увидеть новую ревизию.
+    const migrated = new Store(coordinator, [{ id: 'main', path: repo }], true);
+    try {
+      assert.ok(migrated.revision() > before, 'миграция — изменение данных');
+      assert.ok(migrated.localRecord('usage', 'main', 'U-1'), 'запись в базе компонента');
+    } finally {
+      migrated.close();
+    }
+  } finally {
+    f.cleanup();
   }
 });

@@ -467,6 +467,10 @@ export class Store {
               raw.changeSets ??= [];
               for (const task of raw.tasks) task.repositoryId ??= 'main';
               this.components.write(raw);
+              // Документ и локальные записи переезжают в базы компонентов:
+              // процесс, открывший базу раньше, видит их иначе — ревизия
+              // данных растёт, как у любой записи данных.
+              this.bump('data');
               const events = this.db
                 .prepare('SELECT * FROM main.events ORDER BY id')
                 .all() as unknown as { id: number; at: string; type: string; data: string }[];
@@ -1841,14 +1845,14 @@ export class Store {
       .run(namespace, owner ?? '@workspace', key);
     if (removed.changes) this.bump('data');
   }
-  /**
-   * Поднять ревизию данных в открытой транзакции: изменение, которое Store
-   * по виду считает продлением сроков (`heartbeat`), изменило данные.
-   */
   /** Открыта ли транзакция записи (`atomic`) этого соединения. */
   get inTransaction() {
     return this.transaction;
   }
+  /**
+   * Поднять ревизию данных в открытой транзакции: изменение, которое Store
+   * по виду считает продлением сроков (`heartbeat`), изменило данные.
+   */
   markDataChanged() {
     if (!this.transaction) throw new Error('Store.markDataChanged требует открытой транзакции');
     this.bump('data');

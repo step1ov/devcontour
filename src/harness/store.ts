@@ -11,6 +11,7 @@
 //   ссылки на задачу и попытку транзакции) без токенов владения и ключ
 //   `harnessEvents` — нейтральные события транзакции по порядку.
 // - Курсор нейтральных событий: `seq = id события журнала × 1024 + индекс`.
+import { isDeepStrictEqual } from 'node:util';
 import {
   API_VERSION,
   HarnessError,
@@ -107,6 +108,12 @@ interface Frame {
    * данные не обязательно зафиксированы при текущей ревизии.
    */
   enclosed: boolean;
+  /**
+   * Ревизия данных Store в начале внешней транзакции. Запись данных мимо
+   * вида движка (прямо через Store в той же транзакции) поднимает ревизию
+   * до фиксации — `pristine()` видит её по расхождению.
+   */
+  revision?: number;
 }
 
 /**
@@ -187,6 +194,9 @@ export class DevContourExecutionStore implements ExecutionStore {
     const legacy = frame.legacy;
     const works = new Set(frame.works);
     const attempts = new Set(frame.attempts);
+    // `wrote` откат вложенной части не снимает (pristine остаётся false), а
+    // запись модели, откаченная с ней, ревизию heartbeat не поднимает.
+    const modelWrote = frame.modelWrote;
     frame.depth++;
     try {
       return this.store.atomic(() => this.settled(run()));
@@ -196,6 +206,7 @@ export class DevContourExecutionStore implements ExecutionStore {
       frame.legacy = legacy;
       frame.works = works;
       frame.attempts = attempts;
+      frame.modelWrote = modelWrote;
       throw error;
     } finally {
       frame.depth--;
@@ -228,6 +239,7 @@ export class DevContourExecutionStore implements ExecutionStore {
           wrote: false,
           modelWrote: false,
           enclosed,
+          revision: enclosed ? undefined : this.store.revision(),
         };
         this.frame = frame;
         written = frame;
@@ -252,10 +264,10 @@ export class DevContourExecutionStore implements ExecutionStore {
           drafts.every((d) => d.type.startsWith('controller.')) ? 'lease' : 'data',
         );
       // Изменение документа под видом `heartbeat` Store считает продлением
-      // сроков (счётчик `lease`). Запись модели в такой транзакции (движок так
-      // не пишет, договор хранилища допускает) — изменение данных:
-      // `dataVersion` меняется, иначе кэш движка по версии (`pristine`)
-      // остался бы прежним при других данных.
+      // сроков (счётчик `lease`). Запись модели в такой транзакции, кроме
+      // продления срока совместной проверки (`jointHeartbeat`), — изменение
+      // данных: `dataVersion` меняется, иначе кэш движка по версии
+      // (`pristine`) остался бы прежним при других данных.
       if (kind === 'heartbeat' && written?.modelWrote) this.store.markDataChanged();
     });
     return out;
@@ -287,7 +299,9 @@ export class DevContourExecutionStore implements ExecutionStore {
   private reading?: ExecutionView;
 
   read<T>(fn: (view: ExecutionView) => T): T {
-    if (this.frame) return fn(this.view(this.frame));
+    // Чтение внутри транзакции — вид той же транзакции без записи (и без
+    // `pristine`: вид чтения его не даёт).
+    if (this.frame) return fn(this.view(this.frame, false));
     if (this.reading) return this.settled(fn(this.reading));
     return this.store.snapshot(() => {
       // Чтение без копии: общий замороженный снимок версии данных.
@@ -462,6 +476,7 @@ export class DevContourExecutionStore implements ExecutionStore {
         frame.depth === 0 &&
         !frame.enclosed &&
         !frame.wrote &&
+        frame.revision === store.revision() &&
         frame.drafts.length === 0 &&
         // Попытка со сроком в документе (её ведёт версия до D53, или её
         // ещё не перенесла первая запись этой версии): прежняя версия
@@ -518,8 +533,19 @@ export class DevContourExecutionStore implements ExecutionStore {
         putAttempt(edit(), attempt);
         frame.attempts.add(attempt.id);
       },
-      putVerification: (verification: JointVerificationState) =>
-        putVerification(edit(), verification, this.jointTarget),
+      putVerification: (verification: JointVerificationState) => {
+        // Продление срока совместной проверки (jointHeartbeat) — срок
+        // владения, как строка аренды попытки: под видом heartbeat ревизию
+        // данных не поднимает. Любое другое изменение — запись модели.
+        const current = verificationsOf(state()).find((v) => v.id === verification.id);
+        const renewal =
+          !!current &&
+          isDeepStrictEqual({ ...current, leaseUntil: 0 }, { ...verification, leaseUntil: 0 });
+        inTx();
+        frame.wrote = true;
+        if (!renewal) frame.modelWrote = true;
+        putVerification(frame.draft.edit(), verification, this.jointTarget);
+      },
       setControl: (control) => setControl(edit(), control),
       // Роль controller — своя строка хранилища: её продление документ не копирует.
       setController: (lease) => {
