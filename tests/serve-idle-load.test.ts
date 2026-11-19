@@ -9,6 +9,7 @@
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
 import { statSync } from 'node:fs';
+import { join } from 'node:path';
 import { DatabaseSync } from 'node:sqlite';
 import { setTimeout as sleep } from 'node:timers/promises';
 import { HarnessError } from 'devcontour-harness';
@@ -19,6 +20,8 @@ import { Scheduler } from '../src/runner/scheduler.ts';
 import { executionOf } from '../src/harness/execution.ts';
 import { HARNESS_EXPIRY_TAIL } from '../src/harness/projection.ts';
 import { IdleClaimGate } from '../src/harness/idle-claims.ts';
+import { LeadWorkflow } from '../src/core/lead-workflow.ts';
+import { RESUME, RESUME_DRIVER } from '../src/application/input-resume.ts';
 
 /** Счётчик вызовов метода на прототипе на время теста. */
 function counting<T extends object>(proto: T, name: string) {
@@ -117,6 +120,118 @@ test('F77: такт сервера без перемен не повторяет
       parses.restore();
       serialized.restore();
       closeDraft.restore();
+    }
+  } finally {
+    await f.cleanup();
+  }
+});
+
+test('F79: свои продления сроков и такт ожидающего задания ведущего шлюз не открывают; чужая запись, своя запись данных, отмена и откат — открывают', async () => {
+  const f = await runtimeFixture();
+  try {
+    const board = f.store.view().boards[0];
+    for (const t of f.store.view().tasks)
+      if (t.status !== 'done') f.h.cancel(t.id, 'нечего выдавать', 'host');
+    f.h.pause(false);
+    const flow = new LeadWorkflow(f.h);
+    const job = flow.start({ kind: 'board', id: board.id, authorRuntime: 'codex' });
+    const engine = executionOf(f.h).engine as unknown as Record<string, unknown>;
+    const budget = counting(engine, 'budgetBlocks');
+    const interval = () =>
+      (f.scheduler as unknown as { intervalTick(): Promise<void> }).intervalTick();
+    // Ожидающая стадия ведущего, как на простое сервера: захват, продление,
+    // возврат «жду». Каждый шаг — запись строки задания (ревизия данных растёт).
+    const waitingStage = () => {
+      const claimed = flow.claim(job.key, job.owner);
+      assert.ok(claimed, 'стадия захвачена');
+      flow.heartbeat(claimed);
+      flow.finish(claimed, true);
+    };
+    const driverBeat = () =>
+      f.store.atomic(() =>
+        f.store.saveLocal(
+          RESUME,
+          undefined,
+          RESUME_DRIVER,
+          { leaseUntil: Date.now() + 60_000 },
+          'lease',
+        ),
+      );
+    try {
+      f.scheduler.idleClaims.maxMs = 60_000;
+      await interval();
+      assert.equal(budget.count, 1, 'первый такт выдаёт');
+      const before = f.store.version();
+      for (let i = 0; i < 5; i++) {
+        waitingStage();
+        driverBeat();
+        await interval();
+      }
+      const after = f.store.version();
+      // Поломка, которую ловит: ревизия не росла бы — тогда тест ничего не
+      // проверял бы (шлюз держал бы и по `version()`).
+      assert.ok(after.revision >= before.revision + 15, 'такты задания подняли ревизию данных');
+      assert.ok(after.lease >= before.lease + 5, 'отметка прохода подняла счётчик сроков');
+      assert.equal(budget.count, 1, 'свои нейтральные записи выдачу не открыли');
+
+      // Документ, изменённый под видом heartbeat, открывает выдачу: в такой
+      // транзакции движок может записать и то, что её меняет (снятое
+      // удержание). Поломка: «любой heartbeat — продление».
+      f.store.update('heartbeat', (draft) => {
+        draft.edit().pausedAt = '2026-01-01T00:00:00.000Z';
+      });
+      await interval();
+      assert.equal(budget.count, 2, 'heartbeat с изменённым документом открыл выдачу');
+      await interval();
+      assert.equal(budget.count, 2, 'и снова стоит');
+
+      // Чужой процесс той же базы продлил то же задание — шлюз открыт: его
+      // записи этот процесс не знает.
+      const other = new Store(join(f.root, 'state.sqlite'));
+      try {
+        other.atomic(() =>
+          other.saveLocal(RESUME, undefined, RESUME_DRIVER, { leaseUntil: 1 }, 'lease'),
+        );
+      } finally {
+        other.close();
+      }
+      await interval();
+      assert.equal(budget.count, 3, 'запись другого процесса открыла выдачу');
+      await interval();
+      assert.equal(budget.count, 3, 'и снова стоит');
+
+      // Своя локальная запись данных вне задания ведущего — открывает.
+      f.store.atomic(() => f.store.saveLocal('signals', undefined, 'f79', { at: Date.now() }));
+      await interval();
+      assert.equal(budget.count, 4, 'своя запись данных открыла выдачу');
+
+      // Откат нейтральной записи снимает и её учёт. Поломка: учёт оставался,
+      // версия шлюза уходила на единицу назад, и следующая настоящая запись
+      // возвращала её к запомненной — выдача стояла при новых данных.
+      // Одна откаченная нейтральная запись и одна настоящая — ровно совпадение.
+      await interval();
+      const held: number = budget.count;
+      assert.throws(() =>
+        f.store.atomic(() => {
+          f.store.saveLocal('signals', undefined, 'f79-neutral', {}, 'data', true);
+          throw new Error('откат');
+        }),
+      );
+      f.store.atomic(() => f.store.saveLocal('signals', undefined, 'f79', { at: 0 }));
+      await interval();
+      assert.equal(budget.count, held + 1, 'запись после отката нейтральной открыла выдачу');
+
+      // Отмена задачи — открывает.
+      const fresh = f.h.addTask(f.h.createBoard('F79').id, input('F79 cancel'));
+      await interval();
+      const c0: number = budget.count;
+      await interval();
+      assert.equal(budget.count, c0, 'стоит');
+      f.h.cancel(fresh.id, 'отмена', 'host');
+      await interval();
+      assert.equal(budget.count, c0 + 1, 'отмена открыла выдачу');
+    } finally {
+      budget.restore();
     }
   } finally {
     await f.cleanup();

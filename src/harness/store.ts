@@ -488,6 +488,11 @@ export class DevContourExecutionStore implements ExecutionStore {
           hostOwner(owner || WORKSPACE_OWNER),
           key,
           namespace === 'usage' ? usageOf(parsed as never) : parsed,
+          'data',
+          // Задание ведущего выдача очереди не читает: его захват, продление
+          // и возврат ожидающей стадии шлюз простоя не открывают (F79).
+          // Что стадия меняет в задачах и досках — обычная запись данных.
+          namespace === 'workflow-jobs',
         );
       },
       emit: (event: RunEventDraft) => {

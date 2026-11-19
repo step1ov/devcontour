@@ -291,7 +291,7 @@ function planEn(p: HintParamMap['plan-unapproved'], s: HintSubject) {
     ? ` ${plan.blockedCount} draft task(s) fail approval preconditions, so approval refuses them and review-plan stops on them before the model call; fix these first (${EDIT_EN}) or cancel them: ${blockedList(s)}.`
     : '';
   const misrouted = plan.misroutedCount
-    ? ` ${plan.misroutedCount} finding draft(s) have a role whose write scope does not cover the finding path, so its writer could not edit that file: set the owning role (in parentheses after the arrow) when triaging them (${EDIT_EN}): ${misroutedList(s, 'no role with an explicit scope')}.`
+    ? ` ${plan.misroutedCount} finding draft(s) have a role whose write scope does not cover the finding path, so its writer could not edit that file: set the owning role (in parentheses after the arrow) when triaging them (${EDIT_EN}; an edit that changes only the role keeps the finding unverified, for one that waits on an owner decision): ${misroutedList(s, 'no role with an explicit scope')}.`
     : '';
   const stopper = p.stopper
     ? ` Task ${p.stopper} of this revision was cancelled by a person or after issue (D46): every lead workflow job of the revision stops on it before its tasks run, and tasks approved here would run with no job to repair or accept them. Retry ${p.stopper} if it is still needed (task_retry), or plan the replacement on a new board (plan_import without boardId, then workflow_start {"kind": "board"}); move drafts that belong there with task_move.`
@@ -559,7 +559,7 @@ function planRu(p: HintParamMap['plan-unapproved'], s: HintSubject) {
     ? ` Черновики, не проходящие условия утверждения: ${plan.blockedCount}. Утверждение их отвергнет, а review-plan остановится на них до вызова модели; сначала исправьте их (${EDIT_RU}) или отмените: ${blockedList(s)}.`
     : '';
   const misrouted = plan.misroutedCount
-    ? ` Черновики находок, роль которых не может изменить файл находки (путь вне её области записи): ${plan.misroutedCount}. При разборе назначьте роль-владельца пути (после стрелки) (${EDIT_RU}): ${misroutedList(s, 'нет роли с явной областью')}.`
+    ? ` Черновики находок, роль которых не может изменить файл находки (путь вне её области записи): ${plan.misroutedCount}. При разборе назначьте роль-владельца пути (после стрелки) (${EDIT_RU}; правка одной роли оставляет находку неразобранной — для ждущей решения владельца): ${misroutedList(s, 'нет роли с явной областью')}.`
     : '';
   const stopper = p.stopper
     ? ` Задача ${p.stopper} этой ревизии отменена человеком или после выдачи (D46): любое задание ведущего ревизии остановится на ней раньше её задач, и утверждённые здесь задачи пошли бы без задания, которое их чинит и принимает. Повторите ${p.stopper}, если она ещё нужна (task_retry), или планируйте замену на новой доске (plan_import без boardId, затем workflow_start {"kind": "board"}); черновики, которым место там, переносите task_move.`
