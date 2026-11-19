@@ -20,6 +20,7 @@ import { git } from '../src/runner/process.ts';
 import { leadLiftsPause, leadResumeOf, queueStopView } from '../src/core/work-status.ts';
 import { LeadWorkflow } from '../src/core/lead-workflow.ts';
 import { homeView } from '../src/application/home.ts';
+import { Workspace } from '../src/core/workspace.ts';
 
 /** Репозиторий, рабочая ветка которого на коммит впереди базы прогонов. */
 async function behindBase(root: string) {
@@ -173,24 +174,71 @@ test('F93: lead pause over an unheld base check with a board job — no operator
   });
 });
 
-test('F93: without a base-move range the loop cannot check the base — attention and home both leave the action to the operator', async () => {
-  await withRepo(async ({ h, data }) => {
-    const b = h.createBoard('Board');
-    h.addTask(b.id, input('Task'));
-    h.approve(b.id);
-    h.pause(false);
+/** Пауза ведущего над неудержанным переносом; `job` — какое задание ведёт работу. */
+async function leadPauseOverMove(
+  h: DevContour,
+  data: string,
+  job: 'board' | 'changeset',
+  /** Правка состояния после переноса (прежние записи). */
+  edit?: (s: DevContourState) => void,
+) {
+  const b = h.createBoard('Board');
+  h.addTask(b.id, input('Task'));
+  h.approve(b.id);
+  h.pause(false);
+  if (job === 'board')
     new LeadWorkflow(h).start({ kind: 'board', id: b.id, authorRuntime: 'codex' });
-    const agent = new AgentService(h, data);
-    await agent.run({ operation: 'queue_set', input: { paused: true, reason: 'Guides' } });
-    await baseUpdateOperation(h, data, { by: 'host' });
-    // Ожидание прежней версии: без диапазона переноса.
-    h.store.change('fixture.legacy-wait', (s) => {
-      delete s.baseMoves;
+  else {
+    const release = new Workspace(h).create({
+      title: 'Release r1',
+      description: 'Joint verification of the board.',
+      boardIds: [b.id],
     });
+    new LeadWorkflow(h).start({ kind: 'changeset', id: release.id, authorRuntime: 'claude' });
+  }
+  const agent = new AgentService(h, data);
+  await agent.run({ operation: 'queue_set', input: { paused: true, reason: 'Guides' } });
+  await baseUpdateOperation(h, data, { by: 'host' });
+  if (edit) h.store.change('fixture.edit', edit);
+  return agent;
+}
+
+/** Действие оператора есть в центре внимания и на главной — до и после снятия паузы ведущим. */
+async function operatorActs(h: DevContour, agent: AgentService, name: string) {
+  for (const phase of ['under the lead pause', 'after the lead lifts it']) {
+    if (phase !== 'under the lead pause')
+      await agent.run({ operation: 'queue_set', input: { paused: false } });
     const { attention, queue } = await views(h);
     const card = attention.items.find((i) => i.sourceKey === 'wait:base-check');
-    assert.equal(card?.actor, 'operator');
-    assert.match(queue.hint ?? '', /Проверьте базу gates и запустите очередь/);
+    assert.equal(card?.actor, 'operator', `${name}, ${phase}`);
+    assert.ok(
+      card?.actions.some((a) => a.id === 'resume'),
+      `${name}, ${phase}`,
+    );
+    assert.match(queue.hint ?? '', /Проверьте базу gates и запустите очередь/, `${name}, ${phase}`);
+  }
+}
+
+test('F93: without a current base-move range the loop cannot check the base — attention and home both leave the action to the operator', async () => {
+  for (const [name, edit] of [
+    ['missing range', (s: DevContourState) => void delete s.baseMoves],
+    [
+      'stale range',
+      (s: DevContourState) => {
+        s.baseMoves = { ...s.baseMoves!, at: '2000-01-01T00:00:00.000Z' };
+      },
+    ],
+  ] as const)
+    await withRepo(async ({ h, data }) => {
+      const agent = await leadPauseOverMove(h, data, 'board', edit);
+      await operatorActs(h, agent, name);
+    });
+});
+
+test('F93: a ChangeSet job does not check the base — with no board job the operator acts', async () => {
+  await withRepo(async ({ h, data }) => {
+    const agent = await leadPauseOverMove(h, data, 'changeset');
+    await operatorActs(h, agent, 'changeset only');
   });
 });
 

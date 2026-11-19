@@ -21,7 +21,7 @@ import {
 } from '../core/owner-questions.ts';
 import type { AttentionView } from './attention.ts';
 import { inputHolds } from './input.ts';
-import { queueStopOf, quietAttempts } from './queue-stop.ts';
+import { baseLoopChecks, queueStopOf, quietAttempts } from './queue-stop.ts';
 import { hrefs } from './panel-links.ts';
 import { leadPresence } from './quick-view.ts';
 import { harnessVersion } from '../harness/index.ts';
@@ -660,6 +660,11 @@ export interface QueueFacts {
   approvalMode?: 'agent' | 'operator';
   /** Есть задание ведущего, которое продвинет цикл `serve` (queued/running). */
   workflowActive: boolean;
+  /**
+   * Перенесённую базу проверит цикл задания (`baseLoopChecks`: диапазон
+   * переноса и живое задание доски). Не задано — как `workflowActive`.
+   */
+  baseByLoop?: boolean;
   /** Маска текстов центра внимания: причина паузы ведущего — его свободный текст. */
   redact?: (text: string) => string;
 }
@@ -674,12 +679,14 @@ export interface QueueFacts {
 export function operatorQueue(
   queue: { reason?: string; stopReason?: string; failed?: true; by?: 'lead' },
   state: Pick<DevContourState, 'pauseFailures' | 'waits' | 'paused'> &
-    Partial<Pick<DevContourState, 'pauseActor' | 'baseMoves'>>,
+    Partial<Pick<DevContourState, 'pauseActor'>>,
   facts: QueueFacts,
 ): { reason: string; hint: string } {
   const agent = (facts.approvalMode ?? 'agent') === 'agent';
   // Сам продолжит выдачу только цикл ведущего в режиме агента.
   const byLead = agent && facts.workflowActive;
+  // Проверку перенесённой базы делает только стадия доски по диапазону переноса.
+  const baseByLoop = byLead && (facts.baseByLoop ?? true);
   const start = 'запустите очередь кнопкой «Запустить очередь» в панели разработки';
   const attention = 'что сделать — в «Нужно действие»';
   // Кто продолжит после устранения причины.
@@ -730,15 +737,9 @@ export function operatorQueue(
     // Пауза ведущего над неудержанным ожиданием (F93, `leadResumeOf`
     // `keeps-base-check`): ведущий снимает свою паузу, базу проверяет цикл
     // ведущего — у оператора действия нет, как в `queueStopView` и центре
-    // внимания. Без диапазона переноса (`baseMoves`) цикл базу не проверит
-    // (`baseWaitOf`, `checkBase`): тогда действие остаётся оператору.
-    if (
-      byLead &&
-      queue.by === 'lead' &&
-      queue.reason === 'operator' &&
-      !queue.failed &&
-      state.baseMoves
-    )
+    // внимания. Без диапазона переноса или задания доски цикл базу не
+    // проверит (`baseLoopChecks`): тогда действие остаётся оператору.
+    if (baseByLoop && queue.by === 'lead' && queue.reason === 'operator' && !queue.failed)
       return {
         reason: leadReason,
         hint: 'Свою паузу ведущий агент снимает сам; затем он проверит базу и продолжит выдачу.',
@@ -748,7 +749,7 @@ export function operatorQueue(
     return {
       reason: own('Выдача ждёт проверки базы gates'),
       hint:
-        byLead && !underPause && queue.reason === 'base-check'
+        baseByLoop && !underPause && queue.reason === 'base-check'
           ? 'Ведущий агент проверит базу и продолжит выдачу сам.'
           : `Проверьте базу gates и запустите очередь: ${attention}.`,
     };
@@ -891,6 +892,13 @@ function development(
       ? operatorQueue(queue, state, {
           approvalMode: h.config.approvalMode,
           workflowActive: jobs.some((j) => j.status === 'queued' || j.status === 'running'),
+          baseByLoop: baseLoopChecks(
+            h,
+            state,
+            jobs.some(
+              (j) => j.kind === 'board' && (j.status === 'queued' || j.status === 'running'),
+            ),
+          ),
           redact,
         })
       : undefined;

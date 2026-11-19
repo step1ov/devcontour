@@ -1332,22 +1332,24 @@ test('Home queue text: who resumes depends on the lead workflow and the approval
   );
   assert.match(operatorQueue(q('operator'), wait, agentLive).hint, /Проверьте базу gates/);
   // Пауза ведущего над тем же ожиданием (F93): снимает ведущий, базу проверяет
-  // цикл — если у ожидания есть диапазон переноса; без него — оператор.
-  assert.match(
-    operatorQueue(q('operator', { by: 'lead' }), wait, agentLive).hint,
-    /Проверьте базу gates/,
-  );
-  const moved = {
-    ...wait,
-    baseMoves: { at: new Date(NOW).toISOString() },
-  } as unknown as typeof wait;
+  // цикл — если её проверит стадия доски по диапазону переноса
+  // (`baseLoopChecks`); иначе действие остаётся оператору — и при паузе
+  // base-check тоже.
+  const loop = { ...agentLive, baseByLoop: true };
+  const noLoop = { ...agentLive, baseByLoop: false };
   assert.equal(
-    operatorQueue(q('operator', { by: 'lead' }), moved, agentLive).hint,
+    operatorQueue(q('operator', { by: 'lead' }), wait, loop).hint,
     'Свою паузу ведущий агент снимает сам; затем он проверит базу и продолжит выдачу.',
   );
+  assert.match(operatorQueue(q('operator', { by: 'lead' }), wait, noLoop).hint, /Проверьте базу gates/);
+  assert.match(operatorQueue(q('base-check'), wait, noLoop).hint, /Проверьте базу gates/);
   // Без задания ведущего цикл базу не проверит: действие остаётся оператору.
   assert.match(
-    operatorQueue(q('operator', { by: 'lead' }), moved, { ...agentLive, workflowActive: false })
+    operatorQueue(q('operator', { by: 'lead' }), wait, { ...loop, workflowActive: false }).hint,
+    /Проверьте базу gates/,
+  );
+  assert.match(
+    operatorQueue(q('operator', { by: 'lead' }), wait, { ...loop, approvalMode: 'operator' })
       .hint,
     /Проверьте базу gates/,
   );

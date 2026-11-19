@@ -24,7 +24,27 @@ import { devcontourHandoff } from '../src/application/handoff.ts';
 import { AgentService } from '../src/application/agent.ts';
 import { repository } from '../src/core/repositories.ts';
 import { RESUME, RESUME_DRIVER, resumeDriverAlive } from '../src/application/input-resume.ts';
-import { existsSync } from 'node:fs';
+import { existsSync, readdirSync } from 'node:fs';
+import { randomUUID } from 'node:crypto';
+
+/** Файл с именем `name` под каталогом `root` (несколько уровней, без ссылок). */
+function findFile(root: string, name: string, depth = 6): boolean {
+  if (depth < 0) return false;
+  let entries;
+  try {
+    entries = readdirSync(root, { withFileTypes: true });
+  } catch {
+    return false;
+  }
+  return entries.some(
+    (e) =>
+      (e.isFile() && e.name === name) ||
+      (e.isDirectory() &&
+        e.name !== '.git' &&
+        e.name !== 'node_modules' &&
+        findFile(join(root, e.name), name, depth - 1)),
+  );
+}
 
 // Копии одного учебного workspace вместо новой сборки демо в каждом тесте.
 const demos = demoPool(testDemo);
@@ -427,8 +447,13 @@ test('В режиме агента workflow доски сам проверяет
 test('F91: while the loop runs a real base check, timer ticks keep the answer-pass heartbeat alive', async () => {
   const f = await baseCheckFixture();
   const { store, h, lead, commit, events, config } = f;
-  // Gate базы ждёт файла-разрешения: проверка идёт, пока тест её держит.
+  // Gate базы отмечает вход и ждёт файла-разрешения: проверка идёт, пока
+  // тест её держит.
   const release = join(f.root, 'release-gate');
+  // Вход отмечается в рабочем дереве проверки (gate пишет только в него):
+  // имя уникально, тест ищет его под каталогом рабочих деревьев.
+  const marker = `gate-entered-${randomUUID()}`;
+  const entered = () => findFile(config.checkoutRoot!, marker);
   config.gates = [
     {
       id: 'base-gate',
@@ -437,7 +462,7 @@ test('F91: while the loop runs a real base check, timer ticks keep the answer-pa
       command: [
         process.execPath,
         '-e',
-        `const fs=require('fs');const t=setInterval(()=>{if(!fs.existsSync(${JSON.stringify(release)}))return;clearInterval(t);fs.mkdirSync('.reports',{recursive:true});fs.writeFileSync(process.env.DEVCONTOUR_REPORT_PATH,'<testsuite><testcase name="base"/></testsuite>');process.exit(0)},50)`,
+        `const fs=require('fs');fs.writeFileSync(${JSON.stringify(marker)},'');const t=setInterval(()=>{if(!fs.existsSync(${JSON.stringify(release)}))return;clearInterval(t);fs.writeFileSync(${JSON.stringify(marker + '-done')},'');fs.mkdirSync('.reports',{recursive:true});fs.writeFileSync(process.env.DEVCONTOUR_REPORT_PATH,'<testsuite><testcase name="base"/></testsuite>');process.exit(0)},50)`,
       ],
       report: { type: 'junit', path: '.reports/base.xml' },
     },
@@ -459,9 +484,21 @@ test('F91: while the loop runs a real base check, timer ticks keep the answer-pa
     // Такт начинает проверку базы и ждёт её.
     running = lead.tick();
     const deadline = Date.now() + 20_000;
-    while (!events('base.check.started').length && Date.now() < deadline)
-      await new Promise((r) => setTimeout(r, 25));
+    while (!entered() && Date.now() < deadline) await new Promise((r) => setTimeout(r, 25));
+    assert.ok(
+      entered(),
+      'gate базы запущен и ждёт разрешения: ' +
+        JSON.stringify(
+          store
+            .allEvents()
+            .slice(-8)
+            .map((e) => [e.type, e.data]),
+        ),
+    );
     assert.equal(events('base.check.started').length, 1, 'проверка базы идёт');
+    assert.equal(events('base.check.passed').length, 0);
+    let settled = false;
+    void running.then(() => (settled = true));
     assert.equal(store.read().pauseReason, 'base-check');
     // Прежняя отметка прохода истекла, пока стадия ждёт gates.
     store.atomic(() =>
@@ -471,6 +508,10 @@ test('F91: while the loop runs a real base check, timer ticks keep the answer-pa
     // Такт таймера возвращает ту же стадию и обновляет отметку.
     assert.equal(lead.tick(), running);
     assert.equal(resumeDriverAlive(h), true, 'сервер жив — отметка прохода свежая');
+    await new Promise((r) => setTimeout(r, 100));
+    assert.equal(settled, false, 'стадия всё ещё ждёт gate');
+    assert.equal(findFile(config.checkoutRoot!, `${marker}-done`), false, 'gate ещё не закончился');
+    assert.equal(events('base.check.passed').length, 0);
     assert.ok(!existsSync(release));
     await writeFile(release, '');
     await running;
