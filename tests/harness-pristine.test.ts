@@ -16,7 +16,7 @@ import {
 } from 'devcontour-harness';
 import { fixture, input } from './helpers.ts';
 import { loadedDigest } from '../src/core/service.ts';
-import { Store } from '../src/core/store.ts';
+import { Store, type Draft } from '../src/core/store.ts';
 import type { Run } from '../src/core/model.ts';
 import type { UsageRecord } from '../src/core/usage.ts';
 import { callOf } from '../src/harness/projection.ts';
@@ -668,6 +668,72 @@ test('F79: продление совместной проверки нейтра
     assert.equal(await held(), false, 'такт выдаёт после снятого удержания движком');
   } finally {
     await f.cleanup();
+  }
+});
+
+test('F79: решение «только сроки» — значение вызова lazyUpdate, откат точки сохранения его не переносит', () => {
+  const f = fixture();
+  try {
+    // Правка документа: каждый вызов добавляет новый ChangeSet.
+    let n = 0;
+    const edit = (draft: () => Draft) => {
+      draft()
+        .edit()
+        .changeSets.push({
+          id: `CHG-probe-${++n}`,
+          title: 'Probe',
+          description: 'Probe.',
+          boardIds: [],
+          createdAt: '2026-01-01T00:00:00.000Z',
+          verifications: [],
+        });
+    };
+    const idle = f.store.idleVersion();
+    const lease = f.store.version().lease;
+    // Отметка «только сроки» — у этого вызова; откаченная вложенная часть
+    // внутри него её не задаёт, следующий вызов без отметки — не нейтрален.
+    f.store.lazyUpdate(
+      'heartbeat',
+      (draft) => {
+        assert.throws(
+          () =>
+            f.store.atomic(() => {
+              edit(draft);
+              throw new Error('откат');
+            }),
+          { message: 'откат' },
+        );
+        edit(draft);
+      },
+      () => true,
+    );
+    assert.ok(f.store.version().lease > lease, 'документ записан под видом heartbeat');
+    assert.deepEqual(f.store.idleVersion(), idle, 'отмеченное продление нейтрально');
+    f.store.lazyUpdate('heartbeat', (draft) => edit(draft));
+    assert.notDeepEqual(f.store.idleVersion(), idle, 'без отметки — правка открывает шлюз');
+    // Действие, которое отказало, решение не запрашивает.
+    let asked = false;
+    assert.throws(() =>
+      f.store.lazyUpdate(
+        'heartbeat',
+        (draft) => {
+          edit(draft);
+          throw new Error('отказ');
+        },
+        () => (asked = true),
+      ),
+    );
+    assert.equal(asked, false);
+    // Решение «только сроки» — лишь для heartbeat.
+    const before = f.store.idleVersion();
+    f.store.lazyUpdate(
+      'fixture.edit',
+      (draft) => edit(draft),
+      () => true,
+    );
+    assert.ok(f.store.idleVersion().revision > before.revision, 'иное изменение — данные');
+  } finally {
+    f.cleanup();
   }
 });
 

@@ -387,12 +387,15 @@ export class DevContourExecutionStore implements ExecutionStore {
   stateOf(view: ExecutionView): DevContourState {
     const state = this.states.get(view);
     if (!state) throw new Error('Вид получен не от этого хранилища');
-    // Изменяемый документ открытой транзакции вызывающий может и изменить:
-    // для шлюза простоя (F79) это правка хоста, как через `h.state`, —
-    // продление под видом heartbeat перестаёт быть нейтральным. Неизменённый
-    // документ — общий замороженный снимок, его не изменить.
+    // Изменяемый документ транзакции, которая уже записала (продление
+    // проверки), вызывающий может и изменить: для шлюза простоя (F79) это
+    // правка хоста, как через `h.state`, — продление под видом heartbeat
+    // перестаёт быть нейтральным. До первой записи транзакции чтение не
+    // отмечается: центральная база даёт замороженный снимок, а хранение по
+    // компонентам открывает копию документа сразу, и порты хоста читают
+    // её до продления (`jointUpdate`).
     const frame = this.frames.get(view);
-    if (frame && frame === this.frame && frame.draft.edited) frame.hostWrote = true;
+    if (frame && frame === this.frame && frame.wrote && frame.draft.edited) frame.hostWrote = true;
     return state();
   }
 
