@@ -992,10 +992,10 @@ export function App() {
     const before = new URLSearchParams(params);
     for (const key of ['tab', 'board', 'task']) params.delete(key);
     if (tab !== 'attention') for (const key of ['attention', 'who']) params.delete(key);
-    if (tab !== 'overview') params.set('tab', tab);
+    // Экран назван всегда, и обзор тоже: адрес без экрана — главная панели
+    // (`isHome`), а посторонний параметр не должен это менять.
+    params.set('tab', tab);
     if (boardScreen && boardId) params.set('board', boardId);
-    // Голый адрес — главная: обзор без других параметров назван явно.
-    if (!params.size) params.set('tab', tab);
     if ((boardScreen || tab === 'workspace') && selected) params.set('task', selected);
     const search = params.toString();
     const next = window.location.pathname + (search ? '?' + search : '');

@@ -80,9 +80,17 @@ test('A tile link opens its section; «Назад» returns home; «Главна
   await expect(page).toHaveURL(/[?&]board=B-/);
   await expect(page.getByRole('heading', { level: 1, name: 'Главная' })).toHaveCount(0);
   // «Назад» строки пути — по записи самой панели: к главной.
+  // Фокус не теряется на body: экран доски получил его на заголовке.
+  await expect.poll(() => page.evaluate(() => document.activeElement !== document.body)).toBe(true);
+  expect(await page.title()).not.toBe('DevContour · Главная');
   await page.getByRole('button', { name: 'Назад', exact: true }).click();
   await expect(page.getByRole('heading', { level: 1, name: 'Главная' })).toBeVisible();
   await expect(page).toHaveURL(/\/$/);
+  await expect(page.getByRole('heading', { level: 1, name: 'Главная' })).toBeFocused();
+  expect(await page.title()).toBe('DevContour · Главная');
+  // «Вперёд» снова открывает доску.
+  await page.goForward();
+  await expect(page).toHaveURL(/[?&]tab=kanban/);
 
   // «Главная» в навигации оболочки разработки.
   await page.goto('/?tab=changesets');
@@ -256,6 +264,7 @@ test('Charts: overall progress, agent load and hourly attempts render from route
       bucketMs: 900_000,
       peaks,
       hourly,
+      current: 1,
       asOf: home.generatedAt,
     };
     progress.releases = [
@@ -289,9 +298,30 @@ test('Charts: overall progress, agent load and hourly attempts render from route
     '70',
   );
   const load = page.getByRole('figure', { name: /Нагрузка агентов за сутки/ });
-  await expect(load).toContainText(/Пик 3 агента в \d\d:\d\d, сейчас 1; слотов 2\./);
+  // Время пика — начало 57-го интервала в часовом поясе браузера.
+  const peakAt = await page.evaluate(() =>
+    new Date(
+      Date.parse('2026-11-19T12:00:00.000Z') - 24 * 3_600_000 + 56 * 900_000,
+    ).toLocaleTimeString('ru-RU', { hour: '2-digit', minute: '2-digit' }),
+  );
+  await expect(load).toContainText(`Пик 3 агента в ${peakAt}, сейчас 1; слотов 2.`);
+  // Столбики нарисованы: интервал пика — три сегмента стека, текущий — один.
+  await expect(
+    load.locator('svg g').nth(56).locator('rect[fill]:not([fill="transparent"])'),
+  ).toHaveCount(2);
+  await expect(load.locator('svg g').nth(56).locator('title')).toContainText(
+    'пик 3 агента (принята 2, сбой 1)',
+  );
   // Скрытая таблица данных: только интервалы с работой.
   await expect(load.locator('table tbody tr')).toHaveCount(2);
+  await expect(load.locator('table tbody tr').first()).toContainText(`${peakAt}`);
+  await expect(load.locator('table tbody tr').first().locator('td')).toHaveText([
+    '3',
+    '0',
+    '2',
+    '1',
+    '0',
+  ]);
   const hourlyChart = page.getByRole('figure', { name: /Попытки по часам/ });
   await expect(hourlyChart).toContainText('Начато 5, со сбоем 2');
   await expect(hourlyChart.locator('table tbody tr')).toHaveCount(1);

@@ -244,19 +244,13 @@ export async function serve(
       ...(drift ? { configDrift: drift.reason } : {}),
     };
   };
-  // Медленный ярус: карта продукта из общего кэша вкладки «Карта продукта»
-  // (та же область, что у `GET /api/product` без релиза), бюджеты и расход.
+  // Медленный ярус: карта продукта, бюджеты и расход. Карта считается здесь,
+  // а не берётся из кэша вкладки «Карта продукта»: его значение могло бы
+  // быть старше своего `minAgeMs` и получить здесь новый срок и новый `asOf`.
   const homeSlowOf = (engine: DevContour, store: Store): HomeSlow => {
     let product: Parameters<typeof homeSlowView>[0]['product'];
     try {
-      product = JSON.parse(
-        products.get(
-          scopeOf(new URL('http://home.invalid/api/product')),
-          String(engine.store.revision()),
-          [engine, configKey(engine)],
-          () => ({ value: JSON.stringify(new IntentService(engine).productView({})) }),
-        ),
-      ) as typeof product;
+      product = new IntentService(engine).productView({});
     } catch (error) {
       product = { error: error instanceof Error ? error.message : String(error) };
     }
@@ -573,10 +567,15 @@ export async function serve(
                       ...(startupError ? { startupError } : {}),
                       ...(engine
                         ? {
-                            events: engine.store.latestEvents(
-                              ['scheduler.error', 'server.loop-stalled', 'server.clock-jump'],
-                              200,
-                            ),
+                            // Разрывы цикла — своим запросом: всплеск ошибок
+                            // очереди не вытесняет их из выборки.
+                            events: [
+                              ...engine.store.latestEvents(['scheduler.error'], 50),
+                              ...engine.store.latestEvents(
+                                ['server.loop-stalled', 'server.clock-jump'],
+                                500,
+                              ),
+                            ],
                             process: processHealth(engine),
                           }
                         : {}),

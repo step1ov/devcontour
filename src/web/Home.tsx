@@ -98,6 +98,7 @@ function ago(at: string | null | undefined, now: number) {
   if (hours < 48) return `${hours} ч назад`;
   return `${Math.round(hours / 24)} дн назад`;
 }
+const minutes = (ms: number) => `${Math.round(ms / 60_000)} мин`;
 const asOfText = (at: string) =>
   `на ${new Date(at).toLocaleTimeString('ru-RU', { hour: '2-digit', minute: '2-digit' })}`;
 
@@ -330,21 +331,21 @@ function DevelopmentTile({
       {engine && (
         <>
           <dl className="m-0 grid gap-1">
-            <div className="mb-0 flex flex-wrap justify-start gap-x-1.5">
+            <div className="mb-0 flex flex-wrap justify-start gap-x-1.5 gap-y-0">
               <dt className="text-muted-foreground">Доски:</dt>
               <dd className="m-0 text-left">
                 живых {dev.boards.live}, принято {dev.boards.accepted}
                 {dev.boards.closed ? `, закрыто ${dev.boards.closed}` : ''}
               </dd>
             </div>
-            <div className="mb-0 flex flex-wrap justify-start gap-x-1.5">
+            <div className="mb-0 flex flex-wrap justify-start gap-x-1.5 gap-y-0">
               <dt className="text-muted-foreground">Задания ведущего:</dt>
               <dd className="m-0 text-left">
                 идут {dev.jobs.running}, ждут {dev.jobs.waiting}
                 {dev.jobs.failed ? `, остановлено ${dev.jobs.failed}` : ''}
               </dd>
             </div>
-            <div className="mb-0 flex flex-wrap justify-start gap-x-1.5">
+            <div className="mb-0 flex flex-wrap justify-start gap-x-1.5 gap-y-0">
               <dt className="text-muted-foreground">Очередь:</dt>
               <dd className="m-0 text-left">
                 {dev.queue.paused ? 'на паузе' : 'выдаёт'}, готово {dev.queue.ready}
@@ -488,7 +489,7 @@ function ProgressTile({
         </ul>
       )}
       <dl className="m-0 grid gap-1">
-        <div className="mb-0 flex flex-wrap justify-start gap-x-1.5">
+        <div className="mb-0 flex flex-wrap justify-start gap-x-1.5 gap-y-0">
           <dt className="text-muted-foreground">Задачи:</dt>
           <dd className="m-0 text-left">
             выполнено {tasks.done} из {tasks.total - tasks.cancelled}, осталось {tasks.remaining}
@@ -496,7 +497,7 @@ function ProgressTile({
             {tasks.cancelled ? `, отменено ${tasks.cancelled}` : ''}
           </dd>
         </div>
-        <div className="mb-0 flex flex-wrap justify-start gap-x-1.5">
+        <div className="mb-0 flex flex-wrap justify-start gap-x-1.5 gap-y-0">
           <dt className="text-muted-foreground">ChangeSet:</dt>
           <dd className="m-0 text-left">
             принято {changeSets.accepted} из {changeSets.total}
@@ -588,13 +589,13 @@ function HarnessTile({
     >
       <div className="grid min-w-0 gap-3 md:grid-cols-3">
         <dl className="m-0 grid content-start gap-1">
-          <div className="mb-0 flex flex-wrap justify-start gap-x-1.5">
+          <div className="mb-0 flex flex-wrap justify-start gap-x-1.5 gap-y-0">
             <dt className="text-muted-foreground">Слоты:</dt>
             <dd className="m-0 text-left">
               занято {h.active} из {h.concurrency}
             </dd>
           </div>
-          <div className="mb-0 flex flex-wrap justify-start gap-x-1.5">
+          <div className="mb-0 flex flex-wrap justify-start gap-x-1.5 gap-y-0">
             <dt className="text-muted-foreground">Попытки за 24 ч:</dt>
             <dd className="m-0 text-left">
               {h.attempts24h.total ? (
@@ -608,7 +609,7 @@ function HarnessTile({
               )}
             </dd>
           </div>
-          <div className="mb-0 flex flex-wrap justify-start gap-x-1.5">
+          <div className="mb-0 flex flex-wrap justify-start gap-x-1.5 gap-y-0">
             <dt className="text-muted-foreground">Сбои:</dt>
             <dd className="m-0 text-left">
               задач {h.failures.tasks}, разборов свойств {h.failures.recoveries}, без движения{' '}
@@ -654,7 +655,13 @@ function HarnessTile({
               , оценка ${budget.spentUsd.toFixed(2)}
               {budget.limitUsd !== undefined ? ` из $${budget.limitUsd.toFixed(2)}` : ''}
               {budget.unknownCalls ? `; стоимость неизвестна у ${budget.unknownCalls} вызовов` : ''}
+              {budget.limitMs !== undefined
+                ? `; время ${minutes(budget.spentMs ?? 0)} из ${minutes(budget.limitMs)}`
+                : ''}
               {budget.exceeded > 1 ? `; исчерпано бюджетов: ${budget.exceeded}` : ''}
+              {budget.state !== 'within' && budget.reason && (
+                <span className="block">{budget.reason}</span>
+              )}
             </p>
           ) : (
             <p className="text-muted-foreground m-0">Бюджеты не заданы.</p>
@@ -762,7 +769,11 @@ export function Home() {
   }, [load]);
   useAttentionScreen(() => home?.links.attention ?? '/?view=attention');
   useEffect(() => {
+    const before = document.title;
     document.title = 'DevContour · Главная';
+    return () => {
+      document.title = before;
+    };
   }, []);
 
   const limit = narrow ? 2 : 3;

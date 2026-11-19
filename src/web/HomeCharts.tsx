@@ -123,7 +123,7 @@ export function LoadChart({ load, concurrency }: { load: HomeLoad; concurrency: 
   const totals = load.peaks.map((p) => p[0] + p[1] + p[2] + p[3]);
   const peak = Math.max(0, ...totals);
   const at = totals.indexOf(peak);
-  const now = load.peaks.at(-1)?.[0] ?? 0;
+  const now = load.current;
   const max = Math.max(peak, concurrency, 1);
   const start = (i: number) => from + i * load.bucketMs;
   const split = (p: number[]) =>

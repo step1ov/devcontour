@@ -1,4 +1,4 @@
-import { test } from 'node:test';
+import { mock, test } from 'node:test';
 import assert from 'node:assert/strict';
 import { complete, fixture, input } from './helpers.ts';
 import { approvePreparation } from './preparation-fixture.ts';
@@ -42,7 +42,14 @@ const run = (over: Partial<Run> & { id: string }): Run =>
     ...over,
   }) as Run;
 const evidence = (gate: string, passed: boolean, extra: Record<string, unknown> = {}) =>
-  ({ gate, passed, kind: 'test', phase: 'candidate', ...extra }) as unknown as Run['evidence'][0];
+  ({
+    gate,
+    passed,
+    kind: 'test',
+    phase: 'candidate',
+    createdAt: at(HOUR),
+    ...extra,
+  }) as unknown as Run['evidence'][0];
 
 const emptyAttention: AttentionView = {
   revision: 1,
@@ -70,12 +77,14 @@ test('Home harness: attempts of the last 24 h by failure kind; a long tail folds
     run({ id: 'cancel', status: 'cancelled' }),
     run({ id: 'gone', status: 'expired', failureKind: 'environment' }),
     run({ id: 'raw', status: 'failed' }),
+    // Начатая позже now (расхождение часов) — не попытка этих суток.
+    run({ id: 'future', status: 'failed', startedAt: at(-60_000) }),
     ...[0, 1, 2].map((i) => run({ id: `g${i}`, status: 'failed', failureKind: 'gate' })),
     ...kinds.map((k) => run({ id: k, status: 'failed', failureKind: k as Run['failureKind'] })),
   ];
   const a = attemptsOf(runs, NOW);
   // Старше суток — вне окна; отменённая — не сбой; истёкшая — сбой.
-  assert.equal(a.total, runs.length - 1);
+  assert.equal(a.total, runs.length - 2);
   assert.equal(a.failed, 1 + 1 + 3 + kinds.length);
   assert.equal(a.byKind.gate, 3);
   assert.equal(a.byKind.environment, 1);
@@ -104,16 +113,42 @@ test('Home harness: failing gates of the last 24 h, reused and not-applicable re
         evidence('types', false, { kind: 'not-applicable' }),
       ],
     }),
-    run({ id: 'old', startedAt: at(30 * HOUR), evidence: [evidence('lint', false)] }),
+    run({
+      id: 'old',
+      startedAt: at(30 * HOUR),
+      finishedAt: at(29 * HOUR),
+      evidence: [evidence('lint', false, { createdAt: at(29 * HOUR) })],
+    }),
+    // Начата больше суток назад, проверка записана минуту назад: она в окне.
+    run({
+      id: 'long',
+      startedAt: at(25 * HOUR),
+      evidence: [
+        evidence('long-gate', false, { createdAt: at(60_000) }),
+        evidence('long-gate', true, { createdAt: at(25 * HOUR - 1000) }),
+      ],
+    }),
     run({
       id: 'r2',
       evidence: ['g1', 'g2', 'g3', 'g4', 'g5', 'g6'].map((g) => evidence(g, false)),
     }),
   ];
   const g = gatesOf(runs, NOW);
-  assert.equal(g.total, 3 + 6, 'unit, lint, e2e and six more; not-applicable is not a gate run');
+  assert.equal(
+    g.total,
+    3 + 6 + 1,
+    'unit, lint, e2e, six more and long-gate; not-applicable is not a gate run',
+  );
   assert.equal(g.failing.length, HOME_LIMITS.failingGates);
   assert.deepEqual(g.failing[0], { gate: 'e2e', failed: 2, passed: 0 });
+  assert.deepEqual(
+    gatesOf(
+      runs.filter((r) => r.id === 'long'),
+      NOW,
+    ).failing,
+    [{ gate: 'long-gate', failed: 1, passed: 0 }],
+    'evidence time, not attempt start, decides the window',
+  );
   // Отказ старше суток не делает lint отказавшим.
   assert.ok(!g.failing.some((x) => x.gate === 'lint'));
   assert.deepEqual(
@@ -291,13 +326,26 @@ test('Home progress: releases of the approved product, task totals and ChangeSet
     f.h.cancel(second.id, 'не нужна');
     const changeId = approvePreparation(new Preparation(f.store));
     const state = f.store.view();
+    // Порядок массива после sync — по ключам: самый новый (C-3) стоит первым.
     const sets = [
-      { id: 'C-1', title: 'Принятый', acceptance: { at: at(0) }, verifications: [] },
-      { id: 'C-2', title: 'Упавший', verifications: [{ status: 'failed' }] },
       {
         id: 'C-3',
         title: 'Проверяется',
+        createdAt: at(HOUR),
         verifications: [{ status: 'failed' }, { status: 'active' }],
+      },
+      {
+        id: 'C-1',
+        title: 'Принятый',
+        createdAt: at(3 * HOUR),
+        acceptance: { at: at(0) },
+        verifications: [],
+      },
+      {
+        id: 'C-2',
+        title: 'Упавший',
+        createdAt: at(2 * HOUR),
+        verifications: [{ status: 'failed' }],
       },
     ] as unknown as DevContourState['changeSets'];
     const home = homeView({
@@ -326,7 +374,27 @@ test('Home progress: releases of the approved product, task totals and ChangeSet
     if (!releases.enabled || !releases.current) throw new Error('preparation');
     assert.equal(p.releasesTotal, releases.current.releases.length);
     assert.ok(p.releasesTotal > 0);
-    assert.equal(p.releases[0].id, releases.current.releases[0].id);
+    assert.deepEqual(
+      p.releases.map(({ id, tasks, done, failed, criteria, readiness }) => ({
+        id,
+        tasks,
+        done,
+        failed,
+        criteria,
+        readiness,
+      })),
+      releases.current.releases
+        .slice(0, HOME_LIMITS.releases)
+        .map(({ id, tasks, done, failed, criteria, readiness }) => ({
+          id,
+          tasks,
+          done,
+          failed,
+          criteria,
+          readiness,
+        })),
+    );
+    assert.ok(p.releases.some((r) => r.criteria > 0));
     assert.notEqual(p.releases[0].title, '');
     assert.equal(p.href, '/?view=boards&tab=progress');
     assert.equal(p.coverage!.available, false);
@@ -355,36 +423,45 @@ test('Home progress: no engine and no approved releases — no progress tile dat
   }
 });
 
-test('Home slow tier: computed once across revisions within 30 s and shared with the product map', async () => {
+test('Home slow tier: computed once across revisions within 30 s, recomputed after them with a new asOf', async () => {
   const f = fixture();
   const board = f.h.createBoard('Доска', '', 'main');
   const t = f.h.addTask(board.id, input('Задача'));
   f.h.approve(board.id);
   complete(f.h, t.id);
   const app = await serve(f.h, new Scheduler(f.h, f.root), { port: 0 });
+  const real = Date.now.bind(Date);
+  let shift = 0;
+  const clock = mock.method(Date, 'now', () => real() + shift);
   try {
     const get = async () =>
       (await (await fetch(app.url + '/api/home')).json()) as HomeView & { etag: string };
     const first = await get();
     assert.equal(app.projections.homeSlows.computations, 1);
-    const products = app.projections.products.computations;
-    assert.equal(products, 1, 'the slow tier reads the product map through its cache');
     const asOf = first.harness!.gates!.asOf;
     for (let i = 0; i < 3; i++) {
       f.store.atomic(() => f.store.saveLocal('home-slow', undefined, 'k', { at: i }));
       const next = await get();
       assert.equal(next.harness!.gates!.asOf, asOf, 'slow tier reused within 30 s');
+      assert.equal(next.harness!.load!.asOf, asOf);
     }
     assert.equal(app.projections.homeSlows.computations, 1);
     assert.equal(app.projections.homes.computations, 4, 'the fast tier follows every revision');
-    // Вкладка карты продукта получает то же вычисление.
-    await fetch(app.url + '/api/product');
-    assert.equal(app.projections.products.computations, products);
+    // Через 30 с после записей — пересчёт и новый момент расчёта.
+    shift = 31_000;
+    const later = await get();
+    assert.equal(app.projections.homeSlows.computations, 2);
+    assert.ok(Date.parse(later.harness!.gates!.asOf) >= Date.parse(asOf) + 30_000);
+    // Без новых записей — не пересчитывается и ещё через 30 с.
+    shift = 62_000;
+    await get();
+    assert.equal(app.projections.homeSlows.computations, 2);
     assert.ok(first.harness!.attempts24h.total >= 1);
     assert.ok(first.harness!.gates!.total >= 1);
     assert.equal(first.harness!.usage!.calls >= 0, true);
     assert.equal(first.progress!.tasks.done, 1);
   } finally {
+    clock.mock.restore();
     await app.close();
     f.cleanup();
   }
@@ -441,57 +518,83 @@ test('Home: attention service view stays the input of the home projection', () =
 });
 
 test('Home load: peak concurrency per 15 min with outcomes; overlapping runs, running clipped to now, empty history', () => {
-  const empty = loadOf([], NOW);
+  // now не на границе четверти часа: окно — ровно сутки до него.
+  const now = NOW + 7 * 60_000;
+  const ago = (ms: number) => new Date(now - ms).toISOString();
+  const Q = 15 * 60_000;
+  const empty = loadOf([], now);
   assert.equal(empty.peaks.length, HOME_LIMITS.loadBuckets);
   assert.equal(empty.hourly.length, 24);
+  assert.equal(empty.current, 0);
   assert.ok(empty.peaks.every((p) => p.every((n) => n === 0)));
-  assert.equal(Date.parse(empty.to) - Date.parse(empty.from), 24 * HOUR);
-  assert.ok(Date.parse(empty.to) >= NOW && Date.parse(empty.to) - NOW < 15 * 60_000);
+  assert.equal(Date.parse(empty.to), now);
+  assert.equal(Date.parse(empty.from), now - 24 * HOUR);
+  // Интервал, в который попадает момент `msAgo` до now.
+  const bucket = (msAgo: number) => Math.floor((24 * HOUR - msAgo) / Q);
 
-  const Q = 15 * 60_000;
-  // Окно кончается на границе интервала после NOW (NOW — ровно 12:00).
-  const bucket = (msAgo: number) => Math.floor((NOW - msAgo - Date.parse(empty.from)) / Q);
   const runs = [
-    // Две попытки перекрываются в 11:05–11:10: пик 2 (принята и сбой).
-    run({ id: 'a', status: 'succeeded', startedAt: at(60 * 60_000), finishedAt: at(50 * 60_000) }),
-    run({ id: 'b', status: 'failed', startedAt: at(55 * 60_000), finishedAt: at(40 * 60_000) }),
-    // Третья начинается после конца первой: пик не растёт до 3.
-    run({ id: 'c', status: 'cancelled', startedAt: at(49 * 60_000), finishedAt: at(46 * 60_000) }),
-    // Идущая попытка — до now, не дальше.
-    run({ id: 'd', status: 'active', startedAt: at(20 * 60_000), leaseUntil: NOW + HOUR }),
-    // Старше окна и начатая «в будущем» — вне графика.
-    run({ id: 'old', status: 'succeeded', startedAt: at(30 * HOUR), finishedAt: at(29 * HOUR) }),
-    run({ id: 'future', status: 'active', startedAt: new Date(NOW + 60_000).toISOString() }),
+    // Перекрываются: пик 2 (принята и сбой).
+    run({
+      id: 'a',
+      status: 'succeeded',
+      startedAt: ago(60 * 60_000),
+      finishedAt: ago(50 * 60_000),
+    }),
+    run({ id: 'b', status: 'failed', startedAt: ago(55 * 60_000), finishedAt: ago(40 * 60_000) }),
+    // Начинается после конца первой: пик не растёт до 3.
+    run({
+      id: 'c',
+      status: 'cancelled',
+      startedAt: ago(49 * 60_000),
+      finishedAt: ago(46 * 60_000),
+    }),
+    // Три принятые раньше в последнем интервале, потом одна идущая: «сейчас» — 1, не 0.
+    ...[0, 1, 2].map((i) =>
+      run({
+        id: `early${i}`,
+        status: 'succeeded',
+        startedAt: ago(10 * 60_000),
+        finishedAt: ago(6 * 60_000),
+      }),
+    ),
+    run({ id: 'live', status: 'active', startedAt: ago(5 * 60_000), leaseUntil: now + HOUR }),
+    // «Идущая» попытка упавшего controller: срок аренды истёк — нагрузки нет.
+    run({
+      id: 'dead',
+      status: 'active',
+      startedAt: ago(3 * HOUR),
+      leaseUntil: now - 3 * HOUR + Q / 3,
+    }),
+    // Старше окна и начатая после now — вне графика и вне часов.
+    run({ id: 'old', status: 'succeeded', startedAt: ago(30 * HOUR), finishedAt: ago(29 * HOUR) }),
+    run({ id: 'future', status: 'failed', startedAt: new Date(now + 60_000).toISOString() }),
     // Оборванная без конца — до срока аренды.
     run({
       id: 'e',
       status: 'expired',
-      startedAt: at(4 * HOUR),
-      leaseUntil: NOW - 4 * HOUR + Q / 3,
+      startedAt: ago(4 * HOUR),
+      leaseUntil: now - 4 * HOUR + Q / 3,
     }),
   ];
-  const load = loadOf(runs, NOW);
+  const load = loadOf(runs, now);
   const sum = (p: number[]) => p.reduce((x, y) => x + y, 0);
   assert.equal(load.peaks.length, HOME_LIMITS.loadBuckets);
-  // 11:00–11:15: a (11:00–11:10) и b (11:05–11:20) перекрываются.
-  assert.deepEqual(load.peaks[bucket(60 * 60_000)], [0, 1, 1, 0]);
-  // 11:15–11:30: b до 11:20, c 11:11–11:14 уже кончилась.
-  assert.deepEqual(load.peaks[bucket(45 * 60_000)], [0, 0, 1, 0]);
-  // Идущая попытка: 11:40–12:00 и ни одного интервала после now.
-  assert.deepEqual(load.peaks[bucket(20 * 60_000)], [1, 0, 0, 0]);
-  assert.deepEqual(load.peaks[bucket(1)], [1, 0, 0, 0]);
-  assert.ok(
-    load.peaks.slice(bucket(0) + 1).every((p) => sum(p) === 0),
-    'nothing after now',
-  );
+  assert.deepEqual(load.peaks[bucket(55 * 60_000)], [0, 1, 1, 0]);
+  assert.equal(Math.max(...load.peaks.slice(0, bucket(20 * 60_000)).map(sum)), 2);
+  // Последний интервал: пик — три принятые, но сейчас идёт одна.
+  assert.deepEqual(load.peaks.at(-1), [0, 3, 0, 0]);
+  assert.equal(load.current, 1);
+  // Истёкшая аренда «идущей» — только до срока, дальше пусто.
+  assert.deepEqual(load.peaks[bucket(3 * HOUR - 1)], [1, 0, 0, 0]);
+  assert.equal(sum(load.peaks[bucket(3 * HOUR - 1) + 1]), 0);
+  assert.equal(sum(load.peaks[bucket(3 * HOUR - 1) + 4]), 0);
   // Оборванная — только интервал до срока аренды.
-  assert.deepEqual(load.peaks[bucket(4 * HOUR)], [0, 0, 1, 0]);
-  assert.equal(sum(load.peaks[bucket(4 * HOUR) + 1]), 0);
-  assert.equal(Math.max(...load.peaks.map(sum)), 2);
-  // По часам: начатые в окне и сбои среди них (failed, expired).
+  assert.deepEqual(load.peaks[bucket(4 * HOUR - 1)], [0, 0, 1, 0]);
+  assert.equal(sum(load.peaks[bucket(4 * HOUR - 1) + 1]), 0);
+  // По часам: начатые в [now − 24 ч, now) — без старой и будущей.
   assert.equal(
     load.hourly.reduce((n, [t]) => n + t, 0),
-    5,
+    runs.length - 2,
   );
   assert.equal(
     load.hourly.reduce((n, [, f]) => n + f, 0),
@@ -514,4 +617,51 @@ test('Home load: the series size does not grow with history', () => {
   assert.equal(load.peaks.length, HOME_LIMITS.loadBuckets);
   assert.ok(JSON.stringify(load).length < 4096, `${JSON.stringify(load).length} bytes`);
   assert.ok(ms < 2000, `${ms} ms`);
+});
+
+test('Home: unbounded strings from configuration and runs are clipped; a time-only budget keeps its limit', () => {
+  const f = fixture();
+  const board = f.h.createBoard('Доска', '', 'main');
+  f.h.addTask(board.id, input('Задача'));
+  f.h.approve(board.id);
+  f.h.pause(false);
+  const claimed = f.h.claim('test')!;
+  try {
+    const state = f.store.view();
+    const huge = 'm'.repeat(70_000);
+    const runs = state.runs.map((r) => (r.id === claimed.id ? { ...r, model: huge } : r));
+    const home = homeView({
+      state: { ...state, runs },
+      h: f.h,
+      attention: emptyAttention,
+      revision: 1,
+      now: Date.now(),
+    });
+    assert.ok(home.sections.development.runningNow[0].model!.length <= HOME_LIMITS.title);
+    assert.ok(Buffer.byteLength(JSON.stringify(home)) < HOME_LIMITS.bytes);
+  } finally {
+    f.cleanup();
+  }
+  const time = budgetOf(
+    {
+      budgets: [
+        {
+          scope: { kind: 'workspace' },
+          state: 'exceeded',
+          limit: { timeMs: 3_600_000 },
+          reportedUsd: 0,
+          estimatedUsd: 0,
+          unknownCalls: 0,
+          unfinishedCalls: 0,
+          durationMs: 4_000_000,
+          reason: 'Бюджет времени workspace исчерпан',
+        },
+      ],
+    },
+    at(0),
+  )!;
+  assert.equal(time.limitMs, 3_600_000);
+  assert.equal(time.spentMs, 4_000_000);
+  assert.equal(time.limitUsd, undefined);
+  assert.equal(time.reason, 'Бюджет времени workspace исчерпан');
 });

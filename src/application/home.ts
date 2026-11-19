@@ -276,6 +276,8 @@ export interface HomeHarness {
     /** Область, которая держит работу (или общая): workspace, доска, задача. */
     scope: string;
     limitUsd?: number;
+    limitMs?: number;
+    spentMs?: number;
     spentUsd: number;
     unknownCalls: number;
     complete: boolean;
@@ -312,6 +314,8 @@ export interface HomeLoad {
   peaks: [number, number, number, number][];
   /** Начатые попытки по часам: [всего, со сбоем]. */
   hourly: [number, number][];
+  /** Попыток, идущих в момент расчёта (`asOf`). */
+  current: number;
   asOf: string;
 }
 /** Медленный ярус главной: считается не чаще раза в 30 с (`minAgeMs`). */
@@ -635,9 +639,9 @@ function development(
       return {
         taskId: r.taskId,
         title: clip(byId.get(r.taskId)?.title ?? r.taskId),
-        ...(role ? { roleTitle: role } : {}),
+        ...(role ? { roleTitle: clip(role) } : {}),
         phase: r.phase,
-        ...(r.model ? { model: r.model } : {}),
+        ...(r.model ? { model: clip(r.model) } : {}),
         attempt: r.attempt,
         startedAt: r.startedAt,
         href: hrefs.task(r.taskId),
@@ -700,11 +704,20 @@ function progressOf(
           ? ('failed' as const)
           : ('open' as const);
   const sets = state.changeSets.map((c) => ({ c, status: statusOf(c) }));
-  const latest = sets.at(-1);
+  // Порядок массива после sync — по ключам, не по времени: последний — по createdAt.
+  const latest = sets.reduce<(typeof sets)[number] | undefined>(
+    (best, x) =>
+      !best ||
+      x.c.createdAt > best.c.createdAt ||
+      (x.c.createdAt === best.c.createdAt && x.c.id > best.c.id)
+        ? x
+        : best,
+    undefined,
+  );
   const preparation = prep.enabled;
   return {
     releases: releases.slice(0, HOME_LIMITS.releases).map((r) => ({
-      id: r.id,
+      id: clip(r.id),
       title: clip(titles.get(r.id) ?? r.id),
       tasks: r.tasks,
       done: r.done,
@@ -747,7 +760,10 @@ const lastHour = (events: readonly AuditEvent[], type: string, now: number) =>
 
 /** Попытки за сутки по классу отказа: первые `failureKinds` классов, остальные — `other`. */
 export function attemptsOf(runs: DevContourState['runs'], now: number) {
-  const recent = runs.filter((r) => now - Date.parse(r.startedAt) < DAY_MS);
+  const recent = runs.filter((r) => {
+    const age = now - Date.parse(r.startedAt);
+    return age >= 0 && age < DAY_MS;
+  });
   const failed = recent.filter((r) => r.status === 'failed' || r.status === 'expired');
   const counts = new Map<string, number>();
   for (const r of failed) {
@@ -831,24 +847,25 @@ const outcomeOf = (r: DevContourState['runs'][number]): number =>
  */
 export function loadOf(runs: DevContourState['runs'], now: number): Omit<HomeLoad, 'asOf'> {
   const buckets = HOME_LIMITS.loadBuckets;
-  const to = Math.ceil(now / LOAD_BUCKET_MS) * LOAD_BUCKET_MS;
+  // Окно — ровно сутки до now: интервалы отсчитаны от now, последний
+  // кончается в момент расчёта.
+  const to = now;
   const from = to - buckets * LOAD_BUCKET_MS;
   const spans = runs.flatMap((r) => {
     const start = Date.parse(r.startedAt);
     if (!Number.isFinite(start) || start >= now) return [];
     const finished = r.finishedAt ? Date.parse(r.finishedAt) : NaN;
-    const lease = r.leaseUntil > 0 ? r.leaseUntil : Infinity;
-    const end = Math.min(
-      now,
-      Number.isFinite(finished) ? finished : r.status === 'active' ? now : Math.min(lease, now),
-    );
+    // Без записанного конца — до срока аренды (и у «идущей» попытки упавшего
+    // controller), не дальше now.
+    const lease = r.leaseUntil > 0 ? r.leaseUntil : r.status === 'active' ? now : start;
+    const end = Math.min(now, Number.isFinite(finished) ? finished : lease);
     if (end <= from || end <= start) return [];
     return [{ start, end, outcome: outcomeOf(r) }];
   });
   const peaks: HomeLoad['peaks'] = [];
   for (let b = 0; b < buckets; b++) {
     const lo = from + b * LOAD_BUCKET_MS;
-    const hi = Math.min(lo + LOAD_BUCKET_MS, now);
+    const hi = lo + LOAD_BUCKET_MS;
     let best: [number, number, number, number] = [0, 0, 0, 0];
     let bestTotal = 0;
     if (lo < now) {
@@ -869,17 +886,21 @@ export function loadOf(runs: DevContourState['runs'], now: number): Omit<HomeLoa
   const hourly: HomeLoad['hourly'] = Array.from({ length: 24 }, () => [0, 0]);
   for (const r of runs) {
     const start = Date.parse(r.startedAt);
-    if (!(start >= from && start < to)) continue;
+    if (!(start >= from && start < to)) continue; // окно [now − 24 ч, now)
     const hour = Math.floor((start - from) / (4 * LOAD_BUCKET_MS));
     hourly[hour][0]++;
     if (r.status === 'failed' || r.status === 'expired') hourly[hour][1]++;
   }
+  const current = [0, 0, 0, 0] as [number, number, number, number];
+  for (const x of spans) if (x.start <= now && x.end >= now) current[x.outcome]++;
   return {
     from: new Date(from).toISOString(),
     to: new Date(to).toISOString(),
     bucketMs: LOAD_BUCKET_MS,
     peaks,
     hourly,
+    // Идут в момент расчёта: не пик последнего интервала.
+    current: current[0],
   };
 }
 
@@ -887,11 +908,15 @@ export function loadOf(runs: DevContourState['runs'], now: number): Omit<HomeLoa
 export function gatesOf(runs: DevContourState['runs'], now: number) {
   const rows = new Map<string, { gate: string; failed: number; passed: number }>();
   for (const run of runs) {
-    if (now - Date.parse(run.startedAt) >= DAY_MS) continue;
+    // Попытка, кончившаяся раньше суток назад, свежих записей не несёт.
+    if (run.finishedAt && now - Date.parse(run.finishedAt) >= DAY_MS) continue;
     for (const e of run.evidence) {
+      // Окно — по времени записи проверки, а не начала попытки.
+      const age = now - Date.parse(e.createdAt);
+      if (!(age >= 0 && age < DAY_MS)) continue;
       // Взятая из кандидата запись — не запуск; неприменимый gate — не результат.
       if (e.kind !== 'test' || e.reusedEvidence) continue;
-      const row = rows.get(e.gate) ?? { gate: e.gate, failed: 0, passed: 0 };
+      const row = rows.get(e.gate) ?? { gate: clip(e.gate), failed: 0, passed: 0 };
       row[e.passed ? 'passed' : 'failed'] += 1;
       rows.set(e.gate, row);
     }
@@ -914,6 +939,7 @@ type Budgets = {
     estimatedUsd: number;
     unknownCalls: number;
     unfinishedCalls: number;
+    durationMs?: number;
     reason?: string;
   }[];
 };
@@ -928,9 +954,13 @@ export function budgetOf(overview: Budgets | undefined, asOf: string): HomeSlow[
   );
   return {
     state: b.state,
-    scope:
+    scope: clip(
       b.scope.kind === 'workspace' ? 'workspace' : `${b.scope.kind} ${b.scope.id ?? ''}`.trim(),
+    ),
     ...(b.limit.usd !== undefined ? { limitUsd: b.limit.usd } : {}),
+    // Предел по времени: бюджет только по времени иначе читался бы как «$0».
+    ...(b.limit.timeMs !== undefined ? { limitMs: b.limit.timeMs } : {}),
+    ...(b.durationMs !== undefined ? { spentMs: b.durationMs } : {}),
     spentUsd: b.reportedUsd + b.estimatedUsd,
     unknownCalls: b.unknownCalls,
     complete: b.unknownCalls === 0 && b.unfinishedCalls === 0,
@@ -955,7 +985,7 @@ export function coverageOf(
     return { available: false, reason: clip(view.reason, HOME_LIMITS.startupError), asOf, href };
   return {
     available: true,
-    releaseId: view.releaseId,
+    releaseId: clip(view.releaseId),
     complete: view.coverageComplete,
     accepted: view.releaseAccepted,
     issueCount: view.issues.length,
