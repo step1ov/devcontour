@@ -31,6 +31,8 @@ export interface ReviewEscalation {
   round: number;
   at: string;
   summary: string;
+  /** Файл ответа reviewer последнего раунда: полный текст находок. */
+  artifact: string;
   /** Блокирующие находки, открытые три раунда подряд и без решения владельца. */
   findings: { id: string; message: string; rounds: number }[];
   /** Сколько таких находок сверх `findings`. */
@@ -100,6 +102,7 @@ export function reviewEscalations(h: DevContour): readonly ReviewEscalation[] {
       round: r.round,
       at: r.at,
       summary: r.summary,
+      artifact: r.artifact,
       findings: open.slice(0, ESCALATION_FINDINGS).map((f) => ({
         id: f.id,
         message: f.message,

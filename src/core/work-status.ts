@@ -194,6 +194,12 @@ export function staleBaseStop(
  * (`queue_set`, `queue --start --by host`) сняло бы ожидание без gates —
  * `pause` отказывает. Ручной маршрут — запуск оператора после проверки.
  */
+/** Действие, когда перенесённую базу проверяет сам цикл задания доски. */
+const BASE_WAIT_LOOP = 'Цикл ведущего проверит базу gates и продолжит выдачу сам';
+/** Окончание причины переноса базы — команда человеку (`waitBaseCheck`). */
+const BASE_MOVED_COMMAND = /: проверьте её гейтами и продолжите очередь$/;
+const BASE_MOVED_LOOP = ': цикл ведущего проверяет её gates и продолжит очередь сам';
+
 export const BASE_WAIT_ACTION =
   'Базу проверит workflow доски: зарегистрируйте доску через workflow_start (идущее задание проверит её само) — его цикл исполнит gates на новой базе и продолжит выдачу. Ведущий агент само ожидание не снимает: queue_set и queue --start --by host снимают только паузу поверх него, а когда очередь держит одно ожидание — откажут. Без workflow ожидание снимает только пользователь после проверки базы — «Подтвердить и запустить» в «Внимании» панели; попросите его, сами очередь не запускайте';
 
@@ -252,6 +258,11 @@ export function queueStopView(
     baseRange?: boolean;
     /** Идёт задание доски: только его стадия проверяет базу (не ChangeSet). */
     boardActive?: boolean;
+    /**
+     * Повторы проверки этой базы исчерпаны (`baseCheckSpent`): цикл gates не
+     * запустит — как проваленная проверка, выход — исправить и перенести базу.
+     */
+    baseExhausted?: boolean;
   } = {},
 ): QueueStopView {
   if (!state.paused) return { paused: false };
@@ -295,11 +306,15 @@ export function queueStopView(
   // (`pause` отказывает или оставляет `base-check`), а «queue --start снимет
   // и ожидание» читалось бы как разрешение снять его без gates.
   const agentWait =
-    agent && wait && !heldBaseOf(state) && !wait.startsWith('Проверка базы не пройдена')
+    agent &&
+    wait &&
+    !heldBaseOf(state) &&
+    !wait.startsWith('Проверка базы не пройдена') &&
+    !options.baseExhausted
       ? options.baseRange === false
         ? BASE_WAIT_NO_RANGE
         : (options.boardActive ?? options.workflowActive)
-          ? 'Цикл ведущего проверит базу gates и продолжит выдачу сам'
+          ? BASE_WAIT_LOOP
           : BASE_WAIT_ACTION
       : undefined;
   const baseUpdate = agent
@@ -333,12 +348,16 @@ export function queueStopView(
         true,
       ];
     if (wait) {
-      const checkFailed = wait.startsWith('Проверка базы не пройдена');
+      const checkFailed = wait.startsWith('Проверка базы не пройдена') || !!options.baseExhausted;
       const held = !!heldBaseOf(state);
+      // Базу проверяет сам цикл: причина — не команда «проверьте её гейтами»,
+      // которую записал перенос, а то, что происходит.
+      const shown =
+        agentWait === BASE_WAIT_LOOP ? wait.replace(BASE_MOVED_COMMAND, BASE_MOVED_LOOP) : wait;
       // В режиме агента ожидание при любой паузе проверяет цикл задания
       // доски (`agentWait`), провал проверки исправляет перенос базы.
       return [
-        wait,
+        shown,
         held
           ? HELD_BASE_ACTION
           : agent && checkFailed

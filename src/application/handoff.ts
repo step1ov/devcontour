@@ -6,7 +6,7 @@
 // Это не handoff публикации ChangeSet (`devcontour handoff --changeset`):
 // тот готовит результат к push/PR человеком.
 import { DiscussionService, type InboxRequest } from './discussion.ts';
-import { InputService } from './input.ts';
+import { InputService, ownerAnswersAgain } from './input.ts';
 import {
   hintDetail,
   hintLocaleOf,
@@ -1654,11 +1654,7 @@ function inputStep(ctx: HostContext, taskId: string): HandoffHostNext | undefine
     });
   // Сохранённый ответ ведущего на вопрос владельца (записан до правила
   // ответов ведущего): не доводится, вопрос снова отвечает владелец.
-  if (
-    !operator &&
-    summary.actor === 'operator' &&
-    ['answer-saved', 'context-review', 'ready-to-apply', 'stale'].includes(summary.state)
-  )
+  if (ownerAnswersAgain(summary))
     return withDetail(h, {
       action: 'answer-input',
       ...base,
@@ -1898,6 +1894,8 @@ function escalationStep(ctx: HostContext): HandoffHostNext | undefined {
         ? e.subject
         : undefined;
     if (pack.graphId && boardId !== pack.graphId) continue;
+    // Отложенная доска (F86): ни ревью её плана, ни шага по нему до снятия отметки.
+    if (boardId && parkedHold(h, state, boardId)) continue;
     return withDetail(h, {
       action: 'operator',
       ...(boardId ? { boardId } : {}),

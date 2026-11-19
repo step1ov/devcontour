@@ -50,7 +50,7 @@ import {
 } from '../core/input-labels.ts';
 import { budgetBlocks } from './context.ts';
 import { budgetCardReason } from '../core/usage.ts';
-import { InputService, inputHolds, type InputProposal } from './input.ts';
+import { InputService, inputHolds, ownerAnswersAgain, type InputProposal } from './input.ts';
 import { hrefs } from './panel-links.ts';
 import { inputReviewRounds } from '../harness/input-host.ts';
 import { DiscussionService } from './discussion.ts';
@@ -652,12 +652,15 @@ const inputSource: AttentionSourceRule = {
           // отклонило ревью (как в карточке задачи).
           // В режиме agent сохранённый ответ ведущего на вопрос владельца
           // (записан до правила ответов ведущего) тоже ждёт ответа владельца.
+          // Правило — то же, что у шага `answer-operator` (`ownerAnswersAgain`):
+          // ответ со сдвинувшейся остановкой (F85) формы не получает — его
+          // выход — замена вопроса той же задачей (F94).
           const answer =
             operator &&
+            !r.moved &&
             (r.state === 'awaiting-answer' ||
               r.state === 'review-rejected' ||
-              (!operatorMode &&
-                ['answer-saved', 'context-review', 'ready-to-apply', 'stale'].includes(r.state)));
+              ownerAnswersAgain(r));
           // Отклонённое ревью (D03 `review-rejected`): в режиме operator ответ
           // применяют только подтверждением показанного раунда — то же правило
           // `InputService.apply`, что у панели; его находки — в карточке.
@@ -880,15 +883,13 @@ const reviewSource: AttentionSourceRule = {
       const shown: typeof e.findings = [];
       let list = '';
       for (const f of e.findings) {
-        // Первая находка длиннее всего предела усекается (остальное — по
-        // ссылке на предмет); следующие входят только целиком.
-        const room = ATTENTION_LIMITS.prompt - intro.length - outro.length - 160;
-        const line = `\n${shown.length + 1}. ${clip(one(ctx.redact(f.message)), room)} (открыта раундов: ${f.rounds})`;
-        if (
-          shown.length &&
-          (intro + list + line).length + outro.length + 80 > ATTENTION_LIMITS.prompt
-        )
-          break;
+        // Только целиком и без маски: решение не касается текста, которого
+        // владелец не видел. Находка длиннее карточки или со скрытыми
+        // данными решается командой (причина называет её).
+        const text = one(f.message);
+        if (ctx.redact(text) !== text) break;
+        const line = `\n${shown.length + 1}. ${text} (открыта раундов: ${f.rounds})`;
+        if ((intro + list + line).length + outro.length + 120 > ATTENTION_LIMITS.prompt) break;
         shown.push(f);
         list += line;
       }
@@ -918,15 +919,25 @@ const reviewSource: AttentionSourceRule = {
         section,
         title: `Ревью ${what} не сходится: нужно ваше решение`,
         reason: ctx.redact(
-          `Независимое ревью три раунда подряд не снимает блокирующие находки (${count}): ведущий исправлял, ревьюер их оставил. Следующий раунд ждёт вашего решения — принять их как ограничение или дать ещё раунды на исправление. Ведущий агент это решение не принимает.`,
+          shown.length
+            ? `Независимое ревью три раунда подряд не снимает блокирующие находки (${count}): ведущий исправлял, ревьюер их оставил. Следующий раунд ждёт вашего решения — принять их как ограничение или дать ещё раунды на исправление. Ведущий агент это решение не принимает.`
+            : 'Ревью три раунда подряд не снимает находку, которая не помещается в карточку или содержит скрытые данные. Прочитайте её в файле ответа ревью и решите командой ниже: принять как ограничение или продолжить исправлять, с основанием. Ведущий агент это решение не принимает.',
         ),
         since: e.at,
         subject: { kind: 'review', id: `${e.kind}:${e.subject}`, href },
         evidence: [{ kind: 'review', id: `${e.kind}:${e.subject}#${e.round}` }],
-        actions: [
-          action('accept-limitation', 'Принять как ограничение', true),
-          action('continue', 'Продолжить исправлять', false),
-        ],
+        actions: shown.length
+          ? [
+              action('accept-limitation', 'Принять как ограничение', true),
+              action('continue', 'Продолжить исправлять', false),
+            ]
+          : [
+              {
+                id: 'handoff',
+                kind: 'handoff',
+                command: `devcontour review-decide --kind ${e.kind} --subject ${JSON.stringify(e.subject)} --findings ${e.findings[0]?.id ?? ''} --decision accepted-limitation|continue --reason "…" --workspace ${workspaceOf(ctx)}  # находка: ${e.artifact}`,
+              },
+            ],
         covered: [],
         ...(board ? { boards: [board.id] } : {}),
         basis: { kind: e.kind, subject: e.subject, findings: ids },

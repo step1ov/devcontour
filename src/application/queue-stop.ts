@@ -42,8 +42,13 @@ export function queueStopOf(
     ...(baseWait
       ? {
           baseRange,
-          // Цикл доски проверит базу, только если повторы не исчерпаны.
-          ...(baseRange ? { boardActive: live!.has('board') && !baseCheckSpent(h, state) } : {}),
+          ...(baseRange
+            ? {
+                boardActive: live!.has('board'),
+                // Повторы исчерпаны: цикл базу не проверит, выход — перенос.
+                ...(baseCheckSpent(h, state) ? { baseExhausted: true } : {}),
+              }
+            : {}),
         }
       : {}),
   });

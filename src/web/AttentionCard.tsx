@@ -661,6 +661,10 @@ export function AttentionCard({
           }}
         />
         {!operator && handoff && <HandoffCommand command={handoff.command} />}
+        {/* Решение по находке, которая не поместилась в карточку, — командой владельца. */}
+        {operator && item.source === 'review' && handoff && (
+          <HandoffCommand command={handoff.command} label="Команда решения" />
+        )}
         {!compact && (
           <>
             <span aria-hidden="true" className="bg-border mx-1 h-4 w-px shrink-0" />

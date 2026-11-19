@@ -21,6 +21,7 @@ import { git } from '../src/runner/process.ts';
 import { leadLiftsPause, leadResumeOf, queueStopView } from '../src/core/work-status.ts';
 import { LeadWorkflow } from '../src/core/lead-workflow.ts';
 import { homeView } from '../src/application/home.ts';
+import { queueStopOf } from '../src/application/queue-stop.ts';
 import { Workspace } from '../src/core/workspace.ts';
 
 /** Репозиторий, рабочая ветка которого на коммит впереди базы прогонов. */
@@ -174,6 +175,16 @@ test('F93: lead pause over an unheld base check with a board job — no operator
       undefined,
     );
     assert.equal(lifted.queue.hint, 'Ведущий агент проверит базу и продолжит выдачу сам.');
+    // Причина — не команда «проверьте её гейтами», а то, что делает цикл.
+    assert.doesNotMatch(lifted.queue.reason ?? '', /проверьте её гейтами/);
+    assert.match(lifted.queue.reason ?? '', /цикл ведущего проверяет её gates/);
+    const stop = queueStopOf(h);
+    assert.match(
+      stop.stopReason ?? '',
+      /цикл ведущего проверяет её gates и продолжит очередь сам$/,
+    );
+    const card = lifted.attention.items.find((i) => i.sourceKey === 'queue');
+    if (card) assert.doesNotMatch(card.reason, /проверьте её гейтами/);
   });
 });
 
@@ -543,6 +554,12 @@ test('host.next names the way out of a failed base check whose retries are used 
           assert.equal(next.action, 'wait', `${name}: ${JSON.stringify(next)}`);
           assert.equal(next.code, 'pause-lift', name);
         }
+      // Вид остановки очереди не обещает проверку циклом, когда повторы исчерпаны.
+      if (spent) {
+        const stop = queueStopOf(h);
+        assert.doesNotMatch(stop.action ?? '', /Цикл ведущего проверит базу/, name);
+        assert.match(stop.action ?? '', /base-update/, name);
+      }
       // Центр внимания: цикл базу не проверит — снимает человек.
       const { attention } = await views(h);
       const card = attention.items.find((i) => i.sourceKey === 'wait:base-check');

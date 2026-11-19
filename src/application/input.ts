@@ -521,6 +521,22 @@ export function stopQuestions(h: DevContour, workId?: string): Map<string, Input
   return questions;
 }
 
+/**
+ * Владелец отвечает на вопрос заново: сохранённый ответ — ведущего на вопрос,
+ * который решает владелец (`leadAnswerHeld`, записан до правила ответов
+ * ведущего), он ещё не применён, а исходная остановка держится. Одно
+ * правило для шага `answer-operator` пакета передачи и формы «Ответить»
+ * центра внимания: ответ оператора, остановка которого сдвинулась (F85),
+ * сюда не входит — его выход — замена вопроса.
+ */
+export function ownerAnswersAgain(summary: { state: string; leadAnswerHeld?: true; moved?: true }) {
+  return (
+    !!summary.leadAnswerHeld &&
+    !summary.moved &&
+    ['answer-saved', 'context-review', 'ready-to-apply', 'stale'].includes(summary.state)
+  );
+}
+
 export class InputService {
   constructor(
     readonly h: DevContour,
@@ -1193,6 +1209,8 @@ export class InputService {
         : {}),
       ...(resume ? { resume } : {}),
       ...(moved ? { moved: true as const } : {}),
+      // Сохранённый ответ ведущего на вопрос владельца (до правила ответов ведущего).
+      ...(this.leadAnswerHeld(request) ? { leadAnswerHeld: true as const } : {}),
       ...this.nextOf(request, state.state, task, !!proposal?.current, resume, {
         problems: state.problems,
         moved,

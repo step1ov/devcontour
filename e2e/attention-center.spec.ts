@@ -1377,12 +1377,23 @@ test('review escalation: the owner reads the stuck findings, decides with a requ
   const owner = review('review:contract:contract-0123');
   // Копия для ведущего с теми же действиями: панель кнопок не даёт.
   const lead = review('review:contract:contract-lead', { actor: 'lead', category: 'technical' });
-  let items = [owner, lead];
+  // Находка длиннее карточки: решения в панели нет, только команда владельца.
+  const oversized = review('review:contract:contract-huge', {
+    actions: [
+      {
+        id: 'handoff',
+        kind: 'handoff',
+        command: 'devcontour review-decide --kind contract --subject "contract-huge" …',
+      },
+      { id: 'open', kind: 'navigate', href: '/?view=boards&tab=contracts' },
+    ],
+  });
+  let items = [owner, lead, oversized];
   await page.route(isList, (route) => route.fulfill({ json: fakeView(items) }));
   let sent: Record<string, unknown> | undefined;
   await page.route('**/api/attention/act', async (route) => {
     sent = route.request().postDataJSON() as Record<string, unknown>;
-    items = [lead];
+    items = [lead, oversized];
     await route.fulfill({ json: { result: { status: 'recorded' }, resolved: true } });
   });
   await page.goto('/?tab=attention');
@@ -1397,6 +1408,9 @@ test('review escalation: the owner reads the stuck findings, decides with a requ
   await expect(other).toContainText('Ведущий агент разберёт это сам');
   await expect(other.getByRole('button', { name: 'Принять как ограничение' })).toHaveCount(0);
   await expect(other.getByRole('button', { name: 'Продолжить исправлять' })).toHaveCount(0);
+  const huge = cardOf(page, oversized.sourceKey);
+  await expect(huge.getByRole('button', { name: 'Команда решения' })).toBeVisible();
+  await expect(huge.getByRole('button', { name: 'Принять как ограничение' })).toHaveCount(0);
   expect(
     (await new AxeBuilder({ page }).include('[aria-label="Центр внимания"]').analyze()).violations,
   ).toEqual([]);
