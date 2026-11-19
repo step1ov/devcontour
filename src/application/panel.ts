@@ -526,9 +526,8 @@ function summaryOnce(
     // Номер: ревизия данных, отпечаток процесса (если есть) и `.1`, пока
     // действует lease операции.
     const revision =
-      String(h.store.visibleRevision(shared.revision)) +
-      (local ? `.${local}` : '') +
-      (leases.length ? '.1' : '');
+      // Тот же снимок, что у `shared`: ревизия совпадает с `shared.revision`.
+      String(h.store.visibleRevision()) + (local ? `.${local}` : '') + (leases.length ? '.1' : '');
     if (q.revision === revision) return { revision, unchanged: true as const };
     if (!cache) return buildSummary(h, root, q, state, revision, leases, now);
     // Область — запрос без номера клиента: он решает только «без изменений».

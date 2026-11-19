@@ -165,7 +165,11 @@ test('F83: тихие пробуждения не пересчитывают ц�
     const get = async (path: string) => {
       const response = await fetch(app.url + path);
       assert.equal(response.status, 200, path);
-      return (await response.json()) as { etag?: string; unchanged?: boolean; revision?: string };
+      return (await response.json()) as {
+        etag?: string;
+        unchanged?: boolean;
+        revision?: string | number;
+      };
     };
     const first = await get('/api/attention');
     const summary = await get('/api/summary');
@@ -179,6 +183,10 @@ test('F83: тихие пробуждения не пересчитывают ц�
     } finally {
       views.restore();
     }
+    // Пересчитанный центр внимания (кэш истёк) называет тот же номер: номер
+    // ответа — видимая ревизия, а не ревизия данных.
+    const fresh = new AttentionService(f.store, f.h, { root: f.root }).view({}, new Map());
+    assert.equal(fresh.revision, Number(first.revision));
     await runner.stop();
   } finally {
     await app.close();
@@ -270,20 +278,26 @@ test('F83: GET /api/metrics называет счётчики шлюза выд�
     }
     assert.equal(before.pid, process.pid);
     assert.equal(before.idleClaims.maxMs, 30_000);
-    // Счётчики — настоящие: копия документа, выдача под шлюзом, такты
-    // цикла ведущего сервера (каждую секунду).
+    // Счётчики — настоящие: копия документа, выдача под шлюзом (такт
+    // сервера остановлен — шлюзом пользуется только тест: первая выдача
+    // проходит, повтор без перемен — пропуск), такты цикла ведущего сервера
+    // (каждую секунду).
+    await scheduler.stop();
     f.store.read();
     const gate = scheduler.idleClaims;
-    await gate.around(
-      () => 0,
-      () => Promise.resolve(gate.holds()),
-    );
+    for (let i = 0; i < 2; i++)
+      await gate.around(
+        () => 0,
+        () => Promise.resolve(gate.holds()),
+      );
     await new Promise((r) => setTimeout(r, 1200));
     const after = await metrics();
     assert.ok(after.store.reads - before.store.reads >= 1, 'read учтён');
     assert.ok(after.store.parses - before.store.parses >= 1, 'разбор учтён');
     assert.equal(after.store.revision, f.store.revision());
-    assert.ok(after.idleClaims.passed - before.idleClaims.passed >= 1, 'выдача учтена');
+    assert.equal(after.idleClaims.passed - before.idleClaims.passed, 1, 'выдача учтена');
+    assert.equal(after.idleClaims.skipped - before.idleClaims.skipped, 1, 'пропуск учтён');
+    assert.equal(after.store.visibleRevision, f.store.visibleRevision());
     assert.ok(after.lead.ticks > before.lead.ticks, 'такты ведущего учтены');
     assert.deepEqual(Object.keys(after.lead).sort(), ['held', 'ticks', 'wakes']);
   } finally {

@@ -1977,11 +1977,14 @@ export class Store {
    * записи, сделанные после последней выдачи номера, поэтому прежний номер
    * возвращается, только если с его выдачи были одни тихие записи. Растёт
    * при любой записи другого процесса и при любой своей, которая могла
-   * изменить видимое.
+   * изменить видимое. Гарантия — для зафиксированных данных: внутри
+   * транзакции записи номер не выдаётся (её откат вернул бы номер другим
+   * данным); в снимке (`snapshot`) — ревизия этого снимка.
    */
-  visibleRevision(revision = this.revision()): number {
+  visibleRevision(): number {
+    if (this.transaction) throw new Error('Store.visibleRevision вне транзакции записи');
     this.issued++;
-    return revision - this.quiet;
+    return this.revision() - this.quiet;
   }
   version(): { revision: number; lease: number } {
     const row = this.db.prepare('SELECT n, lease FROM main.revision WHERE id=1').get() as {
