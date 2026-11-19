@@ -18,7 +18,12 @@ import { executionOf } from '../src/harness/execution.ts';
 import { repositories } from '../src/core/repositories.ts';
 import type { ContractChangeTrace } from '../src/application/input-rebound.ts';
 import type { ContractChange } from '../src/runner/contract-change.ts';
-import { RESUME, RESUME_REVIEWS, resumeRecord } from '../src/application/input-resume.ts';
+import {
+  RESUME,
+  RESUME_DRIVER,
+  RESUME_REVIEWS,
+  resumeRecord,
+} from '../src/application/input-resume.ts';
 
 after(() => inputDemos.close());
 
@@ -551,5 +556,125 @@ test('F83: a route that names a contract not pinned to the task stays a rejectio
     assert.equal(shown.route, undefined);
   } finally {
     await f.cleanup();
+  }
+});
+
+test('F83: the apply transaction itself refuses an operator apply over the route, even with the rejected round confirmed', async () => {
+  const { f, taskId, requestId } = await answered({ approvalMode: 'operator' });
+  try {
+    const { context } = await review(f, requestId);
+    operation(f, taskId, undefined, 'abandoned');
+    const shown = f.service.show({ requestId });
+    const target = f.service.target({ requestId, contextDigest: context.contextDigest });
+    assert.ok(target.targetDigest, 'цель есть: отказ — правило маршрута, а не нехватка цели');
+    assert.throws(
+      () =>
+        f.service.apply(
+          {
+            requestId,
+            answerDigest: target.answerDigest!,
+            expectedVersion: target.version,
+            contextDigest: context.contextDigest,
+            targetDigest: target.targetDigest!,
+          },
+          'operator',
+          { confirmRejectedRound: shown.round },
+        ),
+      (e: Error & { code?: string }) => e.code === 'CONTRACT_CHANGE_REQUIRED',
+    );
+    assert.equal(executionOf(f.h).engine.inputRequest(requestId).lifecycle, 'answered');
+  } finally {
+    await f.cleanup();
+  }
+});
+
+test('F83: an operation abandoned after the rebinding returns the question to the operator with the reason, not to a silent re-review', async () => {
+  const { f, pins, taskId, v1, requestId } = await answered();
+  try {
+    await review(f, requestId);
+    const v2 = rebind(f, taskId, v1.id, pins);
+    operation(f, taskId, v2.id, 'running');
+    assert.equal(f.service.show({ requestId }).route?.waiting, true);
+    operation(f, taskId, v2.id, 'abandoned');
+    const shown = f.service.show({ requestId });
+    assert.equal(shown.state, 'review-rejected');
+    assert.equal(shown.actor, 'operator');
+    assert.ok(shown.problems?.some((p) => p.includes('CC-route не доведено (abandoned)')));
+  } finally {
+    await f.cleanup();
+  }
+});
+
+test('F83: after the rebinding only an earlier redaction counts as the routed contract — a later unpinned one does not become a route', async () => {
+  let v3 = '';
+  const { f, taskId, v1, requestId } = await answered({
+    decide: () => () => ({
+      approve: false,
+      findings: [{ severity: 'blocking', message: 'Amends v3', rule: `contract-change:${v3}` }],
+    }),
+  });
+  try {
+    const v2 = f.h.contract('Artifact format', 'Version two.', undefined, undefined, source);
+    v3 = f.h.contract('Artifact format', 'Version three.', undefined, undefined, source).id;
+    await review(f, requestId);
+    assert.equal(f.service.show({ requestId }).state, 'review-rejected');
+    assert.deepEqual(f.h.rebind([taskId], [v1.id], v2.id), [taskId]);
+    operation(f, taskId, v2.id, 'running');
+    const shown = f.service.show({ requestId });
+    assert.notEqual(shown.state, 'contract-change-required');
+    assert.equal(shown.route, undefined);
+  } finally {
+    await f.cleanup();
+  }
+});
+
+test('F83: only a validated route exempts earlier server-pass reviews from the limit; an ordinary rejection keeps it', async () => {
+  for (const valid of [true, false]) {
+    const { f, pins, boardId, taskId, v1, requestId } = await answered({
+      paused: false,
+      ...(valid
+        ? {}
+        : {
+            decide: (p: Pins) => (prompt: string) =>
+              prompt.includes(`"contracts":["${p.v1}"]`)
+                ? {
+                    approve: false,
+                    findings: [
+                      {
+                        severity: 'blocking' as const,
+                        message: 'Amends another',
+                        rule: 'contract-change:C-x',
+                      },
+                    ],
+                  }
+                : { approve: true, findings: [] },
+          }),
+    });
+    try {
+      await review(f, requestId);
+      const answer = executionOf(f.h).engine.inputRequest(requestId).answers[0];
+      f.store.atomic(() => {
+        f.store.saveLocal(RESUME, undefined, requestId, {
+          requestId,
+          taskId,
+          answerDigest: answer.digest,
+          revision: answer.revision,
+          trigger: 'operator',
+          author: { runtime: 'codex', source: 'task-approval' },
+          phase: 'rejected',
+          reviews: RESUME_REVIEWS,
+          at: new Date().toISOString(),
+        });
+        f.store.saveLocal(RESUME, undefined, RESUME_DRIVER, { leaseUntil: Date.now() + 60_000 });
+      });
+      const v2 = rebind(f, taskId, v1.id, pins);
+      f.h.approve(boardId, [taskId]);
+      operation(f, taskId, v2.id, 'completed');
+      const summary = f.service.list({ taskId }).requests[0];
+      assert.equal(summary.state, 'answer-saved', String(valid));
+      assert.equal(summary.resume?.phase, valid ? 'pending' : 'failed', String(valid));
+    } finally {
+      await f.cleanup();
+    }
   }
 });

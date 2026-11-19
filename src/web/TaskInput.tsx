@@ -119,7 +119,10 @@ export function TaskInput({ taskId, revision }: { taskId: string; revision: stri
   ].includes(current.state);
   const operatorApplies =
     view.approvalMode === 'operator' &&
-    ['context-review', 'ready-to-apply', 'review-rejected'].includes(current.state);
+    (['context-review', 'ready-to-apply'].includes(current.state) ||
+      // Отклонённый ответ, который применить нельзя (например, ему нужна
+      // поправка контракта), кнопки «вопреки ревью» не получает (F83).
+      (current.state === 'review-rejected' && !current.problems?.length));
   const rejected = current.state === 'review-rejected';
   const lastReview = (
     current.reviews as {

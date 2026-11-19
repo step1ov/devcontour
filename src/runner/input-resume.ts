@@ -211,7 +211,11 @@ export class InputResumer {
     if (!summary?.resume || summary.resume.trigger !== 'operator') return;
     const state = summary.state;
     // Ревью маршрута contract-change по прежнему основанию предел не тратят (F83).
-    const prior = resumeRecordFor(this.h, request, task);
+    const prior = resumeRecordFor(
+      this.h,
+      request,
+      engine.read((view) => service.routeRebased(view, request, task)),
+    );
     const author = prior?.author ?? resumeAuthor(this.h, task, summary.boardId ?? undefined);
     if (!author) return;
     const base: Omit<ResumeRecord, 'phase' | 'at'> = {

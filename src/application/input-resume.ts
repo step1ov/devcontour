@@ -11,7 +11,6 @@ import { repositories } from '../core/repositories.ts';
 import { pausedByLead } from '../core/work-status.ts';
 import { executionOf } from '../harness/execution.ts';
 import { inputReviewDigest, inputReviewRounds } from '../harness/input-host.ts';
-import { routeRules } from './input-route.ts';
 
 /** Локальные записи прохода (`local_workflow`): ключ — ID запроса; `@driver` — признак живого сервера. */
 export const RESUME = 'input-resume';
@@ -154,29 +153,21 @@ export function resumeRecord(h: DevContour, requestId: string) {
 }
 
 /**
- * Запись прохода по текущему ответу запроса. Ревью, отклонённые маршрутом
- * contract-change (F83), по прежнему основанию не тратят предел ревью после
- * смены основания: изменение контракта перепривязало задачу, и ревью того
- * же ответа на новой редакции — новое основание, а не повтор.
+ * Запись прохода по текущему ответу запроса. `rebased` — ревью снова нужно
+ * потому, что маршрут contract-change сменил основание (F83,
+ * `InputService.routeRebased`): ревью, отклонённые маршрутом по прежнему
+ * основанию, тогда предела ревью не тратят — ревью того же ответа на новой
+ * редакции не повтор.
  */
 export function resumeRecordFor(
   h: DevContour,
   request: InputRequest,
-  task: Task,
+  rebased = false,
 ): ResumeRecord | undefined {
   const answer = latestAnswer(request);
   const saved = resumeRecord(h, request.id);
   if (!answer || saved?.answerDigest !== answer.digest) return undefined;
-  if (saved.phase !== 'rejected') return saved;
-  const last = executionOf(h).engine.read((v) => inputReviewRounds(v, request.id).at(-1));
-  if (
-    !last ||
-    last.approved ||
-    !routeRules(last, request) ||
-    last.digest === inputReviewDigest(h, task, request.id, answer.digest)
-  )
-    return saved;
-  return { ...saved, reviews: 0 };
+  return rebased && saved.phase === 'rejected' ? { ...saved, reviews: 0 } : saved;
 }
 
 /**
@@ -221,6 +212,8 @@ export function resumeOf(
   now = Date.now(),
   /** Исходная остановка не держится: кто решает выход (F39). */
   moved?: 'operator' | 'lead',
+  /** Маршрут contract-change сменил основание ревью (F83, `resumeRecordFor`). */
+  rebased = false,
 ): ResumeView | undefined {
   if (h.config.approvalMode !== 'agent') return undefined;
   if (request.kind !== 'question' || !request.blocking || request.lifecycle !== 'answered')
@@ -244,7 +237,7 @@ export function resumeOf(
   // Пауза держит любой шаг прохода — и ревью, и применение — раньше записей.
   const held = resumeHeld(h);
   if (held) return view('paused', { detail: held });
-  const record = resumeRecordFor(h, request, task);
+  const record = resumeRecordFor(h, request, rebased);
   const review = needsReview(h, request, state, task);
   if (review) {
     // Идущее ревью — пока не истёк его срок; запись прерванного процесса —

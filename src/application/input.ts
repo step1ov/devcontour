@@ -31,7 +31,7 @@ import {
   type InputRequest,
   type ReviewRecord,
 } from 'devcontour-harness';
-import { DomainError, type Task } from '../core/model.ts';
+import { DomainError, type Contract, type Task } from '../core/model.ts';
 import { hrefs } from './panel-links.ts';
 import { hintLocaleOf, reviewLanguageInstructions, type CarryOrder } from './hint-messages.ts';
 import type { DevContour } from '../core/service.ts';
@@ -63,6 +63,7 @@ import {
 } from './input-rebound.ts';
 import { repositories } from '../core/repositories.ts';
 import { specDigest } from '../core/task-digest.ts';
+import { orderRedactions } from '../core/service.ts';
 import type { ContractChange } from '../runner/contract-change.ts';
 import { CONTRACT_CHANGE_RULE, routeRules } from './input-route.ts';
 
@@ -87,6 +88,13 @@ export interface ContractRoute {
 
 /** Запись операции изменения контракта с предложением (поиск операции маршрута). */
 type RouteOperation = ContractChangeTrace & Partial<Pick<ContractChange, 'proposal' | 'owner'>>;
+
+/** Контракты маршрута словами записи: ID, название и файл. */
+const routeContracts = (ids: readonly string[], contracts: readonly Contract[]) =>
+  ids.map((id) => {
+    const c = contracts.find((x) => x.id === id);
+    return { id, title: c?.title ?? id, source: c?.source ?? null };
+  });
 
 /** Причина отказа применения, пока ответу нужна поправка контракта (F83). */
 const routeProblem = (operation?: { id: string; status: string }) =>
@@ -587,7 +595,8 @@ export class InputService {
     // Маршрут contract-change (F83): ответ — выбор, которому нужна только
     // поправка закреплённого контракта; ход ведущего, карточка оператора
     // закрыта. Брошенная или устаревшая операция возвращает вопрос оператору.
-    const route = last.approved ? undefined : this.routeOf(request, task, last, current);
+    const contracts = last.approved ? [] : executionOf(this.h).store.stateOf(view).contracts;
+    const route = last.approved ? undefined : this.routeOf(request, task, last, current, contracts);
     const failed = !!route?.operation && ROUTE_FAILED.has(route.operation.status);
     const routed = (waiting: boolean) => ({
       state: 'contract-change-required' as const,
@@ -596,33 +605,40 @@ export class InputService {
       route: {
         round: last.round,
         answeredBy: answer.actor.kind,
-        contracts: this.routeContracts(route!.ids),
+        contracts: routeContracts(route!.ids, contracts),
         ...(route!.operation
           ? { operation: { id: route!.operation.id, status: route!.operation.status } }
           : {}),
         ...(waiting ? { waiting: true as const } : {}),
       },
     });
+    // Брошенная или устаревшая операция маршрута — до и после смены
+    // основания одинаково: ответ, которому нужна поправка контракта, снова
+    // решает оператор, причина названа.
+    if (route && failed)
+      return {
+        state: 'review-rejected',
+        approved: false,
+        round: last.round,
+        problems: [routeProblem(route.operation)],
+      };
     if (!current) {
       // Задача уже перепривязана или в черновике, операция или утверждение
       // ещё впереди — ход ведущего, а не ревью того же ответа до новой
       // редакции. После утверждения (`rebound`) — обычное «сохранён»: проход
       // сервера или ведущий проводит ревью того же ответа на новой редакции.
-      if (route && !failed && this.originOf(view, request) === 'pending') return routed(true);
+      if (route && this.originOf(view, request) === 'pending') return routed(true);
       return { state: 'answer-saved' };
     }
     // Отклонённое ревью — своё состояние: в режиме оператора применить его
     // можно, но только осознанно (вердикт и находки видны, нужно подтверждение).
     if (!last.approved) {
-      if (route && !failed) return routed(false);
+      if (route) return routed(false);
       const proposed =
         this.h.config.approvalMode === 'operator'
           ? this.proposed(view, request, last.contextDigest ?? null)
           : undefined;
-      const problems = [
-        ...(route ? [routeProblem(route.operation)] : []),
-        ...(proposed?.problems ?? []),
-      ];
+      const problems = proposed?.problems ?? [];
       return {
         state: 'review-rejected',
         approved: false,
@@ -685,42 +701,38 @@ export class InputService {
     );
   }
 
-  /** Контракты маршрута словами записи: ID, название и файл. */
-  private routeContracts(ids: readonly string[]) {
-    const contracts = this.h.store.read().contracts;
-    return ids.map((id) => {
-      const c = contracts.find((x) => x.id === id);
-      return { id, title: c?.title ?? id, source: c?.source ?? null };
-    });
-  }
-
   /**
    * Маршрут раунда (F83), если он относится к последнему ответу и к
    * закреплённым контрактам: снимок раунда несёт последний ответ (новый
    * ответ маршрут прежнего не наследует), каждый названный контракт
    * закреплён за задачей, а после смены основания (`current: false`) —
-   * закреплён или заменён в задаче своей более поздней редакцией той же
-   * цепочки. `operation` — операция этого контракта после раунда.
+   * закреплён или заменён в задаче более поздней редакцией той же цепочки
+   * (порядок утверждения). `operation` — операция этого контракта после раунда.
    */
-  private routeOf(request: InputRequest, task: Task, round: ReviewRecord, current: boolean) {
+  private routeOf(
+    request: InputRequest,
+    task: Task,
+    round: ReviewRecord,
+    current: boolean,
+    contracts: readonly Contract[],
+  ) {
     const ids = routeRules(round, request);
     if (!ids || !round.contextDigest || !this.carries(request, round.contextDigest).ok)
       return undefined;
-    const contracts = this.h.store.read().contracts;
     const pinned = (id: string) => {
       if (task.contracts.includes(id)) return true;
       if (current) return false;
       const named = contracts.find((c) => c.id === id);
-      return (
-        !!named &&
-        task.contracts.some((t) => {
-          const now = contracts.find((c) => c.id === t);
-          return !!now && now.id !== id && sameChain(now, named);
-        })
-      );
+      if (!named) return false;
+      return task.contracts.some((t) => {
+        const now = contracts.find((c) => c.id === t);
+        if (!now || !sameChain(now, named)) return false;
+        const chain = orderRedactions(contracts.filter((c) => sameChain(c, now)));
+        return chain.indexOf(now) > chain.indexOf(named) && chain.indexOf(named) >= 0;
+      });
     };
     if (!ids.every(pinned)) return undefined;
-    return { ids, operation: this.routeOperation(round, ids) };
+    return { ids, operation: this.routeOperation(round, ids, contracts) };
   }
 
   /**
@@ -733,7 +745,25 @@ export class InputService {
     const last = inputReviewRounds(view, request.id).at(-1);
     if (!answer || !last || last.approved) return false;
     if (last.digest !== inputReviewDigest(this.h, task, request.id, answer.digest)) return false;
-    return !!this.routeOf(request, task, last, true);
+    const contracts = executionOf(this.h).store.stateOf(view).contracts;
+    return !!this.routeOf(request, task, last, true, contracts);
+  }
+
+  /**
+   * Ревью ответа снова нужно потому, что маршрут contract-change сменил
+   * основание (F83): последний раунд назвал проверенный маршрут для этого
+   * ответа, а задача с тех пор перепривязана к новой редакции и утверждена
+   * (`rebound`). Отклонённые по прежнему основанию ревью прохода сервера
+   * тогда предела не тратят. Только чтение.
+   */
+  routeRebased(view: ExecutionView, request: InputRequest, task: Task) {
+    const answer = latestAnswer(request);
+    const last = inputReviewRounds(view, request.id).at(-1);
+    if (!answer || !last || last.approved) return false;
+    if (last.digest === inputReviewDigest(this.h, task, request.id, answer.digest)) return false;
+    if (this.originOf(view, request) !== 'rebound') return false;
+    const contracts = executionOf(this.h).store.stateOf(view).contracts;
+    return !!this.routeOf(request, task, last, false, contracts);
   }
 
   /**
@@ -743,8 +773,11 @@ export class InputService {
    * цепочки. Последняя по началу; пересмотренная (`superseded`) уступает
    * преемнику.
    */
-  private routeOperation(round: ReviewRecord, ids: readonly string[]) {
-    const contracts = this.h.store.read().contracts;
+  private routeOperation(
+    round: ReviewRecord,
+    ids: readonly string[],
+    contracts: readonly Contract[],
+  ) {
     const named = ids.flatMap((id) => contracts.filter((c) => c.id === id));
     const fallback = repositories(this.h.config).some((r) => r.id === 'main')
       ? 'main'
@@ -974,6 +1007,7 @@ export class InputService {
       context.boards.get(request.workId),
       Date.now(),
       moved ? (this.leadMayDecide(request) ? 'lead' : 'operator') : undefined,
+      !!task && state.state === 'answer-saved' && this.routeRebased(view, request, task),
     );
     // Повторные остановки вопросом по задаче: сигнал оператору и ведущему.
     // Сводка несёт только счёт и предел (вперёд, по текущему `maxAttempts`).
