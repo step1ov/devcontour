@@ -3,7 +3,8 @@ import { workspaceDescription } from '../runner/workspace-mode.ts';
 import { DiscussionService } from '../application/discussion.ts';
 import { quickResultDiff, quickSetupApplied, quickResult } from '../runner/quick.ts';
 import { quickFactsCache, quickPrerequisites, quickView } from '../application/quick-view.ts';
-import { AttentionService } from '../application/attention.ts';
+import { AttentionService, type AttentionView } from '../application/attention.ts';
+import { homeView } from '../application/home.ts';
 import type { UsageRecord } from '../core/usage.ts';
 import { Preparation } from '../core/preparation.ts';
 import { PreparationAgent } from '../application/preparation-agent.ts';
@@ -167,6 +168,8 @@ const PROJECTION_MAX_AGE_MS = 30_000;
  */
 const SLOW_TIER_MS = 30_000;
 const QUICK_FACTS_MAX_AGE_MS = 10_000;
+/** Область кэша центра внимания без параметров (`scopeOf` пустого запроса). */
+const ACTIVE_ATTENTION_SCOPE = JSON.stringify([]);
 async function body(req: IncomingMessage) {
   let text = '';
   for await (const chunk of req) {
@@ -208,9 +211,10 @@ export async function serve(
   // Кэши проекций частого опроса панели (F60): одна проекция на версию данных.
   const summaries = summaryCache();
   const overviews = new ProjectionCache<Etagged>({ maxAgeMs: PROJECTION_MAX_AGE_MS });
-  const attentions = new ProjectionCache<Promise<Etagged>>({
+  const attentions = new ProjectionCache<Promise<Etagged & { view: AttentionView }>>({
     maxAgeMs: PROJECTION_MAX_AGE_MS,
   });
+  const homes = new ProjectionCache<Promise<Etagged>>({ maxAgeMs: PROJECTION_MAX_AGE_MS });
   const preparations = new ProjectionCache<string>({ maxAgeMs: QUICK_FACTS_MAX_AGE_MS });
   const products = new ProjectionCache<string>({
     maxAgeMs: SLOW_TIER_MS,
@@ -313,6 +317,35 @@ export async function serve(
       startupError,
       workspace: root ? workspaceDescription(root) : undefined,
     };
+  };
+  /**
+   * Активный список центра внимания — из кэша версии данных (F60). Отметка
+   * присутствия ведущего — файл вне базы: она входит в версию. Значение
+   * хранит и сам вид: главная читает его, не разбирая тело.
+   */
+  const activeAttention = (store: Store, scope: string, query: Record<string, string>) => {
+    const service = attentionOf(store);
+    return attentions.get(
+      scope,
+      `${store.revision()}|${leadActivityMark(store) ?? ''}`,
+      [store, h, configKey(h)],
+      (previous) => {
+        let value: Promise<Etagged & { view: AttentionView }> | undefined = undefined;
+        value = (async () => {
+          const before = await previous?.catch(() => undefined);
+          const quick = await service.prerequisites();
+          const view = service.view(query, quick);
+          if (value) {
+            const until = attentionUntil(store, view);
+            if (until !== undefined) attentions.limit(scope, value, until);
+            // Факты Git быстрого маршрута устаревают по своему сроку.
+            if (quick.size) attentions.limit(scope, value, Date.now() + QUICK_FACTS_MAX_AGE_MS);
+          }
+          return { ...etagged({ ...view }, before, ['generatedAt']), view };
+        })();
+        return { value };
+      },
+    );
   };
   const handleRequest = async (req: IncomingMessage, res: ServerResponse) => {
     try {
@@ -439,33 +472,57 @@ export async function serve(
             json(res, 200, service.history(query));
             return;
           }
-          // Активный список — из кэша версии данных (F60). Отметка присутствия
-          // ведущего — файл вне базы: она входит в версию.
-          const scope = scopeOf(url, 'etag');
+          jsonText(
+            res,
+            etaggedBody(
+              await activeAttention(preparationStore, scopeOf(url, 'etag'), query),
+              known,
+            ),
+          );
+          return;
+        }
+        // Главная: плитки разделов по снимку версии и центру внимания той же
+        // версии. До setup — на базе подготовки, как центр внимания.
+        if (req.method === 'GET' && path === '/api/home' && preparationStore) {
           const store = preparationStore;
-          const pending = attentions.get(
-            scope,
+          const attention = activeAttention(store, ACTIVE_ATTENTION_SCOPE, {});
+          const pending = homes.get(
+            'home',
             `${store.revision()}|${leadActivityMark(store) ?? ''}`,
-            [store, h, configKey(h)],
+            // Центр внимания по тождеству: его пересчёт (срок lease, факты
+            // Git) пересчитывает и главную.
+            [store, h, configKey(h), startupError, attention],
             (previous) => {
               let value: Promise<Etagged> | undefined = undefined;
               value = (async () => {
                 const before = await previous?.catch(() => undefined);
-                const quick = await service.prerequisites();
-                const view = service.view(query, quick);
+                const { view } = await attention;
+                const engine = h;
+                const home = store.snapshot(() =>
+                  homeView({
+                    state: store.view(),
+                    h: engine,
+                    attention: view,
+                    revision: store.revision(),
+                    now: Date.now(),
+                    ...(startupError ? { startupError } : {}),
+                    ...(engine
+                      ? { events: engine.store.latestEvents(['scheduler.error'], 50) }
+                      : {}),
+                  }),
+                );
                 if (value) {
                   const until = attentionUntil(store, view);
-                  if (until !== undefined) attentions.limit(scope, value, until);
-                  // Факты Git быстрого маршрута устаревают по своему сроку.
-                  if (quick.size)
-                    attentions.limit(scope, value, Date.now() + QUICK_FACTS_MAX_AGE_MS);
+                  if (until !== undefined) homes.limit('home', value, until);
                 }
-                return etagged({ ...view }, before, ['generatedAt']);
+                // Ревизия — момент чтения, как и время: запись, не изменившая
+                // плиток, оставляет метку, и опрос получает «без изменений».
+                return etagged({ ...home }, before, ['generatedAt', 'revision']);
               })();
               return { value };
             },
           );
-          jsonText(res, etaggedBody(await pending, known));
+          jsonText(res, etaggedBody(await pending, url.searchParams.get('etag')));
           return;
         }
         // Отметки «прочитано» и «увидел» — локальные записи оператора, не решение.
@@ -1099,7 +1156,7 @@ export async function serve(
     server,
     url: origin,
     /** Кэши проекций опроса панели: счётчики вычислений для диагностики и тестов. */
-    projections: { summaries, overviews, attentions, preparations, products },
+    projections: { summaries, overviews, attentions, preparations, products, homes },
     close: async () => {
       stopping = true;
       // Ведущий цикл прерывается первым — до отметки остановки: его стадия не
