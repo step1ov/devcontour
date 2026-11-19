@@ -1,4 +1,4 @@
-import type { DevContour } from './service.ts';
+import { digest, type DevContour } from './service.ts';
 import type { DevContourState, Task } from './model.ts';
 import { DomainError } from './model.ts';
 import { LeadWorkflow, type WorkflowJob } from './lead-workflow.ts';
@@ -26,19 +26,35 @@ export interface BoardPark {
   until?: string;
   by: HoldActor;
   at: string;
+  /** Ревизия доски, которую отложили: новая ревизия снимает действие отметки. */
+  revision: number;
+  /** Последнее событие журнала при записи: утверждение после него снимает отметку. */
+  eventId: number;
 }
 
-/** Упавшее задание мёртвой доски закрыто: его остановка больше не шаг. */
+/**
+ * Упавшее задание мёртвой доски закрыто: его остановка больше не шаг.
+ * Закрытие относится к одному эпизоду остановки: тому же заданию с теми же
+ * попытками, окончанием и ошибкой и тем же задачам ревизии (`tasks` —
+ * digest статуса, актёра отмены, попыток, класса отказа и прогонов каждой).
+ * Повтор задания, повтор задачи после закрытия (`task.retry` после
+ * `eventId`) или любая другая перемена этих полей возвращает обычные шаги
+ * навсегда: новое закрытие — новое решение.
+ */
 export interface JobClosure {
   boardId: string;
   jobKey: string;
   reason: string;
   by: HoldActor;
   at: string;
+  job: { attempts: number; stage: number; finishedAt?: string; error?: string };
+  tasks: string;
+  eventId: number;
 }
 
 const REASON_MIN = 10;
-const REASON_MAX = 500;
+/** Предел причины: она идёт в `host.parked` пакета передачи (до десяти досок). */
+const REASON_MAX = 300;
 const reasonOf = (text: string) => {
   const reason = text.trim();
   if ([...reason].length < REASON_MIN || [...reason].length > REASON_MAX)
@@ -63,10 +79,23 @@ export function parkOf(h: DevContour, boardId: string, now = Date.now()): BoardP
 export function parkedHold(h: DevContour, s: DevContourState, boardId: string) {
   const park = parkOf(h, boardId);
   if (!park) return undefined;
-  const revision = s.boards.find((b) => b.id === boardId)?.revisions.at(-1);
-  if (!revision || revision.status === 'accepted') return undefined;
+  const board = s.boards.find((b) => b.id === boardId);
+  const revision = board?.revisions.at(-1);
+  if (!board || !revision || revision.status === 'accepted') return undefined;
+  // Новая ревизия, утверждение задач доски или старт её задания после
+  // отметки — решение выпустить работу: отметка перестаёт действовать
+  // навсегда, даже когда задачи потом снова отменены или в черновике.
+  if (revision.number !== park.revision) return undefined;
   const released = s.tasks.some((t) => revision.taskIds.includes(t.id) && releasable(t));
-  return released ? undefined : park;
+  if (released) return undefined;
+  if (
+    h.store
+      .eventsSince(['board.approved'], park.at)
+      .some((e) => e.id > park.eventId && (e.data as { boardId?: string })?.boardId === boardId)
+  )
+    return undefined;
+  if (boardJobs(h, s, boardId).some((j) => j.startedAt >= park.at)) return undefined;
+  return park;
 }
 
 /** Все действующие отметки «отложена» (для пакета передачи). */
@@ -129,8 +158,12 @@ export function setPark(
     const reason = reasonOf(value.reason);
     let until: string | undefined;
     if (value.until !== undefined) {
-      const at = Date.parse(value.until);
-      if (Number.isNaN(at)) throw new DomainError('until: ожидается дата ISO 8601', 400);
+      const at = isoDateTime(value.until);
+      if (at === undefined)
+        throw new DomainError(
+          'until: ожидается дата и время ISO 8601 со смещением, например 2026-12-01T00:00:00Z',
+          400,
+        );
       if (at <= Date.now()) throw new DomainError('until: срок уже прошёл', 400);
       until = new Date(at).toISOString();
     }
@@ -152,7 +185,7 @@ export function setPark(
         `У доски действующее задание ${last.key} (${last.status}): отложенная доска заданий не ведёт`,
         409,
       );
-    if (last?.status === 'failed' && !closureOf(h, boardId, last.key))
+    if (last?.status === 'failed' && !closureOf(h, s, boardId, last))
       throw new DomainError(
         `Последнее задание доски ${last.key} упало: это решение по заданию (повтор, решение пользователя или workflow_close для мёртвой доски), а не отметка «отложена»`,
         409,
@@ -163,48 +196,107 @@ export function setPark(
       ...(until ? { until } : {}),
       by,
       at: new Date().toISOString(),
+      revision: revision.number,
+      eventId: h.store.lastEventId(),
     };
     h.store.saveLocal(PARK, undefined, boardId, park);
     return { boardId, parked: true as const, park };
   });
 }
 
-/** Закрытие задания `jobKey` доски, если оно записано. */
-export function closureOf(h: DevContour, boardId: string, jobKey: string) {
-  const closure = h.store.localRecord<JobClosure>(CLOSURE, undefined, boardId);
-  return closure?.jobKey === jobKey ? closure : undefined;
+/**
+ * Строгая дата и время ISO 8601 со смещением (`Z` или `±hh:mm`): число
+ * миллисекунд или `undefined`. `Date.parse` принял бы и местное время, и
+ * несуществующий день (30 февраля — 2 марта).
+ */
+export function isoDateTime(text: string): number | undefined {
+  const m =
+    /^(\d{4})-(\d{2})-(\d{2})T(\d{2}):(\d{2})(?::(\d{2})(?:\.\d{1,9})?)?(Z|[+-]\d{2}:\d{2})$/.exec(
+      text,
+    );
+  if (!m) return undefined;
+  const [y, mo, d, hh, mm, ss] = [m[1], m[2], m[3], m[4], m[5], m[6] ?? '0'].map(Number);
+  const day = new Date(Date.UTC(y, mo - 1, d));
+  if (day.getUTCFullYear() !== y || day.getUTCMonth() !== mo - 1 || day.getUTCDate() !== d)
+    return undefined;
+  if (hh > 23 || mm > 59 || ss > 59) return undefined;
+  if (m[7] !== 'Z') {
+    const [oh, om] = m[7].slice(1).split(':').map(Number);
+    if (oh > 23 || om > 59) return undefined;
+  }
+  const at = Date.parse(text);
+  return Number.isNaN(at) ? undefined : at;
 }
 
-/**
- * Задачи ревизии, отмена которых остановила задание (D46): уже выданные
- * (попытка, отказ или прогон) отменённые задачи.
- */
-export function issuedCancellations(s: DevContourState, taskIds: readonly string[]) {
-  return s.tasks.filter(
-    (t) =>
-      taskIds.includes(t.id) &&
-      t.status === 'cancelled' &&
-      (t.attempt > 0 ||
-        !!t.failure ||
-        !!t.neutralFailures ||
-        s.runs.some((r) => r.taskId === t.id)),
+/** Задание, к эпизоду остановки которого относится закрытие. */
+type ClosedJob = Pick<WorkflowJob, 'key' | 'attempts' | 'stage' | 'finishedAt' | 'error'>;
+
+/** Эпизод задачи ревизии для закрытия: перемена любого поля снимает его. */
+function tasksEpisode(s: DevContourState, taskIds: readonly string[]) {
+  return digest(
+    taskIds.map((id) => {
+      const t = s.tasks.find((x) => x.id === id);
+      return t
+        ? {
+            id,
+            status: t.status,
+            cancelledBy: t.cancelledBy ?? null,
+            attempt: t.attempt,
+            failureKind: t.failureKind ?? null,
+            budget: !!t.budgetBlock,
+            runs: s.runs.filter((r) => r.taskId === id).length,
+          }
+        : { id };
+    }),
   );
 }
 
+const jobEpisode = (job: ClosedJob) => ({
+  attempts: job.attempts,
+  stage: job.stage,
+  ...(job.finishedAt ? { finishedAt: job.finishedAt } : {}),
+  ...(job.error ? { error: job.error } : {}),
+});
+
 /**
- * Выданные отменённые задачи, остановка на которых — решение пользователя:
- * отменённые человеком или без записанного актёра, либо остановленные
- * бюджетом (поднять предел — решение пользователя). Пустой список у мёртвой
- * доски — ведущий может закрыть её задание (`closable` шага).
+ * Закрытие упавшего задания `job` доски, если оно записано для этого же
+ * эпизода остановки (см. `JobClosure`).
+ */
+export function closureOf(h: DevContour, s: DevContourState, boardId: string, job: ClosedJob) {
+  const closure = h.store.localRecord<JobClosure>(CLOSURE, undefined, boardId);
+  if (!closure || closure.jobKey !== job.key) return undefined;
+  if (JSON.stringify(closure.job) !== JSON.stringify(jobEpisode(job))) return undefined;
+  const taskIds = s.boards.find((b) => b.id === boardId)?.revisions.at(-1)?.taskIds ?? [];
+  if (closure.tasks !== tasksEpisode(s, taskIds)) return undefined;
+  const ids = new Set(taskIds);
+  if (
+    h.store
+      .eventsSince(['task.retry'], closure.at)
+      .some((e) => e.id > closure.eventId && ids.has((e.data as { taskId?: string })?.taskId ?? ''))
+  )
+    return undefined;
+  return closure;
+}
+
+/**
+ * Отменённые задачи ревизии, остановка на которых — решение пользователя:
+ * отменённые человеком или без записанного актёра (в том числе
+ * синхронизированные из Git, где актёра и прогонов нет — происхождение
+ * неизвестно, и правило закрыто), либо остановленные бюджетом (поднять
+ * предел — решение пользователя). Проверяются все отменённые задачи, а не
+ * только выданные здесь: о чужой выдаче локальные прогоны не знают. Пустой
+ * список у мёртвой доски — ведущий может закрыть её задание (`closable`).
  */
 export function userStoppers(s: DevContourState, taskIds: readonly string[]) {
-  return issuedCancellations(s, taskIds).filter(
-    (t) =>
-      (t.cancelledBy !== 'host' && t.cancelledBy !== 'graph') ||
-      t.failureKind === 'budget' ||
-      !!t.budgetBlock ||
-      s.runs.findLast((r) => r.taskId === t.id)?.failureKind === 'budget',
-  );
+  return s.tasks
+    .filter((t) => taskIds.includes(t.id) && t.status === 'cancelled')
+    .filter(
+      (t) =>
+        (t.cancelledBy !== 'host' && t.cancelledBy !== 'graph') ||
+        t.failureKind === 'budget' ||
+        !!t.budgetBlock ||
+        s.runs.findLast((r) => r.taskId === t.id)?.failureKind === 'budget',
+    );
 }
 
 /**
@@ -217,13 +309,14 @@ export function userStoppers(s: DevContourState, taskIds: readonly string[]) {
  *
  * Гарантия D46 сохраняется: закрытие ничего не принимает и задачу не
  * выводит из работы, а только снимает показ остановки. Ведущий закрывает
- * задание, только если все выданные отменённые задачи отменил он сам (`host`)
+ * задание, только если все отменённые задачи ревизии отменил он сам (`host`)
  * или новая редакция графа (`graph`) и ни одну не остановил бюджет: повтор
  * отмены человека и подъём предела — решения человека, и закрытие такого
  * задания — тоже (`--by operator`). Доска с неотменённой
  * задачей мёртвой не считается: её приёмка без задачи — решение
- * пользователя. Закрытие действует, пока доска мертва и задание последнее:
- * повтор задачи или новая задача ревизии возвращают обычные шаги.
+ * пользователя. Закрытие действует на один эпизод остановки (`JobClosure`):
+ * повтор задания или задачи, новая задача ревизии, новый актёр отмены
+ * возвращают обычные шаги.
  */
 export function closeDeadJob(h: DevContour, boardId: string, reasonText: string, by: HoldActor) {
   const reason = reasonOf(reasonText);
@@ -251,7 +344,7 @@ export function closeDeadJob(h: DevContour, boardId: string, reasonText: string,
       const user = userStoppers(s, revision.taskIds);
       if (user.length)
         throw new DomainError(
-          `Выданные задачи ${user.map((t) => t.id).join(', ')} отменены человеком (или актёр не записан) либо остановлены бюджетом: продолжение или закрытие задания их доски — решение пользователя (devcontour workflow-close --board ${boardId} --reason … --by operator)`,
+          `Задачи ${user.map((t) => t.id).join(', ')} отменены человеком (или актёр не записан) либо остановлены бюджетом: продолжение или закрытие задания их доски — решение пользователя (devcontour workflow-close --board ${boardId} --reason … --by operator)`,
           409,
         );
     }
@@ -261,6 +354,9 @@ export function closeDeadJob(h: DevContour, boardId: string, reasonText: string,
       reason,
       by,
       at: new Date().toISOString(),
+      job: jobEpisode(job),
+      tasks: tasksEpisode(s, revision.taskIds),
+      eventId: h.store.lastEventId(),
     };
     h.store.saveLocal(CLOSURE, undefined, boardId, closure);
     return { boardId, job: { key: job.key, status: job.status }, closure };

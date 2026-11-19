@@ -11,10 +11,15 @@ import { cliCommand } from './cli-command.ts';
 import { command } from '../src/runner/process.ts';
 import { AgentService } from '../src/application/agent.ts';
 import { AttentionService } from '../src/application/attention.ts';
-import { devcontourHandoff } from '../src/application/handoff.ts';
+import {
+  devcontourHandoff,
+  devcontourHandoffWithin,
+  handoffResponse,
+} from '../src/application/handoff.ts';
 import { LeadWorkflow } from '../src/core/lead-workflow.ts';
+import { LeadRunner } from '../src/runner/lead-workflow.ts';
 import { DomainError } from '../src/core/model.ts';
-import { closeDeadJob, parkOf, setPark } from '../src/core/board-hold.ts';
+import { closeDeadJob, parkOf, parkedHold, setPark } from '../src/core/board-hold.ts';
 import { DevContour } from '../src/core/service.ts';
 import { Store } from '../src/core/store.ts';
 
@@ -31,7 +36,11 @@ const nextOf = (f: F, boardId?: string) =>
  * Мёртвая доска: выданная задача упала и отменена (`cancelledBy`), вторая
  * отменена ведущим, задание доски упало на отменённой задаче (D46).
  */
-function deadBoard(f: Pick<F, 'h'>, by: 'host' | 'operator' = 'host', budget = false) {
+async function deadBoard(
+  f: Pick<F, 'h' | 'root'>,
+  by: 'host' | 'operator' = 'host',
+  budget = false,
+) {
   const b = f.h.createBoard('Dead board', '', 'main');
   const stopped = f.h.addTask(b.id, input('Fails its gate'));
   const other = f.h.addTask(b.id, input('Dropped'));
@@ -50,14 +59,23 @@ function deadBoard(f: Pick<F, 'h'>, by: 'host' | 'operator' = 'host', budget = f
   );
   f.h.cancel(stopped.id, 'Replanned on another board', by);
   f.h.cancel(other.id, 'Replanned on another board', 'host');
-  flow.fail(flow.claim(job.key, job.owner)!, `${stopped.id}: Работа остановлена человеком.`);
+  // Задание падает своим циклом (D46), а не записью теста.
+  await loop(f);
+  assert.equal(flow.get(job.key, job.owner).status, 'failed');
   return { board: b.id, stopped: stopped.id, job };
+}
+
+/** Несколько тактов цикла ведущего: задания делают свои шаги. */
+async function loop(f: Pick<F, 'h' | 'root'>) {
+  const runner = new LeadRunner(f.h, f.root);
+  for (let i = 0; i < 4; i++) await runner.tick();
+  await runner.stop();
 }
 
 test('workflow_close: задание мёртвой доски закрыто — нет ни шага host.next, ни карточки; повтор задачи возвращает шаг', async () => {
   const f = fixture();
   try {
-    const { board, stopped, job } = deadBoard(f);
+    const { board, stopped, job } = await deadBoard(f);
     // Другая доска с решением о плане: остановка мёртвой доски (decide)
     // стояла раньше него в шаге workspace.
     const other = f.h.createBoard('Real work', '', 'main');
@@ -94,7 +112,7 @@ test('workflow_close: задание мёртвой доски закрыто �
   }
 });
 
-test('workflow_close: отказы — живая доска, отмена человеком или бюджетом (ведущему), неупавшее задание', () => {
+test('workflow_close: отказы — живая доска, отмена человеком или бюджетом (ведущему), неупавшее задание', async () => {
   const f = fixture();
   try {
     // В ревизии есть неотменённая задача: приёмка без задачи — решение пользователя.
@@ -127,7 +145,7 @@ test('workflow_close: отказы — живая доска, отмена че�
   ] as const) {
     const g = fixture();
     try {
-      const { board } = deadBoard(g, by, budget);
+      const { board } = await deadBoard(g, by, budget);
       const step = nextOf(g, board);
       assert.equal(step?.code, 'job-cancelled-task');
       assert.equal((step.params as { closable?: true }).closable, undefined, `${by} ${budget}`);
@@ -286,7 +304,7 @@ test('CLI board-park и workflow-close: человек откладывает д
     const h = new DevContour(store, c);
     let dead: string, parked: string;
     try {
-      ({ board: dead } = deadBoard({ h }, 'operator'));
+      ({ board: dead } = await deadBoard({ h, root: data }, 'operator'));
       parked = h.createBoard('Debt later', '', 'main').id;
       h.addTask(parked, input('Deferred'));
     } finally {
@@ -334,5 +352,213 @@ test('CLI board-park и workflow-close: человек откладывает д
     assert.equal((JSON.parse(unpark.stdout) as { parked: boolean }).parked, false);
   } finally {
     await rm(root, { recursive: true, force: true });
+  }
+});
+
+test('workflow_close: закрытие относится к одному эпизоду — повтор задачи и новая отмена, повтор задания не наследуют его', async () => {
+  // Повтор задачи, затем отмена человеком: прежнее закрытие не прячет шаг.
+  const f = fixture();
+  try {
+    const { board, stopped } = await deadBoard(f);
+    closeDeadJob(f.h, board, 'Work was replanned on another board', 'lead');
+    assert.equal(nextOf(f, board), undefined);
+    f.h.retry(stopped, undefined, 'host', { lead: true });
+    assert.ok(nextOf(f, board));
+    f.h.cancel(stopped, 'The user drops it after all', 'operator');
+    const step = nextOf(f, board);
+    assert.equal(step?.code, 'job-cancelled-task', JSON.stringify(step));
+    assert.equal((step.params as { closable?: true }).closable, undefined);
+    assert.ok((await cards(f)).some((c) => c.sourceKey === `board:${board}`));
+    assert.throws(
+      () => closeDeadJob(f.h, board, 'Work was replanned on another board', 'lead'),
+      /решение пользователя/,
+    );
+  } finally {
+    f.cleanup();
+  }
+  // Повтор задачи и новая отмена тем же ведущим: тот же вид, но другой эпизод.
+  const g = fixture();
+  try {
+    const { board, stopped } = await deadBoard(g);
+    closeDeadJob(g.h, board, 'Work was replanned on another board', 'lead');
+    g.h.retry(stopped, undefined, 'host', { lead: true });
+    g.h.cancel(stopped, 'Replanned on another board', 'host');
+    assert.equal(nextOf(g, board)?.code, 'job-cancelled-task');
+  } finally {
+    g.cleanup();
+  }
+  // Повтор задания: тот же ключ, задание снова падает своим циклом.
+  const k = fixture();
+  try {
+    const { board, job } = await deadBoard(k);
+    closeDeadJob(k.h, board, 'Work was replanned on another board', 'lead');
+    const flow = new LeadWorkflow(k.h);
+    const before = flow.get(job.key, job.owner);
+    flow.retry(job.key, job.owner);
+    await loop(k);
+    const after = flow.get(job.key, job.owner);
+    assert.equal(after.status, 'failed');
+    assert.notDeepEqual(
+      [after.attempts, after.finishedAt],
+      [before.attempts, before.finishedAt],
+      'повтор задания — новый эпизод остановки',
+    );
+    assert.ok(nextOf(k, board), 'закрытие прежнего эпизода не прячет новый отказ');
+  } finally {
+    k.cleanup();
+  }
+});
+
+test('workflow_close: отмена без актёра (из Git sync, без локальных прогонов) — не closable и не закрывается ведущим', async () => {
+  const f = fixture();
+  try {
+    const b = f.h.createBoard('Synced cancellation', '', 'main');
+    const local = f.h.addTask(b.id, input('Local issued task'));
+    const imported = f.h.addTask(b.id, input('Imported cancelled task'));
+    f.h.approve(b.id);
+    const flow = new LeadWorkflow(f.h);
+    const job = flow.start({ kind: 'board', id: b.id, authorRuntime: 'codex' });
+    f.h.pause(false);
+    const run = f.h.claim('test')!;
+    assert.equal(run.taskId, local.id);
+    f.h.fail(run.id, run.token, 'gate failed', false, 'gate');
+    f.h.cancel(local.id, 'Replanned on another board', 'host');
+    f.h.cancel(imported.id, 'Cancelled by a teammate', 'operator');
+    // Запись из Git: актёр отмены — локальное поле, в синхронизированной задаче его нет.
+    f.store.change('test.synced', (s) => {
+      const t = s.tasks.find((x) => x.id === imported.id)!;
+      delete t.cancelledBy;
+      t.failureKind = 'budget';
+    });
+    await loop(f);
+    assert.equal(flow.get(job.key, job.owner).status, 'failed');
+    const step = nextOf(f, b.id);
+    assert.equal(step?.code, 'job-cancelled-task', JSON.stringify(step));
+    assert.equal((step.params as { closable?: true }).closable, undefined);
+    assert.throws(
+      () => closeDeadJob(f.h, b.id, 'Work was replanned on another board', 'lead'),
+      (e: unknown) => e instanceof DomainError && e.message.includes(imported.id),
+    );
+  } finally {
+    f.cleanup();
+  }
+});
+
+test('board_park: утверждение и старт задания после отметки снимают её навсегда — новый отказ задания не прячется', async () => {
+  const f = fixture();
+  try {
+    const b = f.h.createBoard('Parked then started', '', 'main');
+    const t = f.h.addTask(b.id, input('Deferred then needed'));
+    setPark(f.h, b.id, { parked: true, reason: 'Owner: after the release' }, 'lead');
+    assert.equal(nextOf(f), undefined);
+    // Утверждение тем же путём, что ревью плана (`approve`), старт задания.
+    f.h.approve(b.id);
+    const flow = new LeadWorkflow(f.h);
+    const job = flow.start({ kind: 'board', id: b.id, authorRuntime: 'codex' });
+    f.h.pause(false);
+    const run = f.h.claim('test')!;
+    assert.equal(run.taskId, t.id);
+    f.h.fail(run.id, run.token, 'gate failed', false, 'gate');
+    f.h.cancel(t.id, 'The user stops it', 'operator');
+    await loop(f);
+    assert.equal(flow.get(job.key, job.owner).status, 'failed');
+    // Задач к выдаче снова нет, но отметка не вернулась.
+    assert.equal(parkedHold(f.h, f.h.store.read(), b.id), undefined);
+    assert.equal(nextOf(f, b.id)?.code, 'job-cancelled-task');
+    assert.equal(devcontourHandoff(f.h, {}).host.parked, undefined);
+  } finally {
+    f.cleanup();
+  }
+  // Только утверждение, затем задача снова в черновике: отметка тоже снята.
+  const g = fixture();
+  try {
+    const b = g.h.createBoard('Parked then approved', '', 'main');
+    const t = g.h.addTask(b.id, input('Approved then reopened'));
+    setPark(g.h, b.id, { parked: true, reason: 'Owner: after the release' }, 'lead');
+    g.h.approve(b.id);
+    g.h.reopen(t.id, 'Back to a draft for now');
+    assert.equal(g.h.store.read().tasks.find((x) => x.id === t.id)?.status, 'draft');
+    assert.equal(nextOf(g)?.code, 'plan-unapproved');
+  } finally {
+    g.cleanup();
+  }
+});
+
+test('board_park: until — только строгая дата и время ISO 8601 со смещением', () => {
+  const f = fixture();
+  try {
+    const b = f.h.createBoard('Strict until', '', 'main');
+    f.h.addTask(b.id, input('Deferred'));
+    for (const until of [
+      '2099-02-30T00:00:00Z',
+      '03/04/2099',
+      '2099-03-04',
+      '2099-03-04T10:00:00',
+      '2099-13-01T00:00:00Z',
+      '2099-03-04T24:00:00Z',
+    ])
+      assert.throws(
+        () =>
+          setPark(f.h, b.id, { parked: true, reason: 'Owner: after the release', until }, 'lead'),
+        /ISO 8601/,
+        until,
+      );
+    const ok = setPark(
+      f.h,
+      b.id,
+      { parked: true, reason: 'Owner: after the release', until: '2099-03-01T00:00:00+03:00' },
+      'lead',
+    );
+    assert.equal(ok.parked && ok.park.until, '2099-02-28T21:00:00.000Z');
+  } finally {
+    f.cleanup();
+  }
+});
+
+test('board_park: в approvalMode operator отложенная доска не даёт карточки ведущего «черновики не готовы»', async () => {
+  const f = fixture();
+  try {
+    f.h.config.approvalMode = 'operator';
+    const b = f.h.createBoard('Parked backend drafts', '', 'main');
+    f.h.addTask(b.id, { ...input('Unbound backend'), role: 'backend' });
+    const title = 'Черновики доски «Parked backend drafts» не готовы к утверждению';
+    assert.ok((await cards(f)).some((c) => c.title === title && c.actor === 'lead'));
+    setPark(f.h, b.id, { parked: true, reason: 'Owner: after the release' }, 'lead');
+    assert.ok(!(await cards(f)).some((c) => c.title === title));
+  } finally {
+    f.cleanup();
+  }
+});
+
+test('session_handoff: host.parked в пределе ответа — причины уходят последней уступкой', () => {
+  const f = fixture();
+  try {
+    const reason = 'Ж'.repeat(290) + ' after';
+    for (let i = 0; i < 10; i++) {
+      const b = f.h.createBoard(`Parked ${i}`, '', 'main');
+      f.h.addTask(b.id, input(`Deferred ${i}`));
+      setPark(f.h, b.id, { parked: true, reason }, 'lead');
+    }
+    const full = devcontourHandoffWithin(f.h, {}, { bytes: 10_000_000, format: 'md' });
+    assert.equal(full.value.host.parked?.length, 10);
+    assert.ok(full.value.host.parked.every((p) => p.reason === reason));
+    const size = (v: typeof full.value) =>
+      Buffer.byteLength(JSON.stringify(handoffResponse(v, 'md')));
+    const total = size(full.value);
+    // Предел меньше полного ответа на половину причин: остаются id, причины уходят.
+    const limit = total - 10 * Buffer.byteLength(reason);
+    const fitted = devcontourHandoffWithin(f.h, {}, { bytes: limit, format: 'md' });
+    assert.ok(size(fitted.value) <= limit, `${size(fitted.value)} > ${limit}`);
+    assert.equal(fitted.value.host.parked?.length, 10);
+    assert.ok(fitted.value.host.parked.every((p) => p.reason === undefined && p.boardId));
+    // Причина длиннее 300 знаков не записывается.
+    const b = f.h.createBoard('Too long reason', '', 'main');
+    f.h.addTask(b.id, input('Deferred'));
+    assert.throws(
+      () => setPark(f.h, b.id, { parked: true, reason: 'x'.repeat(301) }, 'lead'),
+      /от 10 до 300/,
+    );
+  } finally {
+    f.cleanup();
   }
 });

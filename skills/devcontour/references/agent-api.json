@@ -2852,7 +2852,7 @@
     },
     {
       "name": "workflow_close",
-      "description": "Close the failed lead workflow job of a dead board: every task of its current revision is cancelled, so the board cannot be accepted and the job, stopped on a task cancelled after issue (D46), never continues — for example when the work was replanned on another board. The closure is local, records reason, and only removes the job stop from session_handoff host.next and the attention center; it accepts nothing and changes no task. Refused when a task of the revision is not cancelled (accepting without it is the user's decision), when the latest board job is not failed, and for the lead when an issued task was cancelled by a person or with no actor recorded (the user closes it: devcontour workflow-close --by operator). A task retry or a new task of the revision brings the usual steps back. CLI devcontour workflow-close --board B --reason ... [--by operator|host].",
+      "description": "Close the failed lead workflow job of a dead board: every task of its current revision is cancelled, so the board cannot be accepted and the job, stopped on a task cancelled after issue (D46), never continues — for example when the work was replanned on another board. The closure is local, records reason, and only removes the job stop from session_handoff host.next and the attention center; it accepts nothing and changes no task. Refused when a task of the revision is not cancelled (accepting without it is the user's decision), when the latest board job is not failed, and for the lead when a cancelled task of the revision was cancelled by a person or with no actor recorded (also one synced from Git) or stopped on a budget (the user closes it: devcontour workflow-close --by operator). The closure holds for one stop episode: a job retry, a task retry, a new task or another cancellation actor brings the usual steps back for good. CLI devcontour workflow-close --board B --reason ... [--by operator|host].",
       "readOnly": false,
       "inputSchema": {
         "$schema": "https://json-schema.org/draft/2020-12/schema",
@@ -2865,7 +2865,7 @@
           "reason": {
             "type": "string",
             "minLength": 10,
-            "maxLength": 500
+            "maxLength": 300
           }
         },
         "required": [
@@ -3467,7 +3467,7 @@
     },
     {
       "name": "board_park",
-      "description": "Park a board deliberately (parked true with reason 10-500 chars and optional until, an ISO date-time) or unpark it (parked false): for example work the owner deferred to a later release. While parked, the board raises no plan decision or job step in session_handoff host.next and no lead attention card, workflow_start and plan_review of the board are refused, and host.parked lists it with the reason. Only a board whose current revision is unaccepted and holds no approved unfinished task (the queue would issue those without a job) and whose latest job is neither live nor failed (unless closed with workflow_close) can be parked. A parking past until, or one under which tasks of the revision were approved later, stops acting. The mark is local (not synced) and changes neither the plan nor the job input. CLI devcontour board-park --board B (--reason ... [--until ISO] | --unpark) [--by operator|host].",
+      "description": "Park a board deliberately (parked true with reason 10-300 chars and optional until, a strict ISO 8601 date-time with offset) or unpark it (parked false): for example work the owner deferred to a later release. While parked, the board raises no plan decision or job step in session_handoff host.next and no lead attention card, workflow_start and plan_review of the board are refused, and host.parked lists it with the reason (dropped as a last trim over the response limit). Only a board whose current revision is unaccepted and holds no approved unfinished task (the queue would issue those without a job) and whose latest job is neither live nor failed (unless closed with workflow_close) can be parked. A parking stops acting for good past until, on a new board revision, or once tasks of the board were approved or a board job was started after it, even if those tasks are later cancelled or reopened. The mark is local (not synced) and changes neither the plan nor the job input. CLI devcontour board-park --board B (--reason ... [--until ISO] | --unpark) [--by operator|host].",
       "readOnly": false,
       "inputSchema": {
         "$schema": "https://json-schema.org/draft/2020-12/schema",
@@ -3483,7 +3483,7 @@
           "reason": {
             "type": "string",
             "minLength": 10,
-            "maxLength": 500
+            "maxLength": 300
           },
           "until": {
             "type": "string",
