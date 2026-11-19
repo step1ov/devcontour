@@ -62,7 +62,9 @@ export class Scheduler {
    * повторяет (не дольше `maxMs`).
    */
   readonly idleClaims = new IdleClaimGate(() => {
-    const v = this.h.store.version();
+    // Без нейтральных записей своего процесса (F79): продление сроков и
+    // такт задания ведущего шлюз не открывают.
+    const v = this.h.store.idleVersion();
     return `${v.revision}:${v.lease}:${this.h.configDigest}`;
   });
   /** Планировщик останавливается: новые такты и запуск очереди не принимаются. */
