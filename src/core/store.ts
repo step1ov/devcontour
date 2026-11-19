@@ -590,8 +590,15 @@ export class Store {
       }
     }
   }
+  /**
+   * Счёт разборов документа этим соединением (диагностика простоя, F83,
+   * `GET /api/metrics`): `reads` — изменяемые копии (`read`), `parses` — все
+   * разборы строки документа (копии и новые версии снимка `view`).
+   */
+  readonly parseStats = { reads: 0, parses: 0 };
   /** Изменяемая копия текущего состояния. */
   read(): DevContourState {
+    this.parseStats.reads++;
     // Компонентное хранение читает несколько баз — одним снимком; внутри
     // `snapshot()` или транзакции записи используется уже открытый.
     return this.atomicRead(() => this.readUnlocked());
@@ -960,6 +967,7 @@ export class Store {
    * которые тип считает обязательными; они восполняются (`normalized`).
    */
   private parseDocument(text: string): { state: DevContourState; normalized: boolean } {
+    this.parseStats.parses++;
     const raw = JSON.parse(text) as DevContourState & { componentLayout?: unknown };
     const state: DevContourState & { componentLayout?: unknown; changeSets?: unknown[] } = this
       .components
@@ -1933,6 +1941,31 @@ export class Store {
    */
   revision(): number {
     return this.version().revision;
+  }
+  /**
+   * Записи этого процесса, после которых видимые данные остались прежними
+   * (`noteQuietWrites`, F83): ожидающая стадия задания ведущего захватывается
+   * и возвращается двумя записями, а задание остаётся тем же.
+   */
+  private quiet = 0;
+  /**
+   * Отметить `count` своих зафиксированных записей, которые в сумме ничего
+   * видимого не изменили (запись вернула прежнее значение). Вызывающий
+   * отвечает за то, что между ними не было других своих записей данных, либо
+   * считает только свои.
+   */
+  noteQuietWrites(count: number) {
+    if (count > 0) this.quiet += count;
+  }
+  /**
+   * Ревизия для кэшей проекций панели (центр внимания, сводка, главная) и
+   * номера их ответов: `revision` без тихих записей этого процесса (F83).
+   * Растёт при любой записи другого процесса и при любой своей, которая
+   * могла изменить видимое; не монотонна (после тихой пары возвращается к
+   * прежнему значению) — сравнивается только на равенство.
+   */
+  visibleRevision(revision = this.revision()): number {
+    return revision - this.quiet;
   }
   version(): { revision: number; lease: number } {
     const row = this.db.prepare('SELECT n, lease FROM main.revision WHERE id=1').get() as {

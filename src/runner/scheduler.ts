@@ -15,7 +15,7 @@ import { handoffRedactor } from '../application/handoff.ts';
 import { repository, repositories } from '../core/repositories.ts';
 import { validateWorkflow } from '../core/workflow.ts';
 import { TaskFailure } from '../core/failure.ts';
-import { STALE_BASE, staleBaseStop } from '../core/work-status.ts';
+import { STALE_BASE, mayBeStaleBaseStop, staleBaseStop } from '../core/work-status.ts';
 import { executionOf, type Execution } from '../harness/execution.ts';
 import { devcontourContextSource, pinnedSnapshot, taskPacks } from '../harness/host.ts';
 import { runtimeAdapters } from '../harness/adapters.ts';
@@ -336,7 +336,12 @@ export class Scheduler {
    */
   private async releaseStaleBaseStop() {
     const view = this.h.store.view();
-    if (!staleBaseStop(view, this.h.store.latestEvents(['scheduler.error'], 50))) {
+    // Журнал сбоев такта — только под паузой, которая может быть этой
+    // остановкой: на идущей очереди такт его не читает (F83).
+    if (
+      !mayBeStaleBaseStop(view) ||
+      !staleBaseStop(view, this.h.store.latestEvents(['scheduler.error'], 50))
+    ) {
       this.staleBaseProbe = undefined;
       return;
     }

@@ -763,7 +763,7 @@ export class InputService {
    * фильтрует все попытки на каждый запрос.
    */
   private summaryContext() {
-    const current = this.h.store.read();
+    const current = this.h.store.view();
     const tasks = new Map(current.tasks.map((t) => [t.id, t]));
     const runs = new Map<string, (typeof current.runs)[number][]>();
     for (const r of current.runs) {

@@ -33,6 +33,22 @@ import { analyzeRecovery, applyCases } from './recovery.ts';
 import { checkBase } from './base-check.ts';
 import { InputResumer } from './input-resume.ts';
 
+/** Одна и та же запись задания (порядок полей не важен). */
+const sameJob = (a: WorkflowJob, b: WorkflowJob) => {
+  const canonical = (value: unknown): unknown =>
+    Array.isArray(value)
+      ? value.map(canonical)
+      : value && typeof value === 'object'
+        ? Object.fromEntries(
+            Object.entries(value)
+              .filter(([, v]) => v !== undefined)
+              .sort(([x], [y]) => (x < y ? -1 : x > y ? 1 : 0))
+              .map(([k, v]) => [k, canonical(v)]),
+          )
+        : value;
+  return JSON.stringify(canonical(a)) === JSON.stringify(canonical(b));
+};
+
 /** Код отказа, у которого есть `code` (ошибки движка, переведённые в доменные). */
 const codeOf = (e: unknown) => (e as { code?: unknown } | undefined)?.code;
 
@@ -72,6 +88,12 @@ export class LeadRunner {
    * продолжается не позже чем через него.
    */
   idleWait = { initialMs: 750, maxMs: 8_000 };
+  /**
+   * Счёт тактов цикла (диагностика простоя, F83, `GET /api/metrics`):
+   * `ticks` — такты, `wakes` — захваты стадий, `held` — ожидающие стадии,
+   * которые такт не захватил (отпечаток без перемен).
+   */
+  readonly stats = { ticks: 0, wakes: 0, held: 0 };
   private idle = new Map<string, { print: string; notBefore: number; delayMs: number }>();
   /** Продолжение после ответа на вопрос исполнителя (режим `agent`). */
   readonly resumer: InputResumer;
@@ -274,6 +296,7 @@ export class LeadRunner {
     return this.pending;
   }
   private async advance() {
+    this.stats.ticks++;
     // Ответы на вопросы исполнителя: сервер доводит цепочку после ответа
     // сам — с заданием доски и без него (оно только ждёт `waiting:input`).
     // Такт только начинает полёты прохода и не ждёт ревью.
@@ -311,11 +334,14 @@ export class LeadRunner {
         const idle = this.idle.get(saved.key);
         const print =
           saved.status === 'queued' ? this.waitPrint(saved, errorsOnce, questionsOnce) : undefined;
-        if (print !== undefined && idle?.print === print && performance.now() < idle.notBefore)
+        if (print !== undefined && idle?.print === print && performance.now() < idle.notBefore) {
+          this.stats.held++;
           continue;
+        }
         // Снимок для решения о бессрочной паузе — тот же, что у отпечатка.
         const held = print !== undefined && this.pausedHold(saved);
         const job = this.workflow.claim(saved.key, owner);
+        if (job) this.stats.wakes++;
         if (!job) {
           // Попытки исчерпаны прерываниями: причина последнего — в ошибке.
           // Запись причины — пояснение: её сбой не останавливает такт.
@@ -330,10 +356,13 @@ export class LeadRunner {
           continue;
         }
         const controller = (this.controller = new AbortController());
+        // Записи самого задания за стадию: захват, продления и возврат.
+        let jobWrites = 1;
         const timer = setInterval(
           () => {
             try {
               this.workflow.heartbeat(job);
+              jobWrites++;
             } catch {
               controller.abort();
             }
@@ -342,7 +371,13 @@ export class LeadRunner {
         );
         try {
           const waiting = await this.execute(job, controller.signal);
-          this.workflow.finish(job, waiting);
+          const after = this.workflow.finish(job, waiting);
+          // Ожидающая стадия, вернувшая задание ровно к прежней записи, ничего
+          // видимого не изменила: её записи задания — тихие, и кэши панели
+          // (центр внимания, сводка) их не пересчитывают (F83). Записи
+          // данных самой стадии (снятие паузы, восстановление) — не тихие:
+          // считаются только записи задания.
+          if (waiting && sameJob(saved, after)) this.h.store.noteQuietWrites(jobWrites + 1);
           if (waiting && print !== undefined) {
             const delayMs =
               idle?.print === print
@@ -564,7 +599,11 @@ export class LeadRunner {
       if (!options?.closing) signal.throwIfAborted();
       this.workflow.guard(job);
     };
-    const s = this.h.store.read();
+    // Замороженный снимок версии данных, а не копия: стадия, которая ждёт,
+    // просыпается каждые несколько секунд, и разбор всего документа на
+    // каждом пробуждении был главной долей простоя сервера (F83). Записи
+    // стадии идут своими транзакциями и читают свежее состояние сами.
+    const s = this.h.store.view() as DevContourState;
     guard();
     if (job.kind === 'board') {
       // Работа ревизии — без задач, перенесённых из принятой предыдущей: их
@@ -641,7 +680,7 @@ export class LeadRunner {
         // остановка сервера и пауза человека до старта задания. В режиме
         // агента перенесённую базу проверяет сам цикл (base-check.ts).
         // Правило — `pauseStep`, общее с пакетом передачи.
-        const pause = pauseStep(s, job, tasks, tickErrors(this.h));
+        const pause = pauseStep(s, job, tasks, tickErrors(this.h, s));
         if (pause.checkBase) await this.checkBase(job, guard, signal);
         if (pause.lift)
           this.h.store.atomic(() => {
@@ -670,7 +709,7 @@ export class LeadRunner {
           // Задачи ждут только ответов на вопросы исполнителя: задание ждёт
           // (без повтора и без провала) и отмечает это в истории один раз.
           if (this.workflow.inputWaitingOf(job, s)) this.workflow.noteWaiting(job);
-          const pause = pauseStep(s, job, tasks, tickErrors(this.h));
+          const pause = pauseStep(s, job, tasks, tickErrors(this.h, s));
           if (pause.checkBase) await this.checkBase(job, guard, signal);
           if (pause.lift)
             this.h.store.atomic(() => {

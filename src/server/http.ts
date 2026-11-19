@@ -327,7 +327,7 @@ export async function serve(
     const service = attentionOf(store);
     return attentions.get(
       scope,
-      `${store.revision()}|${leadActivityMark(store) ?? ''}`,
+      `${store.visibleRevision()}|${leadActivityMark(store) ?? ''}`,
       [store, h, configKey(h)],
       (previous) => {
         let value: Promise<Etagged & { view: AttentionView }> | undefined = undefined;
@@ -379,6 +379,13 @@ export async function serve(
           });
           return;
         }
+        // Счётчики простоя сервера (F83): процессорное время, разборы
+        // документа, шлюз выдачи и пробуждения цикла ведущего. Без чтения
+        // документа — опрос сам по себе ничего не разбирает.
+        if (req.method === 'GET' && path === '/api/metrics') {
+          json(res, 200, serverMetrics(h, scheduler, lead));
+          return;
+        }
         const preparationStore = h?.store ?? options.bootstrap?.store;
         if (req.method === 'GET' && path === '/api/preparation' && preparationStore) {
           // Экран этапа опрашивается так же часто: ответ версии данных — из
@@ -387,7 +394,7 @@ export async function serve(
             res,
             preparations.get(
               scopeOf(url),
-              String(preparationStore.revision()),
+              String(preparationStore.visibleRevision()),
               [preparationStore, h, configKey(h), startupError],
               () => ({
                 value: JSON.stringify(
@@ -488,7 +495,7 @@ export async function serve(
           const attention = activeAttention(store, ACTIVE_ATTENTION_SCOPE, {});
           const pending = homes.get(
             'home',
-            `${store.revision()}|${leadActivityMark(store) ?? ''}`,
+            `${store.visibleRevision()}|${leadActivityMark(store) ?? ''}`,
             // Центр внимания по тождеству: его пересчёт (срок lease, факты
             // Git) пересчитывает и главную.
             [store, h, configKey(h), startupError, attention],
@@ -505,7 +512,7 @@ export async function serve(
                       state: store.view(),
                       h: engine,
                       attention: view,
-                      revision: store.revision(),
+                      revision: store.visibleRevision(),
                       now: Date.now(),
                       ...(startupError ? { startupError } : {}),
                       ...(engine
@@ -714,7 +721,7 @@ export async function serve(
           const engine = h;
           const overview = overviews.get(
             'overview',
-            String(engine.store.revision()),
+            String(engine.store.visibleRevision()),
             [engine, configKey(engine)],
             (previous) => ({
               value: etagged({ ...authorOverview(engine, engine.store.view()) }, previous),
@@ -863,7 +870,7 @@ export async function serve(
             res,
             products.get(
               scopeOf(url),
-              String(engine.store.revision()),
+              String(engine.store.visibleRevision()),
               [engine, configKey(engine)],
               () => ({
                 value: JSON.stringify(
@@ -1197,5 +1204,33 @@ export async function serve(
       server.closeAllConnections();
       await closed;
     },
+  };
+}
+
+/**
+ * Счётчики простоя сервера (`GET /api/metrics`, F83): процессорное время и
+ * память процесса, разборы документа соединением сервера, шлюз выдачи такта
+ * (`skipped` — выдачи без перемен, которые такт не повторил; `passed` —
+ * выдачи, пропущенные к движку) и такты цикла ведущего. Ведущий и оператор
+ * видят по ним, закрыт ли шлюз на простое и кто разбирает документ.
+ */
+export function serverMetrics(
+  h: DevContour | undefined,
+  scheduler: Scheduler | undefined,
+  lead: LeadRunner | undefined,
+) {
+  const cpu = process.cpuUsage();
+  const memory = process.memoryUsage();
+  const gate = scheduler?.idleClaims;
+  return {
+    pid: process.pid,
+    uptimeMs: Math.round(process.uptime() * 1000),
+    cpuMs: { user: Math.round(cpu.user / 1000), system: Math.round(cpu.system / 1000) },
+    memory: { rss: memory.rss, heapUsed: memory.heapUsed },
+    store: h
+      ? { ...h.store.parseStats, ...h.store.version(), visibleRevision: h.store.visibleRevision() }
+      : null,
+    idleClaims: gate ? { skipped: gate.skipped, passed: gate.passed, maxMs: gate.maxMs } : null,
+    lead: lead ? { ...lead.stats } : null,
   };
 }
