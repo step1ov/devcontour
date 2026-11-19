@@ -16,6 +16,7 @@ import {
   gateTrendOf,
   homeSlowView,
   spendOf,
+  russianCounts,
   homeView,
   loadOf,
   type HomeView,
@@ -1171,4 +1172,143 @@ test('Home progress: the current map release follows the map acceptance and star
   } finally {
     f.cleanup();
   }
+});
+
+test('Home strings never carry lead commands: queue stops in operator words for every pause kind', () => {
+  const f = fixture();
+  const board = f.h.createBoard('Доска', '', 'main');
+  f.h.addTask(board.id, input('Задача'));
+  f.h.approve(board.id);
+  try {
+    const base = f.store.view();
+    const pausedAt = at(10 * 60_000);
+    const cases: [string, Partial<DevContourState>, AuditEvent[]?][] = [
+      ['shutdown', { paused: true, pauseReason: 'shutdown', pausedAt }],
+      ['not-started', { paused: true, pausedAt: undefined, pauseReason: undefined }],
+      ['human', { paused: true, pauseReason: 'operator', pausedAt }],
+      [
+        'lead',
+        {
+          paused: true,
+          pauseReason: 'operator',
+          pausedAt,
+          pauseActor: { by: 'lead', at: pausedAt, reason: 'жду ревью' },
+        },
+      ],
+      [
+        'base-check',
+        {
+          paused: true,
+          pauseReason: 'base-check',
+          pausedAt,
+          waits: [{ kind: 'base-check', detail: 'База перенесена: проверьте gates' }],
+        } as Partial<DevContourState>,
+      ],
+      [
+        'provider-auth',
+        { paused: true, pauseReason: 'runtime', pausedAt, pauseFailures: ['provider-auth'] },
+      ],
+      [
+        'runtime',
+        { paused: true, pauseReason: 'runtime', pausedAt },
+        [
+          {
+            id: 1,
+            at: at(60_000),
+            type: 'scheduler.error',
+            data: { error: 'нужен devcontour base-update --by host' },
+          },
+        ],
+      ],
+    ];
+    const strings = (value: unknown, key = ''): string[] =>
+      typeof value === 'string'
+        ? key === 'href' || key.endsWith('Href') || key === 'attention'
+          ? []
+          : [value]
+        : Array.isArray(value)
+          ? value.flatMap((v) => strings(v, key))
+          : value && typeof value === 'object'
+            ? Object.entries(value).flatMap(([k, v]) => strings(v, k))
+            : [];
+    const raw = /queue_set|workflow_start|session_handoff|--by host|devcontour \w|[{}]/;
+    const seen = new Set<string>();
+    for (const [name, over, events] of cases) {
+      const state = { ...base, ...over } as DevContourState;
+      const home = homeView({
+        state,
+        h: f.h,
+        attention: emptyAttention,
+        revision: 1,
+        now: NOW,
+        events: events ?? [],
+      });
+      const dev = home.sections.development;
+      assert.ok(dev.queue.paused, name);
+      assert.ok(dev.queue.reason && dev.queue.hint, `${name}: operator reason and hint`);
+      seen.add(dev.queue.hint);
+      for (const text of strings(home))
+        assert.doesNotMatch(text, raw, `${name}: «${text}» names a lead command`);
+    }
+    // Разные остановки — разные подсказки; штатная остановка — «ведущий сам».
+    assert.ok(seen.size >= 5);
+    const shutdown = homeView({
+      state: { ...base, paused: true, pauseReason: 'shutdown', pausedAt },
+      h: f.h,
+      attention: emptyAttention,
+      revision: 1,
+      now: NOW,
+    }).sections.development;
+    assert.equal(shutdown.queue.reason, 'Очередь на паузе после остановки сервера');
+    assert.equal(shutdown.queue.hint, 'Ведущий агент запустит её сам.');
+    assert.equal(shutdown.blocker, 'Очередь на паузе после остановки сервера');
+  } finally {
+    f.cleanup();
+  }
+});
+
+test('Home budget: a line per scope, holding first; engine text gets Russian counts', () => {
+  assert.equal(
+    russianCounts('у 1 попыток вызовы не записаны, у 21 вызовов неизвестна, у 3 попыток'),
+    'у 1 попытки вызовы не записаны, у 21 вызова неизвестна, у 3 попыток',
+  );
+  const b = (
+    kind: 'task' | 'board' | 'workspace',
+    state: 'within' | 'exceeded' | 'undetermined',
+    id?: string,
+  ) => ({
+    scope: kind === 'workspace' ? { kind } : { kind, id },
+    state,
+    limit: { usd: 10 },
+    reportedUsd: 1.23456,
+    estimatedUsd: 0,
+    unknownCalls: state === 'undetermined' ? 1 : 0,
+    unfinishedCalls: 0,
+    reason: state === 'within' ? undefined : 'у 1 попыток вызовы не записаны',
+  });
+  const budget = budgetOf(
+    {
+      budgets: [
+        b('workspace', 'undetermined'),
+        b('task', 'within', 'T-1'),
+        b('board', 'exceeded', 'B-1'),
+        b('task', 'within', 'T-2'),
+        b('task', 'within', 'T-3'),
+      ],
+    },
+    at(0),
+  )!;
+  assert.deepEqual(
+    budget.scopes.map((s) => [s.scope, s.state]),
+    [
+      ['board B-1', 'exceeded'],
+      ['workspace', 'undetermined'],
+      ['task T-1', 'within'],
+      ['task T-2', 'within'],
+    ],
+  );
+  assert.equal(budget.scopes.length, HOME_LIMITS.budgetScopes);
+  assert.equal(budget.total, 5);
+  assert.equal(budget.scopes[1].reason, 'у 1 попытки вызовы не записаны');
+  assert.equal(budget.reason, 'у 1 попытки вызовы не записаны');
 });

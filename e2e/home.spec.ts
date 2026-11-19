@@ -216,7 +216,27 @@ test('Route fixtures: exhausted budget, failing gate, startupError and long titl
       unknownCalls: 2,
       complete: false,
       exceeded: 1,
-      total: 1,
+      total: 3,
+      scopes: [
+        {
+          state: 'exceeded',
+          scope: 'workspace',
+          limitUsd: 5,
+          limitMs: 3_600_000,
+          spentMs: 4_200_000,
+          reason: 'Бюджет workspace исчерпан: время и сумма',
+          spentUsd: 7.25,
+          unknownCalls: 2,
+        },
+        {
+          state: 'undetermined',
+          scope: 'board B-1',
+          limitUsd: 3000,
+          spentUsd: 1014.1558,
+          unknownCalls: 227,
+          reason: 'Бюджет доски не определён: у 1 попытки вызовы не записаны',
+        },
+      ],
       asOf: home.generatedAt,
     };
     harness.gates = {
@@ -231,9 +251,27 @@ test('Route fixtures: exhausted budget, failing gate, startupError and long titl
   await expect(page.getByRole('alert')).toContainText('Нет конфигурации: config.json не найден');
   const harness = page.getByRole('region', { name: 'Исполнение' });
   await expect(harness).toContainText('исчерпан');
-  await expect(harness).toContainText('$7.25 из $5.00');
-  await expect(harness).toContainText('время 70 мин из 60 мин');
-  await expect(harness).toContainText('Бюджет workspace исчерпан: время и сумма');
+  // Строка на область: красная — исчерпанная, янтарная — не определённая.
+  const budgets = harness.getByRole('list', { name: 'Бюджеты' });
+  const lines = budgets.getByRole('listitem');
+  await expect(lines.nth(0)).toContainText('~$7.25 из $5.00 (145 %)');
+  await expect(lines.nth(0)).toContainText('время 70 мин из 60 мин');
+  await expect(lines.nth(0)).toContainText('у 2 вызовов стоимость неизвестна — сумма занижена');
+  await expect(lines.nth(0)).toHaveClass(/text-destructive/);
+  await expect(lines.nth(1)).toContainText(
+    'Бюджет board B-1: не определён · ~$1014 из $3000 (34 %)',
+  );
+  await expect(lines.nth(1)).toHaveClass(/text-warning/);
+  await expect(lines.nth(2)).toContainText('и ещё бюджетов: 1');
+  // Точные суммы, секунды и текст расчёта — только в «подробнее».
+  await expect(budgets).not.toContainText('1014.1558');
+  const details = harness.getByText('подробнее', { exact: true });
+  await expect(page.getByText('Бюджет workspace исчерпан: время и сумма')).toBeHidden();
+  await details.click();
+  await expect(page.getByText(/workspace: оценка \$7\.2500, время 4200 с/)).toBeVisible();
+  await expect(page.getByText(/board B-1: оценка \$1014\.1558/)).toContainText(
+    'у 1 попытки вызовы не записаны',
+  );
   await expect(harness.getByRole('list', { name: 'Проверки с отказами' })).toContainText(
     'отказов 3',
   );

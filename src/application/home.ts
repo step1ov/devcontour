@@ -47,6 +47,8 @@ export const HOME_LIMITS = {
   failureKinds: 8,
   /** Интервалов графика нагрузки: сутки по 15 минут. */
   loadBuckets: 96,
+  /** Областей бюджета строками плитки «Исполнение». */
+  budgetScopes: 4,
   /** Релизов карты для подсчёта готовых (в ответ не входят). */
   mapReleaseIds: 200,
   /** Дней графика расхода. */
@@ -279,6 +281,16 @@ export interface HomeProgress {
   href: string;
 }
 export type BudgetState = 'within' | 'exceeded' | 'undetermined';
+export interface BudgetScope {
+  state: BudgetState;
+  scope: string;
+  limitUsd?: number;
+  limitMs?: number;
+  spentMs?: number;
+  spentUsd: number;
+  unknownCalls: number;
+  reason?: string;
+}
 /** Исполнение: попытки, проверки, сбои, бюджет и здоровье сервера. */
 export interface HomeHarness {
   version: string;
@@ -311,6 +323,12 @@ export interface HomeHarness {
     exceeded: number;
     total: number;
     reason?: string;
+    /**
+     * Строка на область бюджета: держащие работу — первыми, до
+     * `HOME_LIMITS.budgetScopes`; `reason` — сырой текст расчёта для
+     * «подробнее».
+     */
+    scopes: BudgetScope[];
     asOf: string;
   };
   usage?: { calls: number; knownCostUsd: number; unknownCalls: number; asOf: string };
@@ -598,6 +616,71 @@ function preparationSections(
   } satisfies Record<'product' | 'architecture' | 'design', PreparationSection>;
 }
 
+/** Имена операций и команд ведущего: в текстах оператора их нет. */
+export const LEAD_COMMAND = /queue_set|workflow_start|session_handoff|--by host|devcontour \w|[{}]/;
+
+/**
+ * Остановка очереди словами оператора: причина без имён операций и что
+ * делать ему — кнопкой панели или ничего («ведущий запустит сам»).
+ * Подсказки ведущему (`queueStopView().action`) остаются в его ответах.
+ */
+export function operatorQueue(
+  queue: { reason?: string; stopReason?: string; failed?: true; by?: 'lead' },
+  state: Pick<DevContourState, 'pauseFailures' | 'waits'>,
+  approvalMode: 'agent' | 'operator' | undefined,
+): { reason: string; hint: string } {
+  const agent = (approvalMode ?? 'agent') === 'agent';
+  const start = 'запустите её кнопкой «Запустить очередь» в панели разработки';
+  const lead = 'ведущий агент запустит её сам';
+  const attention = 'что сделать — в «Нужно действие»';
+  // Причина — своя, если в тексте движка есть команды ведущего.
+  const own = (fallback: string) =>
+    queue.stopReason && !LEAD_COMMAND.test(queue.stopReason) ? queue.stopReason : fallback;
+  if (state.pauseFailures?.includes('provider-auth'))
+    return {
+      reason: own('Провайдер моделей отказал: нет кредитов, исчерпан лимит или CLI не авторизован'),
+      hint: `Авторизуйте CLI исполнителя, пополните баланс или дождитесь сброса лимита; затем ${agent ? lead : start}.`,
+    };
+  if (queue.reason === 'reconfigure')
+    return {
+      reason: 'Применяется новая конфигурация после изменения контракта',
+      hint: 'Ничего не требуется: пауза снимется сама.',
+    };
+  if (state.waits?.some((w) => w.kind === 'base-check') || queue.reason === 'base-check')
+    return {
+      reason: own('Выдача ждёт проверки базы gates'),
+      hint: agent
+        ? `Ведущий агент проверит базу и продолжит выдачу; если проверка не пройдёт — ${attention}.`
+        : `Проверьте базу gates, затем ${start}.`,
+    };
+  if (queue.failed)
+    return {
+      reason: own('Выдача остановлена сбоем'),
+      hint: `Нужно устранить причину: ${attention}.`,
+    };
+  switch (queue.reason) {
+    case 'operator':
+      return queue.by === 'lead'
+        ? { reason: 'Выдачу остановил ведущий агент', hint: 'Ведущий агент снимет свою паузу сам.' }
+        : {
+            reason: 'Выдача остановлена вами',
+            hint: `Когда будете готовы — ${start}; ведущий агент вашу паузу не снимает.`,
+          };
+    case 'shutdown':
+      return {
+        reason: 'Очередь на паузе после остановки сервера',
+        hint: agent ? 'Ведущий агент запустит её сам.' : `Когда будете готовы — ${start}.`,
+      };
+    case 'not-started':
+      return {
+        reason: 'Очередь ещё не запущена',
+        hint: agent ? 'Ведущий агент запустит её сам.' : `Когда будете готовы — ${start}.`,
+      };
+    default:
+      return { reason: own('Выдача остановлена'), hint: `Нужно устранить причину: ${attention}.` };
+  }
+}
+
 const LIVE_PHASES: readonly BoardPhase[] = ['running', 'failed', 'acceptance', 'queued', 'draft'];
 
 function development(
@@ -656,6 +739,10 @@ function development(
 
   const holds = h ? inputHolds(h) : new Map<string, string>();
   const queue = h ? queueStopOf(h, state, ctx.events ?? []) : undefined;
+  // Тексты остановки очереди обращаются к ведущему (`queue_set`,
+  // `workflow_start`): оператору главная говорит своими словами.
+  const plainQueue =
+    h && queue?.paused ? operatorQueue(queue, state, h.config.approvalMode) : undefined;
   const ready = h ? readyTasks(state, holds).length : 0;
   const active = state.runs.filter((r) => r.status === 'active');
   const roleTitle = (taskId: string) => {
@@ -692,7 +779,7 @@ function development(
     devState = 'running';
   else if (queue?.paused) {
     devState = queue.failed ? 'blocked' : 'paused';
-    blocker = queue.stopReason;
+    blocker = plainQueue?.reason;
   } else if (!ready && failedTasks) {
     // Очередь идёт, но выдавать нечего: работу держат упавшие задачи.
     devState = 'blocked';
@@ -733,8 +820,8 @@ function development(
     },
     queue: {
       paused: queue?.paused ?? state.paused,
-      ...(queue?.stopReason ? { reason: clip(queue.stopReason, HOME_LIMITS.startupError) } : {}),
-      ...(queue?.action ? { hint: clip(queue.action, HOME_LIMITS.startupError) } : {}),
+      ...(plainQueue ? { reason: clip(plainQueue.reason, HOME_LIMITS.startupError) } : {}),
+      ...(plainQueue ? { hint: clip(plainQueue.hint, HOME_LIMITS.startupError) } : {}),
       ready,
       blocked: Math.max(0, open - ready),
       waitingInput: holds.size,
@@ -1231,28 +1318,55 @@ type Budgets = {
 export function budgetOf(overview: Budgets | undefined, asOf: string): HomeSlow['budget'] {
   if (!overview?.budgets.length) return undefined;
   const rank = (s: BudgetState) => (s === 'exceeded' ? 0 : s === 'undetermined' ? 1 : 2);
-  const [b] = overview.budgets.toSorted(
+  const sorted = overview.budgets.toSorted(
     (x, y) =>
       rank(x.state) - rank(y.state) ||
       Number(y.scope.kind === 'workspace') - Number(x.scope.kind === 'workspace'),
   );
-  return {
-    state: b.state,
+  const b = sorted[0];
+  const line = (x: Budgets['budgets'][number]): BudgetScope => ({
+    state: x.state,
     scope: clip(
-      b.scope.kind === 'workspace' ? 'workspace' : `${b.scope.kind} ${b.scope.id ?? ''}`.trim(),
+      x.scope.kind === 'workspace' ? 'workspace' : `${x.scope.kind} ${x.scope.id ?? ''}`.trim(),
     ),
-    ...(b.limit.usd !== undefined ? { limitUsd: b.limit.usd } : {}),
+    ...(x.limit.usd !== undefined ? { limitUsd: x.limit.usd } : {}),
     // Предел по времени: бюджет только по времени иначе читался бы как «$0».
-    ...(b.limit.timeMs !== undefined ? { limitMs: b.limit.timeMs } : {}),
-    ...(b.durationMs !== undefined ? { spentMs: b.durationMs } : {}),
-    spentUsd: b.reportedUsd + b.estimatedUsd,
-    unknownCalls: b.unknownCalls,
+    ...(x.limit.timeMs !== undefined ? { limitMs: x.limit.timeMs } : {}),
+    ...(x.durationMs !== undefined ? { spentMs: x.durationMs } : {}),
+    spentUsd: x.reportedUsd + x.estimatedUsd,
+    unknownCalls: x.unknownCalls,
+    ...(x.reason ? { reason: clip(russianCounts(x.reason), HOME_LIMITS.startupError) } : {}),
+  });
+  const first = line(b);
+  return {
+    ...first,
     complete: b.unknownCalls === 0 && b.unfinishedCalls === 0,
     exceeded: overview.budgets.filter((x) => x.state === 'exceeded').length,
     total: overview.budgets.length,
-    ...(b.reason ? { reason: clip(b.reason, HOME_LIMITS.startupError) } : {}),
+    scopes: sorted.slice(0, HOME_LIMITS.budgetScopes).map(line),
     asOf,
   };
+}
+
+/**
+ * Склонение чисел в текстах расчёта бюджета («у 1 попыток» → «у 1 попытки»):
+ * текст приходит из движка исполнения с формой множественного числа.
+ */
+export function russianCounts(text: string) {
+  const forms = (n: number) =>
+    n % 10 === 1 && n % 100 !== 11
+      ? 0
+      : n % 10 >= 2 && n % 10 <= 4 && (n % 100 < 12 || n % 100 > 14)
+        ? 1
+        : 2;
+  const words: [RegExp, [string, string, string]][] = [
+    [/у (\d+) (?:попыток|попытки|попытка)(?![а-яё])/g, ['попытки', 'попыток', 'попыток']],
+    [/у (\d+) (?:вызовов|вызова|вызов)(?![а-яё])/g, ['вызова', 'вызовов', 'вызовов']],
+  ];
+  return words.reduce(
+    (t, [re, f]) => t.replace(re, (_, n: string) => `у ${n} ${f[forms(Number(n))]}`),
+    text,
+  );
 }
 
 /** Покрытие релиза по карте продукта (`IntentService.productView`). */

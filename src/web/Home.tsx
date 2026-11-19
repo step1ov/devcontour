@@ -741,6 +741,75 @@ const kindNames: Record<string, string> = {
   other: 'прочие',
 };
 
+const money = (v: number) => '~$' + (v >= 100 ? v.toFixed(0) : v.toFixed(2));
+const limitText = (v: number) => '$' + (v >= 100 ? v.toFixed(0) : v.toFixed(2));
+const callsText = (n: number) => `${n} ${plural(n, 'вызова', 'вызовов', 'вызовов')}`;
+
+/**
+ * Бюджеты строкой на область: состояние, оценка из предела, время и вызовы с
+ * неизвестной стоимостью. Красный — только исчерпанный, янтарный — не
+ * определённый; точные суммы и текст расчёта — в «подробнее».
+ */
+function BudgetLines({
+  budget,
+  href,
+}: {
+  budget: NonNullable<HomeHarness['budget']>;
+  href: string;
+}) {
+  const scopes = budget.scopes?.length ? budget.scopes : [budget];
+  const hidden = budget.total - scopes.length;
+  return (
+    <div className="grid min-w-0 gap-1">
+      <ul className="m-0 grid list-none gap-1 p-0" aria-label="Бюджеты">
+        {scopes.map((b) => (
+          <li
+            key={b.scope}
+            className={cn(
+              b.state === 'exceeded' && 'text-destructive',
+              b.state === 'undetermined' && 'text-warning',
+            )}
+          >
+            <span className={b.state === 'within' ? 'text-muted-foreground' : undefined}>
+              Бюджет {b.scope}:{' '}
+            </span>
+            <PanelLink
+              href={href}
+              className={b.state !== 'within' ? 'text-current underline' : undefined}
+            >
+              {budgetNames[b.state]}
+            </PanelLink>
+            {' · '}
+            {money(b.spentUsd)}
+            {b.limitUsd !== undefined
+              ? ` из ${limitText(b.limitUsd)} (${Math.round((b.spentUsd / b.limitUsd) * 100)} %)`
+              : ''}
+            {b.limitMs !== undefined
+              ? `; время ${minutes(b.spentMs ?? 0)} из ${minutes(b.limitMs)}`
+              : ''}
+            {b.unknownCalls
+              ? `; у ${callsText(b.unknownCalls)} стоимость неизвестна — сумма занижена`
+              : ''}
+          </li>
+        ))}
+        {hidden > 0 && <li className="text-muted-foreground">и ещё бюджетов: {hidden}</li>}
+      </ul>
+      <details className="text-muted-foreground text-xs">
+        <summary className="cursor-pointer">подробнее</summary>
+        <ul className="m-0 mt-1 grid list-none gap-1 p-0">
+          {scopes.map((b) => (
+            <li key={b.scope}>
+              {b.scope}: оценка ${b.spentUsd.toFixed(4)}
+              {b.spentMs !== undefined ? `, время ${Math.round(b.spentMs / 1000)} с` : ''}
+              {b.reason ? `. ${b.reason}` : ''}
+            </li>
+          ))}
+        </ul>
+      </details>
+    </div>
+  );
+}
+
 function HarnessTile({
   harness,
   startupError,
@@ -839,27 +908,7 @@ function HarnessTile({
             )
           ) : null}
           {budget ? (
-            <p className={cn('m-0', budget.state !== 'within' && 'text-destructive')}>
-              <span className={budget.state === 'within' ? 'text-muted-foreground' : undefined}>
-                Бюджет {budget.scope}:{' '}
-              </span>
-              <PanelLink
-                href={h.budgetHref}
-                className={budget.state !== 'within' ? 'text-current underline' : undefined}
-              >
-                {budgetNames[budget.state]}
-              </PanelLink>
-              , оценка ${budget.spentUsd.toFixed(2)}
-              {budget.limitUsd !== undefined ? ` из $${budget.limitUsd.toFixed(2)}` : ''}
-              {budget.unknownCalls ? `; стоимость неизвестна у ${budget.unknownCalls} вызовов` : ''}
-              {budget.limitMs !== undefined
-                ? `; время ${minutes(budget.spentMs ?? 0)} из ${minutes(budget.limitMs)}`
-                : ''}
-              {budget.exceeded > 1 ? `; исчерпано бюджетов: ${budget.exceeded}` : ''}
-              {budget.state !== 'within' && budget.reason && (
-                <span className="block">{budget.reason}</span>
-              )}
-            </p>
+            <BudgetLines budget={budget} href={h.budgetHref} />
           ) : (
             <p className="text-muted-foreground m-0">Бюджеты не заданы.</p>
           )}
