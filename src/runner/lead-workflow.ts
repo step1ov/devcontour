@@ -340,6 +340,8 @@ export class LeadRunner {
         }
         // Снимок для решения о бессрочной паузе — тот же, что у отпечатка.
         const held = print !== undefined && this.pausedHold(saved);
+        // Отметка до захвата: записи задания этой стадии могут оказаться тихими.
+        const quietMark = this.h.store.quietMark();
         const job = this.workflow.claim(saved.key, owner);
         if (job) this.stats.wakes++;
         if (!job) {
@@ -377,7 +379,8 @@ export class LeadRunner {
           // (центр внимания, сводка) их не пересчитывают (F83). Записи
           // данных самой стадии (снятие паузы, восстановление) — не тихие:
           // считаются только записи задания.
-          if (waiting && sameJob(saved, after)) this.h.store.noteQuietWrites(jobWrites + 1);
+          if (waiting && sameJob(saved, after))
+            this.h.store.noteQuietWrites(jobWrites + 1, quietMark);
           if (waiting && print !== undefined) {
             const delayMs =
               idle?.print === print

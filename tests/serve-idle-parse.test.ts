@@ -106,10 +106,51 @@ test('F83: пробуждение, которое само пишет данны
     const { runner } = await waitingBoard(f);
     // Пауза остановки сервера: стадия 2 её снимает (`pauseStep`).
     f.h.pause(true, 'shutdown');
+    const raw = f.store.revision();
     const visible = f.store.visibleRevision();
     await runner.tick();
     assert.equal(f.store.view().paused, false, 'стадия сняла паузу');
-    assert.notEqual(f.store.visibleRevision(), visible, 'снятие паузы видно панели');
+    // Захват, снятие паузы, возврат: тихими учтены ровно две записи задания.
+    assert.equal(f.store.revision() - raw, 3);
+    assert.equal(f.store.visibleRevision() - visible, 1, 'снятие паузы видно панели');
+    await runner.stop();
+  } finally {
+    f.cleanup();
+  }
+});
+
+test('F83: номер, выданный посередине пробуждения, не достаётся другим данным — тихие записи после выдачи не вычитаются', async () => {
+  const f = fixture();
+  try {
+    const { runner } = await waitingBoard(f);
+    // Опрос панели между захватом и возвратом стадии.
+    let middle: { revision: string } | undefined;
+    const probe = runner as unknown as {
+      execute(job: unknown, signal: AbortSignal): Promise<boolean>;
+    };
+    const execute = probe.execute.bind(runner);
+    probe.execute = async (job, signal) => {
+      const waiting = await execute(job, signal);
+      middle = panelSummary(f.h, f.root, {});
+      return waiting;
+    };
+    const visible = f.store.visibleRevision();
+    await runner.tick();
+    probe.execute = execute;
+    assert.ok(middle, 'опрос был посередине');
+    assert.ok(f.store.visibleRevision() > visible, 'записи после выдачи номера видимы');
+    // Следующая запись данных — новый номер, а не номер из середины.
+    f.h.createBoard('Another board', '', 'main');
+    const after = panelSummary(f.h, f.root, { revision: middle.revision }) as {
+      unchanged?: boolean;
+      revision: string;
+    };
+    assert.notEqual(after.unchanged, true, 'другие данные — не «без изменений»');
+    assert.notEqual(after.revision, middle.revision);
+    // Без опроса посередине тихие пробуждения снова не меняют номер.
+    const stable = f.store.visibleRevision();
+    for (let i = 0; i < 3; i++) await runner.tick();
+    assert.equal(f.store.visibleRevision(), stable);
     await runner.stop();
   } finally {
     f.cleanup();
@@ -207,28 +248,44 @@ test('F83: GET /api/metrics называет счётчики шлюза выд�
   const scheduler = new Scheduler(f.h, f.root);
   const app = await serve(f.h, scheduler, { port: 0 });
   try {
-    scheduler.idleClaims.skipped = 7;
-    scheduler.idleClaims.passed = 3;
-    f.store.view();
-    const parses = counting(Store.prototype, 'parseDocument');
-    let body: Record<string, Record<string, number> | number | null>;
-    try {
+    type Body = {
+      pid: number;
+      store: Record<string, number>;
+      idleClaims: Record<string, number>;
+      lead: Record<string, number>;
+    };
+    const metrics = async () => {
       const response = await fetch(app.url + '/api/metrics');
       assert.equal(response.status, 200);
-      body = (await response.json()) as typeof body;
+      return (await response.json()) as Body;
+    };
+    f.store.view();
+    const parses = counting(Store.prototype, 'parseDocument');
+    let before: Body;
+    try {
+      before = await metrics();
       assert.equal(parses.count, 0, 'опрос счётчиков не разбирает документ');
     } finally {
       parses.restore();
     }
-    assert.deepEqual(body.idleClaims, { skipped: 7, passed: 3, maxMs: 30_000 });
-    const store = body.store as Record<string, number>;
-    assert.equal(store.revision, f.store.revision());
-    assert.equal(store.visibleRevision, f.store.visibleRevision());
-    assert.equal(typeof store.reads, 'number');
-    assert.equal(typeof store.parses, 'number');
-    const lead = body.lead as Record<string, number>;
-    assert.deepEqual(Object.keys(lead).sort(), ['held', 'ticks', 'wakes']);
-    assert.equal(body.pid, process.pid);
+    assert.equal(before.pid, process.pid);
+    assert.equal(before.idleClaims.maxMs, 30_000);
+    // Счётчики — настоящие: копия документа, выдача под шлюзом, такты
+    // цикла ведущего сервера (каждую секунду).
+    f.store.read();
+    const gate = scheduler.idleClaims;
+    await gate.around(
+      () => 0,
+      () => Promise.resolve(gate.holds()),
+    );
+    await new Promise((r) => setTimeout(r, 1200));
+    const after = await metrics();
+    assert.ok(after.store.reads - before.store.reads >= 1, 'read учтён');
+    assert.ok(after.store.parses - before.store.parses >= 1, 'разбор учтён');
+    assert.equal(after.store.revision, f.store.revision());
+    assert.ok(after.idleClaims.passed - before.idleClaims.passed >= 1, 'выдача учтена');
+    assert.ok(after.lead.ticks > before.lead.ticks, 'такты ведущего учтены');
+    assert.deepEqual(Object.keys(after.lead).sort(), ['held', 'ticks', 'wakes']);
   } finally {
     await app.close();
     f.cleanup();
