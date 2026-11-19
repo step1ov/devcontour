@@ -68,6 +68,7 @@ const openLabels: Record<AttentionSubjectKind, string> = {
   operation: 'Открыть контракты',
   queue: 'Открыть обзор',
   budget: 'Открыть обзор',
+  review: 'Открыть предмет ревью',
 };
 export function openLabel(item: Pick<AttentionItem, 'source' | 'subject'>) {
   if (item.source === 'prep-question') return 'Открыть вопрос';
@@ -96,6 +97,10 @@ const statusTexts: Record<string, string> = {
   'changeset/accept': 'Изменение принято.',
   'changeset/deploy-preview': 'Выкладка preview начата.',
   'corpus/approve': 'Версия корпуса подтверждена.',
+  'review/accept-limitation':
+    'Находки приняты как ограничение. Ведущий агент проведёт следующий раунд ревью с вашим решением.',
+  'review/continue':
+    'Ещё раунды разрешены. Ведущий агент продолжит исправлять и проведёт следующий раунд ревью.',
 };
 export const statusText = (source: string, action: string) =>
   statusTexts[`${source}/${action}`] ?? 'Выполнено';

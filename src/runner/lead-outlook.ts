@@ -13,6 +13,7 @@ import {
   type Task,
 } from '../core/model.ts';
 import { baseMovesOf, type DevContour } from '../core/service.ts';
+import { baseCheckSpent } from './base-check-record.ts';
 import {
   carriedTaskIds,
   heldBaseOf,
@@ -371,7 +372,10 @@ export function liftsPause(h: DevContour, s: DevContourState, job: WorkflowJob):
   // Ожидание без диапазона этого переноса (поставлено до переноса или
   // прежней версией, диапазон устарел) проверка тоже не снимет: `checkBase`
   // отказывает, решение — человека (F93, `baseLoopChecks`).
-  if (outlook.step === 'check-base') return !heldBaseOf(s) && !!baseMovesOf(s);
+  // Проверка с исчерпанными повторами (`baseCheckSpent`, то же решение, что
+  // у `checkBase`) gates не запустит и ожидание не снимет.
+  if (outlook.step === 'check-base')
+    return !heldBaseOf(s) && !!baseMovesOf(s) && !baseCheckSpent(h, s);
   const first =
     outlook.step === 'repair' ||
     (outlook.step === 'recovery' && (outlook.action === 'retry-task' || outlook.action === 'wait'));

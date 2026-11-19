@@ -182,7 +182,7 @@ export function escalationRefusal(error: unknown, kind: 'plan' | 'contract', sub
     .map((i) => `${String(i.path[1])} (${i.message})`);
   if (!ids.length) return undefined;
   const refusal = new DomainError(
-    `${error.message.split(' Ответ:')[0]} Решение — за владельцем (оператором), ведущий его не принимает: devcontour review-decide --kind ${kind} --subject ${JSON.stringify(subject)} --findings <id[,id…]> --decision accepted-limitation|continue --reason "<основание>" --workspace …; затем тот же раунд ревью снова. Находки: ${ids.join('; ')}`,
+    `${error.message.split(' Ответ:')[0]} Решение — за владельцем (оператором), ведущий его не принимает: карточка этого ревью во «Внимании» панели («Принять как ограничение» или «Продолжить исправлять», с основанием) или devcontour review-decide --kind ${kind} --subject ${JSON.stringify(subject)} --findings <id[,id…]> --decision accepted-limitation|continue --reason "<основание>" --workspace …; затем тот же раунд ревью снова. Находки: ${ids.join('; ')}`,
     409,
   );
   (refusal as DomainError & { code?: string }).code = 'INPUT_REQUIRED';

@@ -40,6 +40,7 @@ export const attentionSources = [
   'contract-change',
   'wait',
   'input',
+  'review',
   'changeset',
   'preview',
   'corpus',
@@ -91,7 +92,9 @@ export type AttentionSubjectKind =
   | 'preview'
   | 'suite'
   | 'operation'
-  | 'run';
+  | 'run'
+  /** Предмет технического ревью (план, контракт, ответ исполнителю). */
+  | 'review';
 
 export type AttentionAction =
   | {

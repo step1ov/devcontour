@@ -349,11 +349,23 @@ const samples: { [C in HintCode]: (HintSubject & Extract<HintOf, { code: C }>)[]
     },
     { code: 'pause-operator', params: { by: 'lead', base: 'unchecked' } },
     { code: 'pause-operator', params: { by: 'lead', base: 'no-board' } },
+    { code: 'pause-operator', params: { base: 'exhausted' } },
   ],
   'base-unchecked': [
     { code: 'base-unchecked', params: {} },
     { code: 'base-unchecked', params: { failed: true } },
     { code: 'base-unchecked', params: {}, boardId: 'board-1', job },
+  ],
+  'base-exhausted': [
+    { code: 'base-exhausted', params: { failures: [] } },
+    { code: 'base-exhausted', params: { failures: ['main/unit'] }, boardId: 'board-1', job },
+  ],
+  'review-escalated': [
+    { code: 'review-escalated', params: { kind: 'plan', subject: 'B-1', findings: 2, round: 3 } },
+    {
+      code: 'review-escalated',
+      params: { kind: 'contract', subject: 'contract-0123', findings: 1, round: 4 },
+    },
   ],
   'base-held': [
     { code: 'base-held', params: { paths: [] } },
@@ -737,8 +749,12 @@ test('Подсказки шага: новая конфигурация setup п�
  * Намеренное изменение (F93): новый код base-unchecked и образец
  * pause-operator с base: unchecked и no-board, base-unchecked с failed; тексты
  * прежних образцов байтово прежние.
+ * Намеренное изменение (0.4.0-alpha.54): новые коды base-exhausted (проверка
+ * базы с исчерпанными повторами) и review-escalated (ревью ждёт решения
+ * владельца в карточке центра внимания), образец pause-operator с base:
+ * exhausted; тексты прежних образцов байтово прежние.
  */
-const ENGLISH_SAMPLES_SHA256 = 'c9d3de5e6d289f1e7e0ef57d6d439d3ac939f9e8238e5b78dc71a43045981aca';
+const ENGLISH_SAMPLES_SHA256 = '7ce5f271ecdda74a337069b0f4aa8a4fc2524cc13b164c9a1e9089cca5da02a4';
 
 test('Подсказки шага: английские тексты образцов закреплены', () => {
   assert.equal(

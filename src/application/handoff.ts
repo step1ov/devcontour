@@ -56,6 +56,8 @@ import {
   unapprovedTasks,
   type LoopOutlook,
 } from '../runner/lead-outlook.ts';
+import { baseCheckSpent } from '../runner/base-check-record.ts';
+import { reviewEscalations } from './review-escalations.ts';
 import { repositories } from '../core/repositories.ts';
 import {
   heldBaseOf,
@@ -1190,15 +1192,34 @@ function baseWaitGap(
   state: State,
   /** Живые задания доски (`ctx.jobs` — только задания досок; ChangeSet — вне их). */
   live: readonly unknown[],
-): { gap: 'unchecked' | 'no-board'; failed: boolean } | undefined {
+):
+  | { gap: 'unchecked' | 'no-board'; failed: boolean }
+  | { gap: 'exhausted'; failed: true; failures: string[] }
+  | undefined {
   const wait = state.waits?.find((w) => w.kind === 'base-check');
   if (!wait || heldBaseOf(state) || (h.config.approvalMode ?? 'agent') !== 'agent')
     return undefined;
   const failed = wait.detail.startsWith('Проверка базы не пройдена');
   if (!baseMovesOf(state)) return { gap: 'unchecked', failed };
+  // Повторы проверки исчерпаны: `checkBase` пропустит прогон и оставит
+  // провал — ни задание, ни его старт базу не проверят (одно решение,
+  // `baseCheckSpent`).
+  const spent = baseCheckSpent(h, state);
+  if (spent) return { gap: 'exhausted', failed: true, failures: spent.failures };
   if (!live.length) return { gap: 'no-board', failed };
   return undefined;
 }
+
+/** Шаг ведущего для проверки базы с исчерпанными повторами: исправить и перенести базу. */
+const baseExhaustedDraft = (
+  failures: string[],
+  job?: { id: string } & Parameters<typeof jobRef>[0],
+) => ({
+  action: 'base-update' as const,
+  ...(job ? { boardId: job.id, job: jobRef(job) } : {}),
+  code: 'base-exhausted' as const,
+  params: { failures: failures.slice(0, 20) },
+});
 
 /** Шаг подтверждения человека для ожидания, которое цикл не проверит. */
 const baseUncheckedDraft = (
@@ -1291,6 +1312,7 @@ function boardDraft(boardId: string, ctx: HostContext): HostNextDraft | undefine
         };
       const gap = baseWaitGap(h, state, ctx.jobs.filter(ctx.live));
       if (gap?.gap === 'unchecked') return baseUncheckedDraft(gap.failed, live);
+      if (gap?.gap === 'exhausted') return baseExhaustedDraft(gap.failures, live);
     }
     return {
       action: 'wait',
@@ -1776,6 +1798,20 @@ function carryNext(ctx: HostContext): HandoffHostNext | undefined {
 
 function hostNext(ctx: HostContext): HandoffHostNext | undefined {
   const step = hostStep(ctx);
+  // Ревью, остановленное эскалацией, ждёт решения владельца в карточке
+  // центра внимания: повтор ревью, его задание или решение о плане ведущий
+  // не продвинет. Другие решения и вопросы (`rank` 0) — раньше, кроме шага
+  // того же вопроса исполнителя, ответ на который и остановлен.
+  const escalated = escalationStep(ctx);
+  if (
+    escalated &&
+    !(
+      step &&
+      rank(step) === 0 &&
+      !(escalated.input && step.input?.requestId === escalated.input.requestId)
+    )
+  )
+    return escalated;
   // Решение о плане — о будущем объёме (например, разбор находок на
   // неутверждённой доске). Пакет harness называет первую по порядку работ
   // остановку, и черновик ранней доски заслонял блокеры живой работы: ответ
@@ -1834,6 +1870,54 @@ function hostNext(ctx: HostContext): HandoffHostNext | undefined {
   // задания, пауза, перенос базы), раньше старта задания и ожиданий.
   if (chosen && chosen.action !== 'wait' && rank(chosen) <= 1) return chosen;
   return ownerAnswerStep(ctx) ?? chosen ?? followUpNext(ctx) ?? ownerWaitStep(ctx);
+}
+
+/**
+ * Шаг оператора по эскалации ревью (старейшей в области пакета): решение
+ * владельца в карточке центра внимания или `review-decide`. Пакет доски
+ * видит ревью её плана и ответов исполнителям её задач.
+ */
+function escalationStep(ctx: HostContext): HandoffHostNext | undefined {
+  const { h, state, pack } = ctx;
+  const boardOf = (taskId: string) =>
+    state.boards.find((b) => b.revisions.at(-1)?.taskIds.includes(taskId))?.id;
+  for (const e of reviewEscalations(h)) {
+    let taskId: string | undefined;
+    if (e.requestId)
+      try {
+        taskId = executionOf(h).engine.inputRequest(e.requestId).workId;
+      } catch {
+        taskId = undefined;
+      }
+    const boardId = taskId
+      ? boardOf(taskId)
+      : e.kind === 'plan' && state.boards.some((b) => b.id === e.subject)
+        ? e.subject
+        : undefined;
+    if (pack.graphId && boardId !== pack.graphId) continue;
+    return withDetail(h, {
+      action: 'operator',
+      ...(boardId ? { boardId } : {}),
+      ...(e.requestId && taskId
+        ? {
+            input: {
+              requestId: e.requestId,
+              taskId,
+              state: 'review-escalated',
+              actor: 'operator' as const,
+            },
+          }
+        : {}),
+      code: 'review-escalated',
+      params: {
+        kind: e.kind,
+        subject: e.subject,
+        findings: e.findings.length + e.more,
+        round: e.round,
+      },
+    });
+  }
+  return undefined;
 }
 
 /**
@@ -2185,6 +2269,12 @@ function hostStep(ctx: HostContext): HandoffHostNext | undefined {
     const gap = baseWaitGap(h, state, live);
     if (gap?.gap === 'unchecked' && state.pauseReason === 'base-check')
       return withDetail(h, baseUncheckedDraft(gap.failed, live[0]));
+    // Проверка с исчерпанными повторами: ни ожидание цикла, ни снятие паузы
+    // (своей паузы ведущего — тоже) её не снимут; шаг — исправить базу и
+    // перенести её (или подтверждение пользователя). Паузу человека над ней
+    // называет шаг паузы (`params.base: exhausted`).
+    if (gap?.gap === 'exhausted' && (state.pauseReason === 'base-check' || leadLiftsPause(state)))
+      return withDetail(h, baseExhaustedDraft(gap.failures, live[0]));
     // Остановка такта «база прогонов отстала»: её не снимет ни задание (на
     // стадии задач), ни harness run, а снятие паузы (в том числе циклом на
     // стадии запуска) лишь даёт следующему такту остановить выдачу снова.

@@ -251,7 +251,11 @@ function CardForm({
       )}
       <label className="mt-0 grid min-w-0 gap-1">
         <span className="text-xs">
-          {action.id === 'request-changes' ? 'Что доработать' : 'Ваш ответ'}
+          {action.id === 'request-changes'
+            ? 'Что доработать'
+            : item.source === 'review'
+              ? 'Основание решения'
+              : 'Ваш ответ'}
           {textOptional ? ' (необязательно)' : ''}
         </span>
         <Textarea
@@ -550,10 +554,15 @@ export function AttentionCard({
       {domain.map(
         (a) =>
           a.prompt && (
-            // Решение за владельца подтверждают, прочитав его целиком: текст открыт.
-            <details key={a.id} className="text-sm" open={item.source === 'stand-in'}>
+            // Решение за владельца подтверждают, прочитав его целиком, а
+            // решение по эскалации ревью — прочитав находки: текст открыт.
+            <details
+              key={a.id}
+              className="text-sm"
+              open={item.source === 'stand-in' || item.source === 'review'}
+            >
               <summary className="text-muted-foreground cursor-pointer">
-                {a.round !== undefined
+                {a.round !== undefined || item.source === 'review'
                   ? 'Находки ревью полностью'
                   : a.id === 'confirm-proposal'
                     ? 'Ответ ведущего и обоснование'
