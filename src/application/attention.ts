@@ -657,10 +657,8 @@ const inputSource: AttentionSourceRule = {
           // выход — замена вопроса той же задачей (F94).
           const answer =
             operator &&
-            !r.moved &&
-            (r.state === 'awaiting-answer' ||
-              r.state === 'review-rejected' ||
-              ownerAnswersAgain(r));
+            (ownerAnswersAgain(r) ||
+              (!r.moved && (r.state === 'awaiting-answer' || r.state === 'review-rejected')));
           // Отклонённое ревью (D03 `review-rejected`): в режиме operator ответ
           // применяют только подтверждением показанного раунда — то же правило
           // `InputService.apply`, что у панели; его находки — в карточке.
@@ -687,7 +685,7 @@ const inputSource: AttentionSourceRule = {
           // Исходная остановка не держится, а вопрос решает оператор (F39,
           // F85): выход — его замена той же задачей одним действием, затем
           // ведущий переносит тот же ответ в новую постановку.
-          const supersede = operator && !!r.moved && r.kind !== 'follow-up';
+          const supersede = operator && !!r.moved && r.kind !== 'follow-up' && !r.leadAnswerHeld;
           let findings = '';
           if (rejected)
             engine.read((v) => {
@@ -717,13 +715,15 @@ const inputSource: AttentionSourceRule = {
               ? `Решение исполнителя по задаче «${title}» ждёт ведущего`
               : answer
                 ? `Исполнитель спрашивает по задаче «${title}»`
-                : apply
-                  ? `Ответ по задаче «${title}» готов к применению`
-                  : r.state === 'contract-change-required'
-                    ? `Ответ по задаче «${title}» принят: нужно изменение контракта — ведёт ведущий`
-                    : r.resume
-                      ? `Ответ по задаче «${title}»: DevContour не может продолжить сам`
-                      : `Вопрос исполнителя по задаче «${title}»: ${inputStateLabels[r.state] ?? r.state}`,
+                : r.moved
+                  ? `Ответ по задаче «${title}»: DevContour не может продолжить сам`
+                  : apply
+                    ? `Ответ по задаче «${title}» готов к применению`
+                    : r.state === 'contract-change-required'
+                      ? `Ответ по задаче «${title}» принят: нужно изменение контракта — ведёт ведущий`
+                      : r.resume
+                        ? `Ответ по задаче «${title}»: DevContour не может продолжить сам`
+                        : `Вопрос исполнителя по задаче «${title}»: ${inputStateLabels[r.state] ?? r.state}`,
             // Следующий шаг — словами оператора: поле `next` сводки — указание
             // ведущему агенту по-английски, с операциями агентского API.
             // Повторные остановки вопросом — первой строкой: длинный вопрос
@@ -887,7 +887,8 @@ const reviewSource: AttentionSourceRule = {
         // владелец не видел. Находка длиннее карточки или со скрытыми
         // данными решается командой (причина называет её).
         const text = one(f.message);
-        if (ctx.redact(text) !== text) break;
+        // Маска при чтении или уже записанная движком (`[REDACTED]`).
+        if (ctx.redact(text) !== text || text.includes('[REDACTED]')) break;
         const line = `\n${shown.length + 1}. ${text} (открыта раундов: ${f.rounds})`;
         if ((intro + list + line).length + outro.length + 120 > ATTENTION_LIMITS.prompt) break;
         shown.push(f);
@@ -935,7 +936,7 @@ const reviewSource: AttentionSourceRule = {
               {
                 id: 'handoff',
                 kind: 'handoff',
-                command: `devcontour review-decide --kind ${e.kind} --subject ${JSON.stringify(e.subject)} --findings ${e.findings[0]?.id ?? ''} --decision accepted-limitation|continue --reason "…" --workspace ${workspaceOf(ctx)}  # находка: ${e.artifact}`,
+                command: `devcontour review-decide --kind ${e.kind} --subject ${JSON.stringify(e.subject)} --findings ${e.findings[0]?.id ?? ''} --decision accepted-limitation|continue --reason "…" --workspace ${workspaceOf(ctx)}  # находка: ${e.findings[0]?.source ?? e.artifact}`,
               },
             ],
         covered: [],

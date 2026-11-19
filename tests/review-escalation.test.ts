@@ -434,54 +434,65 @@ test('long findings: the card decides only the findings it shows in full, a stal
 });
 
 test('a finding longer than the card gets no panel decision: the card names the owner command instead of deciding unseen text', async () => {
-  const f = fixture();
-  try {
-    f.h.config.mode = 'local';
-    const huge = 'Oversized finding: ' + 'the error states are undefined '.repeat(110);
-    const make = (name: 'codex' | 'claude'): AgentAdapter => ({
-      name,
-      execute: () =>
-        Promise.resolve({
-          data: {
-            approved: false,
-            summary: 'Explicit test fixture',
-            findings: [{ severity: 'blocking', message: huge }],
-            previous: [],
-          },
-          log: 'Fixture only; no provider called',
-          command: ['fixture'],
+  for (const which of ['huge', 'masked'] as const) {
+    const f = fixture();
+    try {
+      f.h.config.mode = 'local';
+      const huge = 'Oversized finding: ' + 'the error states are undefined '.repeat(110);
+      // Находка, которую движок записал с маской: решения в панели тоже нет.
+      const masked = 'Token [REDACTED] leaks into logs';
+      const make = (name: 'codex' | 'claude'): AgentAdapter => ({
+        name,
+        execute: () =>
+          Promise.resolve({
+            data: {
+              approved: false,
+              summary: 'Explicit test fixture',
+              findings: [{ severity: 'blocking', message: which === 'huge' ? huge : masked }],
+              previous: [],
+            },
+            log: 'Fixture only; no provider called',
+            command: ['fixture'],
+          }),
+      });
+      const runtimes = { codex: make('codex'), claude: make('claude') };
+      const proposal = { title: 'Huge API v1', content: 'GET /huge.' };
+      for (let i = 0; i < 3; i++)
+        await assert.rejects(reviewContract(f.h, f.root, proposal, 'codex', runtimes));
+      const attention = new AttentionService(f.store, f.h);
+      const card = (await attention.active()).items.find((i) => i.source === 'review')!;
+      assert.ok(card);
+      assert.ok(huge.length > 2000);
+      assert.ok(masked.length < 100);
+      assert.deepEqual(
+        card.actions.filter((a) => a.kind === 'domain'),
+        [],
+        'no decision over text the card cannot show',
+      );
+      const command = card.actions.find((a) => a.kind === 'handoff');
+      assert.ok(command?.kind === 'handoff');
+      assert.match(
+        command.command,
+        /^devcontour review-decide --kind contract --subject "contract-/,
+      );
+      // Текст находки — в ответе раунда её появления (первого), а не последнего.
+      const subject = /--subject "([^"]+)"/.exec(command.command)![1];
+      const rounds = executionOf(f.h).engine.reviews('contract', subject);
+      assert.ok(command.command.endsWith(`# находка: ${rounds[0].artifact}`), command.command);
+      assert.match(card.reason, /не помещается в карточку/);
+      await assert.rejects(
+        attention.act({
+          sourceKey: card.sourceKey,
+          occurrenceId: card.occurrenceId,
+          expectedVersion: card.sourceVersion,
+          action: 'accept-limitation',
+          input: { text: 'Trying anyway.' },
         }),
-    });
-    const runtimes = { codex: make('codex'), claude: make('claude') };
-    const proposal = { title: 'Huge API v1', content: 'GET /huge.' };
-    for (let i = 0; i < 3; i++)
-      await assert.rejects(reviewContract(f.h, f.root, proposal, 'codex', runtimes));
-    const attention = new AttentionService(f.store, f.h);
-    const card = (await attention.active()).items.find((i) => i.source === 'review')!;
-    assert.ok(card);
-    assert.ok(huge.length > 2000);
-    assert.deepEqual(
-      card.actions.filter((a) => a.kind === 'domain'),
-      [],
-      'no decision over text the card cannot show',
-    );
-    const command = card.actions.find((a) => a.kind === 'handoff');
-    assert.ok(command?.kind === 'handoff');
-    assert.match(command.command, /^devcontour review-decide --kind contract --subject "contract-/);
-    assert.match(command.command, /review\.json$/);
-    assert.match(card.reason, /не помещается в карточку/);
-    await assert.rejects(
-      attention.act({
-        sourceKey: card.sourceKey,
-        occurrenceId: card.occurrenceId,
-        expectedVersion: card.sourceVersion,
-        action: 'accept-limitation',
-        input: { text: 'Trying anyway.' },
-      }),
-      (e: DomainError) => e.status === 400,
-    );
-    assert.equal(f.store.localEntries('review-decisions').length, 0);
-  } finally {
-    f.cleanup();
+        (e: DomainError) => e.status === 400,
+      );
+      assert.equal(f.store.localEntries('review-decisions').length, 0);
+    } finally {
+      f.cleanup();
+    }
   }
 });

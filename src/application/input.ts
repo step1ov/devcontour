@@ -526,14 +526,16 @@ export function stopQuestions(h: DevContour, workId?: string): Map<string, Input
  * который решает владелец (`leadAnswerHeld`, записан до правила ответов
  * ведущего), он ещё не применён, а исходная остановка держится. Одно
  * правило для шага `answer-operator` пакета передачи и формы «Ответить»
- * центра внимания: ответ оператора, остановка которого сдвинулась (F85),
- * сюда не входит — его выход — замена вопроса.
+ * центра внимания — и при сдвинувшейся остановке: замену такого вопроса
+ * сервис отклоняет, пока владелец не ответил. Ответ оператора со
+ * сдвинувшейся остановкой (F85) сюда не входит — его выход — замена вопроса.
  */
-export function ownerAnswersAgain(summary: { state: string; leadAnswerHeld?: true; moved?: true }) {
+export function ownerAnswersAgain(summary: { state: string; leadAnswerHeld?: true }) {
   return (
     !!summary.leadAnswerHeld &&
-    !summary.moved &&
-    ['answer-saved', 'context-review', 'ready-to-apply', 'stale'].includes(summary.state)
+    ['answer-saved', 'context-review', 'ready-to-apply', 'review-rejected', 'stale'].includes(
+      summary.state,
+    )
   );
 }
 

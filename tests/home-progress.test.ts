@@ -1341,7 +1341,10 @@ test('Home queue text: who resumes depends on the lead workflow and the approval
     operatorQueue(q('operator', { by: 'lead' }), wait, loop).hint,
     'Свою паузу ведущий агент снимает сам; затем он проверит базу и продолжит выдачу.',
   );
-  assert.match(operatorQueue(q('operator', { by: 'lead' }), wait, noLoop).hint, /Проверьте базу gates/);
+  assert.match(
+    operatorQueue(q('operator', { by: 'lead' }), wait, noLoop).hint,
+    /Проверьте базу gates/,
+  );
   assert.match(operatorQueue(q('base-check'), wait, noLoop).hint, /Проверьте базу gates/);
   // Без задания ведущего цикл базу не проверит: действие остаётся оператору.
   assert.match(
@@ -1349,8 +1352,7 @@ test('Home queue text: who resumes depends on the lead workflow and the approval
     /Проверьте базу gates/,
   );
   assert.match(
-    operatorQueue(q('operator', { by: 'lead' }), wait, { ...loop, approvalMode: 'operator' })
-      .hint,
+    operatorQueue(q('operator', { by: 'lead' }), wait, { ...loop, approvalMode: 'operator' }).hint,
     /Проверьте базу gates/,
   );
   assert.equal(

@@ -1012,7 +1012,11 @@ test('F85: the carry needs the validated route and its own completed operation; 
       const domain = card.actions.filter((a) => a.kind === 'domain');
       assert.equal(domain[0]?.id, 'supersede', `${name}: ${JSON.stringify(domain)}`);
       assert.ok(!domain.some((a) => a.id === 'answer'), name);
-      assert.doesNotMatch(card.title, /Исполнитель спрашивает/, name);
+      assert.match(
+        card.title,
+        /^Ответ по задаче «.+»: DevContour не может продолжить сам$/,
+        `${name}: ${card.title}`,
+      );
       await attention.act({
         sourceKey: card.sourceKey,
         occurrenceId: card.occurrenceId,

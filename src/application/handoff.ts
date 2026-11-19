@@ -1607,6 +1607,21 @@ function inputStep(ctx: HostContext, taskId: string): HandoffHostNext | undefine
       code: 'follow-up',
       params: { severity: summary.severity, version: summary.version },
     });
+  // Сохранённый ответ ведущего на вопрос владельца (записан до правила
+  // ответов ведущего): не доводится, вопрос снова отвечает владелец — раньше
+  // сдвинувшейся остановки: её замену сервис откажет до ответа владельца.
+  if (ownerAnswersAgain(summary))
+    return withDetail(h, {
+      action: 'answer-input',
+      ...base,
+      code: 'answer-operator' as const,
+      params: {
+        floors: summary.floors,
+        version: summary.version,
+        proposed: !!summary.proposal,
+        ...stops,
+      },
+    });
   // Исходная остановка не держится: input_apply откажет, и проход сервера её
   // не доведёт — раньше его фазы. Шаг называет реальный выход — замену или
   // снятие вопроса; у вопроса, который ведущий не решает, это решение
@@ -1651,20 +1666,6 @@ function inputStep(ctx: HostContext, taskId: string): HandoffHostNext | undefine
               ...stops,
             },
           }),
-    });
-  // Сохранённый ответ ведущего на вопрос владельца (записан до правила
-  // ответов ведущего): не доводится, вопрос снова отвечает владелец.
-  if (ownerAnswersAgain(summary))
-    return withDetail(h, {
-      action: 'answer-input',
-      ...base,
-      code: 'answer-operator' as const,
-      params: {
-        floors: summary.floors,
-        version: summary.version,
-        proposed: !!summary.proposal,
-        ...stops,
-      },
     });
   return withDetail(h, {
     action: 'apply-input',

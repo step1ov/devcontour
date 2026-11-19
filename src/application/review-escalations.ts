@@ -34,7 +34,13 @@ export interface ReviewEscalation {
   /** Файл ответа reviewer последнего раунда: полный текст находок. */
   artifact: string;
   /** Блокирующие находки, открытые три раунда подряд и без решения владельца. */
-  findings: { id: string; message: string; rounds: number }[];
+  findings: {
+    id: string;
+    message: string;
+    rounds: number;
+    /** Файл ответа reviewer раунда, в котором находка появилась (её полный текст). */
+    source: string;
+  }[];
   /** Сколько таких находок сверх `findings`. */
   more: number;
   /** Задача вопроса исполнителя (предмет `input-<requestId>`). */
@@ -66,12 +72,16 @@ export function reviewEscalations(h: DevContour): readonly ReviewEscalation[] {
   const hit = shared ? cache.get(h.store) : undefined;
   if (hit && hit.revision === revision) return hit.value;
   const last = new Map<string, ReviewRecord>();
+  // Файлы ответов по раундам: текст находки — в ответе раунда её появления
+  // (последующие раунды называют её лишь по ID).
+  const artifacts = new Map<string, string>();
   for (const { value: r } of executionOf(h).engine.read((v) =>
     v.locals('reviews', WORKSPACE_OWNER),
   )) {
     const key = `${r.kind}\u0000${r.subject}`;
     const prev = last.get(key);
     if (!prev || r.round > prev.round) last.set(key, r);
+    artifacts.set(`${key}\u0000${r.round}`, r.artifact);
   }
   // Записи раундов DevContour — только для заголовка эскалированного контракта.
   let attempts: readonly ContractAttempt[] | undefined;
@@ -107,6 +117,7 @@ export function reviewEscalations(h: DevContour): readonly ReviewEscalation[] {
         id: f.id,
         message: f.message,
         rounds: openRounds(f, r.round),
+        source: artifacts.get(`${r.kind}\u0000${r.subject}\u0000${f.openedIn}`) ?? r.artifact,
       })),
       more: Math.max(0, open.length - ESCALATION_FINDINGS),
       ...(requestId ? { requestId } : {}),
