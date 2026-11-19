@@ -40,7 +40,7 @@ import {
   questionHolds,
   sectionOf,
 } from '../core/owner-questions.ts';
-import type { DevContour } from '../core/service.ts';
+import { baseMovesOf, type DevContour } from '../core/service.ts';
 import {
   LeadWorkflow,
   jointWaiting,
@@ -2109,6 +2109,26 @@ function hostStep(ctx: HostContext): HandoffHostNext | undefined {
         params: { paths: held.paths },
       });
     }
+    // Неудержанное ожидание проверки базы без диапазона этого переноса
+    // (поставлено до переноса, прежней версией или диапазон устарел):
+    // `checkBase` его не проверит, «цикл проверит базу» было бы неправдой
+    // (F93). Под паузой ведущего — его шаг паузы с этой оговоркой; когда
+    // очередь держит одно ожидание — подтверждение человека.
+    const baseWait = state.waits?.find((w) => w.kind === 'base-check');
+    const unchecked =
+      !!baseWait &&
+      !baseWait.detail.startsWith('Проверка базы не пройдена') &&
+      !baseMovesOf(state) &&
+      (h.config.approvalMode ?? 'agent') === 'agent';
+    if (unchecked && state.pauseReason === 'base-check') {
+      const first = live[0];
+      return withDetail(h, {
+        action: 'operator',
+        ...(first ? { boardId: first.id, job: jobRef(first) } : {}),
+        code: 'base-unchecked',
+        params: {},
+      });
+    }
     // Остановка такта «база прогонов отстала»: её не снимет ни задание (на
     // стадии задач), ни harness run, а снятие паузы (в том числе циклом на
     // стадии запуска) лишь даёт следующему такту остановить выдачу снова.
@@ -2155,12 +2175,16 @@ function hostStep(ctx: HostContext): HandoffHostNext | undefined {
         action: 'queue_set',
         ...(first ? { boardId: first.id, job: jobRef(first), loop: ahead!.outlook } : {}),
         code: 'pause-operator',
-        params: leadLiftsPause(state)
-          ? {
-              by: 'lead',
-              ...(leadPauseNote(state) ? { reason: leadPauseNote(state)! } : {}),
-            }
-          : {},
+        params: {
+          ...(leadLiftsPause(state)
+            ? {
+                by: 'lead' as const,
+                ...(leadPauseNote(state) ? { reason: leadPauseNote(state)! } : {}),
+              }
+            : {}),
+          // Под паузой — ожидание, которое цикл не проверит (F93).
+          ...(unchecked ? { base: 'unchecked' as const } : {}),
+        },
       });
     }
   }

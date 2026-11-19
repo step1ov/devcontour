@@ -347,6 +347,11 @@ const samples: { [C in HintCode]: (HintSubject & Extract<HintOf, { code: C }>)[]
       job,
       loop: { step: 'accept' },
     },
+    { code: 'pause-operator', params: { by: 'lead', base: 'unchecked' } },
+  ],
+  'base-unchecked': [
+    { code: 'base-unchecked', params: {} },
+    { code: 'base-unchecked', params: {}, boardId: 'board-1', job },
   ],
   'base-held': [
     { code: 'base-held', params: { paths: [] } },
@@ -725,8 +730,10 @@ test('Подсказки шага: новая конфигурация setup п�
  * (новые коды contract-change-required, changeset-restart, owner-answer,
  * owner-question-pending, образцы closable и plan.questions); тексты прежних
  * образцов байтово прежние.
+ * Намеренное изменение (F93): новый код base-unchecked и образец
+ * pause-operator с base: unchecked; тексты прежних образцов байтово прежние.
  */
-const ENGLISH_SAMPLES_SHA256 = '24e67e66b80e8edac26c874cbbee20245b339500fc0ce515d1d48f6031f16aa8';
+const ENGLISH_SAMPLES_SHA256 = 'dc67f10455d872115603fe26857da139ed8975d3180eb065363d8d419a6856fe';
 
 test('Подсказки шага: английские тексты образцов закреплены', () => {
   assert.equal(

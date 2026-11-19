@@ -387,3 +387,47 @@ test('F89: leadResumeOf предсказывает исход снятия па�
     f.cleanup();
   }
 });
+
+test('F93: session_handoff host.next names the real way out of a base check — the loop only with a current range and a board job', async () => {
+  const stale = (s: DevContourState) => {
+    s.baseMoves = { ...s.baseMoves!, at: '2000-01-01T00:00:00.000Z' };
+  };
+  for (const [name, job, edit] of [
+    ['normal', 'board', undefined],
+    ['missing range', 'board', (s: DevContourState) => void delete s.baseMoves],
+    ['stale range', 'board', stale],
+    ['changeset only', 'changeset', undefined],
+  ] as const)
+    await withRepo(async ({ h, data }) => {
+      const agent = await leadPauseOverMove(h, data, job, edit);
+      const unchecked = name === 'missing range' || name === 'stale range';
+      // Под паузой ведущего: шаг — снять свою паузу; текст не обещает
+      // проверки, которой цикл не сделает.
+      const before = devcontourHandoff(h, {}).host.next!;
+      assert.equal(before.code, 'pause-operator', name);
+      assert.deepEqual(
+        before.params,
+        { by: 'lead', reason: 'Guides', ...(unchecked ? { base: 'unchecked' } : {}) },
+        name,
+      );
+      if (unchecked) assert.doesNotMatch(before.detail, /the board workflow checks the base/, name);
+      else assert.match(before.detail, /the board workflow checks the base/, name);
+      await agent.run({ operation: 'queue_set', input: { paused: false } });
+      assert.equal(h.store.read().pauseReason, 'base-check', name);
+      const after = devcontourHandoff(h, {}).host.next!;
+      if (name === 'normal') {
+        assert.equal(after.action, 'wait', name);
+        assert.equal(after.code, 'pause-lift', name);
+      } else if (unchecked) {
+        // checkBase откажет: решение пользователя, а не ожидание цикла.
+        assert.equal(after.action, 'operator', name);
+        assert.equal(after.code, 'base-unchecked', name);
+        assert.match(after.detail, /confirm-and-start/, name);
+        assert.equal(await checkBase(h, { data, state: data }, () => {}), false, name);
+      } else {
+        // Задание ChangeSet базу не проверит: зарегистрировать доску.
+        assert.equal(after.action, 'workflow_start', name);
+        assert.equal(after.code, 'board-start', name);
+      }
+    });
+});
