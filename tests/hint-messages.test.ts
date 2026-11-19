@@ -263,6 +263,23 @@ const samples: { [C in HintCode]: (HintSubject & Extract<HintOf, { code: C }>)[]
       job,
     },
   ],
+  'changeset-restart': [
+    {
+      code: 'changeset-restart',
+      params: {
+        changeSetId: 'CHG-1',
+        authorRuntime: 'codex',
+        operation: 'CC-1',
+        others: ['CHG-2'],
+      },
+      job: { ...job, status: 'stale' },
+    },
+    {
+      code: 'changeset-restart',
+      params: { changeSetId: 'CHG-1', authorRuntime: 'claude' },
+      job,
+    },
+  ],
   'pause-lift': [
     {
       code: 'pause-lift',
@@ -641,8 +658,10 @@ test('Подсказки шага: новая конфигурация setup п�
  * роли оставляет находку неразобранной (для ждущей решения владельца).
  * Намеренное изменение (F83): новый код `contract-change-required` — ответ
  * принят как выбор, которому нужна поправка закреплённого контракта.
+ * Намеренное изменение (F84): новый код `changeset-restart` — перезапуск
+ * устаревшего задания ChangeSet.
  */
-const ENGLISH_SAMPLES_SHA256 = 'c43568e4645c6a989f627927dc0ed9f10391739a49dcf4771e5c518365a0eb36';
+const ENGLISH_SAMPLES_SHA256 = '3d1bc5712275bebf96f85bac5ff52e4976ed87d868daa47abade457ef36681ba';
 
 test('Подсказки шага: английские тексты образцов закреплены', () => {
   assert.equal(

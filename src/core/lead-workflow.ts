@@ -451,7 +451,7 @@ export class LeadWorkflow {
   invalidated(
     boardIds: readonly string[] | undefined,
     s: DevContourState = this.h.store.read(),
-    rebound: (boardId: string, since: string) => boolean = () => false,
+    rebound: (boardId: string, since: string, job: WorkflowJob) => boolean = () => false,
   ) {
     const active = this.staleBoards(s);
     const fresh = new Set<string>();
@@ -489,7 +489,7 @@ export class LeadWorkflow {
           !!bound(job.id) &&
           !closed(job.id) &&
           (active.get(job.id)?.key === job.key ||
-            (job.status === 'stale' && rebound(job.id, job.startedAt))),
+            (job.status === 'stale' && rebound(job.id, job.startedAt, job))),
       )
       .map((job) => ({
         boardId: job.id,
@@ -498,6 +498,60 @@ export class LeadWorkflow {
         status: job.status,
         stage: job.stage,
         startedAt: job.startedAt,
+        ...(job.finishedAt ? { finishedAt: job.finishedAt } : {}),
+        authorRuntime: job.authorRuntime,
+      }));
+  }
+  /**
+   * Задания ChangeSet, которые уже не продолжатся (F84), — то же правило,
+   * что `invalidated` для досок: последнее задание набора, если по текущему
+   * входу задания нет, и оно действует (queued, running) по прежнему входу —
+   * очередь закроет его `stale` при следующем взятии стадии — или уже
+   * закрыто `stale`, и `rebound` относит его к записанной операции (вход
+   * сменила перепривязка или перенастройка операции изменения контракта).
+   * Принятый набор и набор, вход которого не построить, не входят. Чтение,
+   * без записи.
+   */
+  invalidatedChangesets(
+    s: DevContourState = this.h.store.read(),
+    rebound: (changeSetId: string, since: string, job: WorkflowJob) => boolean = () => false,
+  ) {
+    const latest = new Map<string, WorkflowJob>();
+    const fresh = new Set<string>();
+    const inputs = new Map<string, string | undefined>();
+    const bound = (id: string) => {
+      if (!inputs.has(id))
+        try {
+          inputs.set(id, this.input('changeset', id, s).digest);
+        } catch (error) {
+          if (!(error instanceof DomainError)) throw error;
+          inputs.set(id, undefined);
+        }
+      return inputs.get(id);
+    };
+    for (const owner of [undefined, ...repositories(this.h.config).map((r) => r.id)])
+      for (const job of this.list(owner)) {
+        if (job.kind !== 'changeset') continue;
+        const seen = latest.get(job.id);
+        if (!seen || job.startedAt > seen.startedAt) latest.set(job.id, job);
+        if (bound(job.id) === job.inputDigest) fresh.add(job.id);
+      }
+    return [...latest.values()]
+      .filter((job) => {
+        if (fresh.has(job.id) || !bound(job.id)) return false;
+        if (s.changeSets.find((c) => c.id === job.id)?.acceptance) return false;
+        return (
+          ['queued', 'running'].includes(job.status) ||
+          (job.status === 'stale' && rebound(job.id, job.startedAt, job))
+        );
+      })
+      .map((job) => ({
+        changeSetId: job.id,
+        key: job.key,
+        status: job.status,
+        stage: job.stage,
+        startedAt: job.startedAt,
+        ...(job.finishedAt ? { finishedAt: job.finishedAt } : {}),
         authorRuntime: job.authorRuntime,
       }));
   }

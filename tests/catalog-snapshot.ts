@@ -238,5 +238,10 @@
 // называют маршрут contract-change (правило находки contract-change:<id>,
 // route и contracts результата ревью, код шага contract-change-required);
 // прочие операции байтово прежние.
-export const CATALOG_DIGEST = 'fa57ff359613382950745d5d90f440d6bc425b7a0c8fe0847c3c41e1e7ef7695';
+// Намеренное изменение (F84): описание contract_change_status называет
+// boardJobs.changesets (задания ChangeSet, устаревшие после перепривязки или
+// перезакрепления контекста), session_handoff — устаревшие задания в
+// host.changesets (stale.command, stale.operation) и код шага
+// changeset-restart; прочие операции байтово прежние.
+export const CATALOG_DIGEST = '06ddb9b8e971cb799c4037bb1068429f35b714a094703bd986509bdea0ebc5c7';
 export const SNAPSHOT_VERSION = '0.4.0-alpha.7';

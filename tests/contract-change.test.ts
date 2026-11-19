@@ -8,8 +8,10 @@ import { checksWarnings } from '../src/runner/agent-control.ts';
 import {
   ContractChanges,
   clipAtBoundary,
+  invalidates,
   type ContractChange,
 } from '../src/runner/contract-change.ts';
+import { Workspace } from '../src/core/workspace.ts';
 import { contractImpact } from '../src/runner/contract-impact.ts';
 import { STALE_BASE } from '../src/runner/base-update.ts';
 import { type AgentAdapter, type AgentRequest } from '../src/runner/adapters.ts';
@@ -737,4 +739,207 @@ test('F66: a rebind that invalidates a running board job names the job and the r
   } finally {
     await s.remove();
   }
+});
+
+test('F84: a contract change reports the ChangeSet job it made stale; session_handoff keeps it with the restart', async () => {
+  const s = await stage();
+  try {
+    const lead = new LeadWorkflow(s.h);
+    const boardJob = lead.start({ kind: 'board', id: s.board.id, authorRuntime: 'codex' });
+    assert.equal(lead.claim(boardJob.key, boardJob.owner)?.status, 'running');
+    const release = new Workspace(s.h).create({
+      title: 'Release r1',
+      description: 'Joint verification of the catalog board.',
+      boardIds: [s.board.id],
+    });
+    const csJob = lead.start({ kind: 'changeset', id: release.id, authorRuntime: 'claude' });
+    // The serve loop takes the ChangeSet stage every tick: right after the
+    // rebind the queue closes the job as stale, before the operation ends —
+    // the job the old view never named.
+    const started = await s.changes().start(s.proposal, 'codex');
+    const done = await s
+      .changes((step) => {
+        if (step === 'rebind') assert.equal(lead.claim(csJob.key, csJob.owner), undefined);
+      })
+      .advance((started as { operation: ContractChange }).operation.id);
+    assert.equal(done.status, 'completed', done.error);
+    const closed = lead.get(csJob.key, csJob.owner);
+    assert.equal(closed.status, 'stale', 'the queue closed the ChangeSet job during the operation');
+    assert.ok(closed.finishedAt! >= done.startedAt && closed.finishedAt! <= done.finishedAt!);
+    assert.deepEqual(
+      done.boardJobs?.jobs.map((j) => j.boardId),
+      [s.board.id],
+    );
+    assert.deepEqual(
+      done.boardJobs?.changesets?.map((j) => ({ id: j.changeSetId, key: j.key, status: j.status })),
+      [{ id: release.id, key: csJob.key, status: 'stale' }],
+    );
+    const restart = `workflow_start {"kind": "changeset", "id": "${release.id}", "authorRuntime": "claude"}`;
+    assert.ok(done.boardJobs?.next.includes(restart), done.boardJobs?.next);
+    // The history keeps the record after the restarts.
+    const event = done.history.find((e) => e.event === 'jobs-invalidated');
+    assert.match(
+      event?.detail ?? '',
+      new RegExp(`changeset ${release.id} ${csJob.key.slice(0, 8)} stale`),
+    );
+    assert.match(event?.detail ?? '', new RegExp(`board ${s.board.id}`));
+
+    // session_handoff: the stale ChangeSet stays in host.changesets with
+    // the restart, and host.next names the board restart first.
+    let handoff = devcontourHandoff(s.h, {});
+    assert.deepEqual(handoff.host.changesets, [
+      {
+        changeSetId: release.id,
+        job: { key: csJob.key, status: 'stale', stage: 0, attempts: 0 },
+        stale: { operation: done.id, command: restart },
+      },
+    ]);
+    assert.equal(handoff.host.next?.code, 'board-restart', JSON.stringify(handoff.host.next));
+    // The same under the lead's pause over the base-check wait the moved
+    // base left (the order of the field run): the board restart, not
+    // queue_set — the lead pause no job lifts.
+    s.h.pause(true, 'operator', 'lead', 'contract change');
+    s.store.change('fixture.wait', (st) => {
+      st.waits = [{ kind: 'base-check', at: new Date().toISOString(), detail: 'База перенесена' }];
+      return {};
+    });
+    handoff = devcontourHandoff(s.h, {});
+    assert.equal(handoff.host.next?.code, 'board-restart', JSON.stringify(handoff.host.next));
+    s.store.change('fixture.wait', (st) => {
+      st.waits = [];
+      return {};
+    });
+    s.h.pause(false, 'operator', 'lead');
+    // The board job restarted: the ChangeSet restart is the next step, with
+    // the operation, under a lead pause too (the ChangeSet job lifts none).
+    lead.start({ kind: 'board', id: s.board.id, authorRuntime: 'codex' });
+    s.h.pause(true, 'operator', 'lead', 'waiting for the release');
+    handoff = devcontourHandoff(s.h, {});
+    const next = handoff.host.next;
+    assert.equal(next?.action, 'workflow_start', JSON.stringify(next));
+    assert.equal(next?.code, 'changeset-restart');
+    assert.equal(next?.job?.key, csJob.key);
+    assert.deepEqual(next?.params, {
+      changeSetId: release.id,
+      authorRuntime: 'claude',
+      operation: done.id,
+    });
+    assert.ok(next?.detail.includes(restart), next?.detail);
+    // A board-scoped pack of another board does not name it.
+    const other = s.h.createBoard('Elsewhere');
+    s.h.addTask(other.id, input('Elsewhere task'));
+    s.h.approve(other.id);
+    assert.equal(devcontourHandoff(s.h, { boardId: other.id }).host.changesets, undefined);
+    // The new ChangeSet job: no stale entry, no restart step, nothing in the operation view.
+    const fresh = lead.start({ kind: 'changeset', id: release.id, authorRuntime: 'claude' });
+    handoff = devcontourHandoff(s.h, {});
+    assert.notEqual(handoff.host.next?.code, 'changeset-restart');
+    assert.ok(
+      !handoff.host.changesets?.some((c) => c.stale),
+      JSON.stringify(handoff.host.changesets),
+    );
+    assert.ok(handoff.host.changesets?.some((c) => c.job.key === fresh.key));
+    assert.equal(s.changes().view(s.changes().get(done.id)).boardJobs, undefined);
+  } finally {
+    await s.remove();
+  }
+});
+
+test('F84: a contract change that repinned the context invalidates the jobs of every board and ChangeSet started before it ended', async () => {
+  const s = await stage();
+  try {
+    const lead = new LeadWorkflow(s.h);
+    // A board without the changed contract: the rebind does not touch it.
+    const other = s.h.createBoard('Entries');
+    s.h.addTask(other.id, input('Entries task'));
+    s.h.approve(other.id);
+    const otherJob = lead.start({ kind: 'board', id: other.id, authorRuntime: 'claude' });
+    const release = new Workspace(s.h).create({
+      title: 'Release r2',
+      description: 'Only the entries board.',
+      boardIds: [other.id],
+    });
+    const csJob = lead.start({ kind: 'changeset', id: release.id, authorRuntime: 'claude' });
+    const started = await s.changes().start(s.proposal, 'codex');
+    const id = (started as { operation: ContractChange }).operation.id;
+    const done = await s.changes().advance(id);
+    assert.equal(done.status, 'completed', done.error);
+    assert.ok(!done.boards.includes(other.id));
+    // Without a reconfigure the other board's job is not the operation's.
+    assert.equal(done.boardJobs, undefined);
+    // The operation repinned the context (config before → after): every
+    // board's execution policy changed with it. The fixture records the
+    // repin on the stored operation and changes the input of the board the
+    // way the new policy does (its digest), without a model or server.
+    const op = s.changes().get(id);
+    s.store.atomic(() =>
+      s.store.saveLocal('contract-change', op.owner, op.id, {
+        ...op,
+        config: { before: 'a'.repeat(64), after: 'b'.repeat(64) },
+      }),
+    );
+    s.store.change('fixture.policy', (st) => {
+      st.boards.find((b) => b.id === other.id)!.description = 'Policy changed';
+    });
+    // The queue closes the ChangeSet job as stale on its next take.
+    assert.equal(lead.claim(csJob.key, csJob.owner), undefined);
+    const view = s.changes().view(s.changes().get(id));
+    assert.deepEqual(
+      view.boardJobs?.jobs.map((j) => ({ boardId: j.boardId, key: j.key, status: j.status })),
+      [{ boardId: other.id, key: otherJob.key, status: 'queued' }],
+    );
+    assert.deepEqual(
+      view.boardJobs?.changesets?.map((j) => j.key),
+      [csJob.key],
+    );
+    assert.match(view.boardJobs?.next ?? '', /перенастройка контекста/);
+    const handoff = devcontourHandoff(s.h, {});
+    assert.equal(handoff.host.next?.code, 'board-restart', JSON.stringify(handoff.host.next));
+    assert.equal(handoff.host.next?.boardId, other.id);
+    assert.equal(handoff.host.next?.params.operation, id);
+    assert.equal(handoff.host.changesets?.[0]?.stale?.operation, id);
+  } finally {
+    await s.remove();
+  }
+});
+
+test('F84: invalidates — a job started after the operation, or closed stale before it began, is not its', () => {
+  const op = {
+    status: 'completed' as const,
+    startedAt: '2026-01-01T10:00:00.000Z',
+    finishedAt: '2026-01-01T10:05:00.000Z',
+    boards: ['B-1'],
+  };
+  const live = { startedAt: '2026-01-01T09:00:00.000Z', status: 'queued' };
+  assert.equal(invalidates(op, ['B-1'], live), true);
+  assert.equal(invalidates(op, ['B-2'], live), false, 'another board without a reconfigure');
+  assert.equal(
+    invalidates({ ...op, config: { before: 'x', after: 'y' } }, ['B-2'], live),
+    true,
+    'a reconfigure changes every board',
+  );
+  assert.equal(invalidates({ ...op, config: { before: 'x' } }, ['B-2'], live), false);
+  assert.equal(
+    invalidates(op, ['B-1'], { startedAt: '2026-01-01T10:06:00.000Z', status: 'queued' }),
+    false,
+    'started after the operation ended',
+  );
+  assert.equal(
+    invalidates(op, ['B-1'], {
+      startedAt: '2026-01-01T08:00:00.000Z',
+      status: 'stale',
+      finishedAt: '2026-01-01T09:59:59.000Z',
+    }),
+    false,
+    'closed stale before the operation began',
+  );
+  assert.equal(
+    invalidates(op, ['B-1'], {
+      startedAt: '2026-01-01T08:00:00.000Z',
+      status: 'stale',
+      finishedAt: '2026-01-01T10:01:00.000Z',
+    }),
+    true,
+  );
+  assert.equal(invalidates({ ...op, status: 'failed' as const }, ['B-1'], live), false);
 });

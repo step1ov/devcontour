@@ -302,6 +302,24 @@ export function correctionsOf(
 export const openCorrections = (op: Pick<ContractChange, 'status' | 'correctionDetails'>) =>
   op.status === 'completed' ? (op.correctionDetails ?? []).filter((c) => !c.closed) : [];
 
+/**
+ * Задание ведущего (доски или набора с досками `boardIds`) устарело из-за
+ * завершённой операции `op` (F84): оно начато до её окончания, и операция
+ * сменила его вход — перепривязала задачи одной из этих досок или
+ * перенастроила контекст (политика исполнения каждой доски и набора).
+ * Закрытое `stale` задание относится к операции, только если закрыто не
+ * раньше её начала.
+ */
+export function invalidates(
+  op: Pick<ContractChange, 'status' | 'startedAt' | 'finishedAt' | 'boards' | 'config'>,
+  boardIds: readonly string[],
+  job: { startedAt: string; status: string; finishedAt?: string },
+) {
+  if (op.status !== 'completed' || !op.finishedAt || job.startedAt > op.finishedAt) return false;
+  if (job.status === 'stale' && job.finishedAt && job.finishedAt < op.startedAt) return false;
+  return !!op.config?.after || boardIds.some((b) => op.boards.includes(b));
+}
+
 /** Предел подробности записи истории и текста ошибки операции. */
 const DETAIL = 500;
 const ERROR = 1000;
@@ -329,6 +347,8 @@ export type ContractChangeView = Omit<ContractChange, 'token' | 'leaseUntil'> & 
   /** Задания досок, устаревшие после перепривязки, и шаг (`ContractChanges.boardJobs`). */
   boardJobs?: {
     jobs: ReturnType<LeadWorkflow['invalidated']>;
+    /** Устаревшие задания ChangeSet (F84). */
+    changesets?: ReturnType<LeadWorkflow['invalidatedChangesets']>;
     next: string;
   };
 };
@@ -407,32 +427,45 @@ export class ContractChanges {
   }
 
   /**
-   * Задания ведущего досок операции, которые её перепривязка сделала
-   * устаревшими (F66): начатые до её окончания по прежнему входу, без нового
-   * задания по текущему. Они не продолжатся, и очередь может стоять на
-   * ожидании проверки базы, которое снимает только задание доски, — шаг
-   * называет новое задание каждой доски. Только у завершённой операции.
+   * Задания ведущего, которые операция сделала устаревшими (F66, F84):
+   * задания досок и ChangeSet, начатые до её окончания по прежнему входу,
+   * без нового задания по текущему (`invalidates`). Вход доски меняет
+   * перепривязка её задач, вход набора — перепривязка задач его досок, а
+   * перенастройка (`reconfigure`: перезакреплённый контекст меняет политику
+   * исполнения) — вход каждой доски и каждого набора. Они не продолжатся, и
+   * очередь может стоять на ожидании проверки базы, которое снимает только
+   * задание доски, — шаг называет новое задание каждой доски и каждого
+   * набора. Только у завершённой операции.
    */
   boardJobs(op: ContractChange) {
     // В режиме оператора задания ведущего не исполняются: шаг workflow_start
     // не предлагается.
     if ((this.h.config.approvalMode ?? 'agent') === 'operator') return undefined;
-    if (op.status !== 'completed' || !op.boards.length || !op.finishedAt) return undefined;
-    const finished = op.finishedAt;
-    const jobs = new LeadWorkflow(this.h)
-      .invalidated(op.boards, undefined, (_board, since) => since <= finished)
-      .filter((j) => j.startedAt <= finished);
-    if (!jobs.length) return undefined;
-    const starts = jobs
-      .map(
+    if (op.status !== 'completed' || !op.finishedAt) return undefined;
+    if (!op.boards.length && !op.config?.after) return undefined;
+    const s = this.h.store.read();
+    const lead = new LeadWorkflow(this.h);
+    const jobs = lead
+      .invalidated(undefined, s, (board, _since, job) => invalidates(op, [board], job))
+      .filter((j) => invalidates(op, [j.boardId], j));
+    const boardsOf = (id: string) => s.changeSets.find((c) => c.id === id)?.boardIds ?? [];
+    const changesets = lead
+      .invalidatedChangesets(s, (id, _since, job) => invalidates(op, boardsOf(id), job))
+      .filter((j) => invalidates(op, boardsOf(j.changeSetId), j));
+    if (!jobs.length && !changesets.length) return undefined;
+    const starts = [
+      ...jobs.map(
         (j) =>
           `workflow_start {"kind": "board", "id": ${JSON.stringify(j.boardId)}, "authorRuntime": ${JSON.stringify(j.authorRuntime)}}`,
-      )
-      .join('; ');
+      ),
+      ...changesets.map(
+        (j) =>
+          `workflow_start {"kind": "changeset", "id": ${JSON.stringify(j.changeSetId)}, "authorRuntime": ${JSON.stringify(j.authorRuntime)}}`,
+      ),
+    ].join('; ');
     // Новое задание доски отправит на ревью весь её план: неразобранные
     // находки, которые операция оставила вне ревью (F81), сначала
     // разбираются, переносятся или отменяются.
-    const s = this.h.store.read();
     // Все неразобранные находки этих досок, не только перепривязанные:
     // ревью нового задания видит весь план.
     const untriaged = [
@@ -448,9 +481,25 @@ export class ContractChanges {
     const first = untriaged.length
       ? ` Сначала разберите (edit-task), перенесите (task_move) или отмените (cancel --by host) неразобранные находки этих досок: ${untriaged.join(', ')} — новое задание отправит на ревью весь план доски, и ревьюер отверг бы их.`
       : '';
+    const listed = [
+      ...jobs.map((j) => `${j.boardId}: ${j.status}`),
+      ...changesets.map((j) => `ChangeSet ${j.changeSetId}: ${j.status}`),
+    ].join(', ');
+    const cause = op.config?.after
+      ? 'Перепривязка задач и перенастройка контекста'
+      : 'Перепривязка задач';
     return {
       jobs,
-      next: `Перепривязка задач сделала устаревшими задания ведущего досок (${jobs.map((j) => `${j.boardId}: ${j.status}`).join(', ')}): они не продолжатся.${first} Начните новое задание каждой доски — ${starts}; прежнее закроется как stale. Новое задание само проверит перенесённую базу (ожидание base-check) и продолжит выдачу; session_handoff называет этот шаг (host.next workflow_start, code board-restart).`,
+      ...(changesets.length ? { changesets } : {}),
+      next:
+        `${cause} сделали устаревшими задания ведущего (${listed}): они не продолжатся.${first} Начните новое задание каждой доски и каждого ChangeSet — ${starts}; прежнее закроется как stale.` +
+        (jobs.length
+          ? ' Новое задание доски само проверит перенесённую базу (ожидание base-check) и продолжит выдачу.'
+          : '') +
+        (changesets.length
+          ? ' Новое задание ChangeSet снова ждёт приёмки своих досок и проводит совместную проверку.'
+          : '') +
+        ' session_handoff называет этот шаг (host.next workflow_start, code board-restart или changeset-restart).',
     };
   }
 
@@ -578,6 +627,22 @@ export class ContractChanges {
         current.finishedAt = new Date().toISOString();
         current.token = undefined;
         current.leaseUntil = undefined;
+        // История называет задания, которые операция сделала устаревшими
+        // (F84): вид результата их перечисляет, пока их не перезапустили, а
+        // запись остаётся.
+        const invalid = this.boardJobs(current);
+        if (invalid)
+          this.log(
+            current,
+            'release',
+            'jobs-invalidated',
+            [
+              ...invalid.jobs.map((j) => `board ${j.boardId} ${j.key.slice(0, 8)} ${j.status}`),
+              ...(invalid.changesets ?? []).map(
+                (j) => `changeset ${j.changeSetId} ${j.key.slice(0, 8)} ${j.status}`,
+              ),
+            ].join('; '),
+          );
       }
       this.save(current);
       return current;

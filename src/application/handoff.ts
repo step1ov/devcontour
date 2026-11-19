@@ -59,6 +59,7 @@ import {
 import { executionOf, toDomain } from '../harness/execution.ts';
 import {
   ContractChanges,
+  invalidates,
   openCorrections,
   type CorrectionEffect,
 } from '../runner/contract-change.ts';
@@ -253,7 +254,15 @@ export interface DevContourHandoff {
     changesets?: {
       changeSetId: string;
       job: { key: string; status: string; stage: number; attempts: number };
-      waiting: NonNullable<ReturnType<LeadWorkflow['boardsWaitingOf']>>;
+      waiting?: NonNullable<ReturnType<LeadWorkflow['boardsWaitingOf']>>;
+      /**
+       * Задание начато по прежнему входу и не продолжится (F84): вход набора
+       * сменился (например, перепривязкой или перенастройкой завершённой
+       * операции изменения контракта `operation`), а задания по текущему
+       * нет. `command` — его перезапуск; прежнее закроется (или закрыто) как
+       * stale.
+       */
+      stale?: { operation?: string; command: string };
     }[];
     /**
      * Открытые корректировки принятых задач завершённых операций изменения
@@ -340,7 +349,12 @@ function verificationsOf(
   return found.length ? found : undefined;
 }
 
-/** Задания ChangeSet, ждущие приёмки досок (`host.changesets`, F78). */
+/**
+ * Задания ChangeSet для `host.changesets`: действующие на стадии 0, ждущие
+ * приёмки досок (F78), и устаревшие без задания по текущему входу (F84) —
+ * с шагом перезапуска, а закрытые `stale` — только когда их вход сменила
+ * завершённая операция изменения контракта (`invalidatedChangesets`).
+ */
 function changesetsOf(
   h: DevContour,
   state: State,
@@ -348,28 +362,80 @@ function changesetsOf(
   redact?: (text: string) => string,
 ): DevContourHandoff['host']['changesets'] {
   const workflow = new LeadWorkflow(h);
-  const found = workflow
+  const inScope = (id: string) =>
+    boardId === undefined ||
+    state.changeSets.some((c) => c.id === id && c.boardIds.includes(boardId));
+  const stale = new Map(changesetRestarts(h, state).map((r) => [r.key, r]));
+  const live = workflow
     .list()
     .filter((j) => j.kind === 'changeset' && ['queued', 'running'].includes(j.status))
-    .filter(
-      (j) =>
-        boardId === undefined ||
-        state.changeSets.some((c) => c.id === j.id && c.boardIds.includes(boardId)),
-    )
+    .filter((j) => inScope(j.id))
     .flatMap((j) => {
       const waiting = workflow.boardsWaitingOf(j, state, redact);
-      return waiting
+      const restart = stale.get(j.key);
+      return waiting || restart
         ? [
             {
               changeSetId: j.id,
               job: { key: j.key, status: j.status, stage: j.stage, attempts: j.attempts },
-              waiting,
+              ...(waiting ? { waiting } : {}),
+              ...(restart ? { stale: restartOf(restart) } : {}),
             },
           ]
         : [];
-    })
-    .slice(0, HANDOFF_VERIFICATIONS);
+    });
+  const closed = [...stale.values()]
+    .filter((r) => r.status === 'stale' && inScope(r.changeSetId))
+    .map((r) => ({
+      changeSetId: r.changeSetId,
+      job: { key: r.key, status: r.status, stage: r.stage, attempts: r.attempts },
+      stale: restartOf(r),
+    }));
+  const found = [...closed, ...live].slice(0, HANDOFF_VERIFICATIONS);
   return found.length ? found : undefined;
+}
+
+/** Перезапуск устаревшего задания ChangeSet: команда и операция, сменившая его вход. */
+const restartOf = (r: ChangesetRestart) => ({
+  ...(r.operation ? { operation: r.operation } : {}),
+  command: `workflow_start {"kind": "changeset", "id": ${JSON.stringify(r.changeSetId)}, "authorRuntime": ${JSON.stringify(r.authorRuntime)}}`,
+});
+
+type ChangesetRestart = ReturnType<LeadWorkflow['invalidatedChangesets']>[number] & {
+  attempts: number;
+  maxAttempts: number;
+  repairs: number;
+  operation?: string;
+};
+
+/**
+ * Устаревшие задания ChangeSet (F84): `LeadWorkflow.invalidatedChangesets`
+ * с операцией, сменившей вход (`invalidates`). В режиме оператора задания
+ * ведущего не исполняются — перезапуска нет.
+ */
+function changesetRestarts(h: DevContour, state: State): ChangesetRestart[] {
+  if (h.config.approvalMode === 'operator') return [];
+  const workflow = new LeadWorkflow(h);
+  const boardsOf = (id: string) => state.changeSets.find((c) => c.id === id)?.boardIds ?? [];
+  const jobs = new Map(
+    ownersOf(h.config)
+      .flatMap((owner) => workflow.list(owner))
+      .filter((j) => j.kind === 'changeset')
+      .map((j) => [j.key, j]),
+  );
+  return workflow
+    .invalidatedChangesets(state, (id, _since, job) => !!reboundOf(h, boardsOf(id), job))
+    .map((r) => {
+      const operation = reboundOf(h, boardsOf(r.changeSetId), r);
+      const job = jobs.get(r.key);
+      return {
+        ...r,
+        attempts: job?.attempts ?? 0,
+        maxAttempts: job?.maxAttempts ?? 0,
+        repairs: job?.repairs ?? 0,
+        ...(operation ? { operation } : {}),
+      };
+    });
 }
 
 /** Владельцы заданий ведущего: workspace и компоненты (как `LeadWorkflow.view`). */
@@ -836,7 +902,11 @@ export function hostContext(
         h.config.approvalMode === 'operator'
           ? []
           : new LeadWorkflow(h)
-              .invalidated(undefined, state, (boardId, since) => !!reboundOf(h, boardId, since))
+              .invalidated(
+                undefined,
+                state,
+                (boardId, _since, job) => !!reboundOf(h, [boardId], job),
+              )
               // Пакет одной доски называет только её перезапуск.
               .filter((j) => {
                 const graph = (built ??= pack()).graphId;
@@ -935,23 +1005,26 @@ function closedBoard(state: State, boardId: string) {
 }
 
 /**
- * Завершённая операция изменения контракта, перепривязавшая задачи доски
- * после старта её задания (`since`): последняя такая, если есть.
+ * Завершённая операция изменения контракта, которая сделала задание доски
+ * устаревшим (`invalidates`: перепривязка её задач или перенастройка
+ * контекста после старта задания): последняя такая, если есть.
  */
-function reboundBy(ctx: HostContext, boardId: string, since: string) {
-  return reboundOf(ctx.h, boardId, since);
+function reboundBy(
+  ctx: HostContext,
+  boardId: string,
+  job: { startedAt: string; status: string; finishedAt?: string },
+) {
+  return reboundOf(ctx.h, [boardId], job);
 }
-/** Последняя завершённая перепривязка задач доски после `since` (id операции). */
-function reboundOf(h: DevContour, boardId: string, since: string) {
+/** Последняя завершённая операция, сменившая вход задания досок `boardIds` (id операции). */
+function reboundOf(
+  h: DevContour,
+  boardIds: readonly string[],
+  job: { startedAt: string; status: string; finishedAt?: string },
+) {
   return new ContractChanges(h, '')
     .list()
-    .filter(
-      (op) =>
-        op.status === 'completed' &&
-        op.boards.includes(boardId) &&
-        !!op.finishedAt &&
-        op.finishedAt >= since,
-    )
+    .filter((op) => invalidates(op, boardIds, job))
     .sort((a, b) => (a.finishedAt! < b.finishedAt! ? 1 : -1))[0]?.id;
 }
 
@@ -1085,7 +1158,7 @@ function boardDraft(boardId: string, ctx: HostContext): HostNextDraft | undefine
   const restart = ctx.invalidated().find((j) => j.boardId === boardId);
   if (restart) {
     const job = jobs.find((j) => j.key === restart.key) ?? jobs[0];
-    const operation = reboundBy(ctx, boardId, restart.startedAt);
+    const operation = reboundBy(ctx, boardId, restart);
     const others = ctx
       .invalidated()
       .filter((j) => j.boardId !== boardId)
@@ -1547,12 +1620,51 @@ function jobBlocker(ctx: HostContext): HandoffHostNext | undefined {
     .sort((a, b) => rank(a) - rank(b))[0];
 }
 
+/**
+ * Перезапуск устаревшего задания ChangeSet (F84): приёмка релиза без него
+ * не продолжится, а набор пропадал из вида ведущего. С `boardId` пакета —
+ * только наборы с этой доской. Задание ChangeSet паузу очереди не снимает и
+ * ей не мешает: шаг не зависит от паузы.
+ */
+function changesetStep(ctx: HostContext): HandoffHostNext | undefined {
+  const graph = ctx.pack.graphId;
+  const restarts = changesetRestarts(ctx.h, ctx.state).filter(
+    (r) =>
+      graph === undefined ||
+      ctx.state.changeSets.some((c) => c.id === r.changeSetId && c.boardIds.includes(graph)),
+  );
+  const first = restarts[0];
+  if (!first) return undefined;
+  const others = restarts.slice(1).map((r) => r.changeSetId);
+  return withDetail(ctx.h, {
+    action: 'workflow_start',
+    job: {
+      key: first.key,
+      status: first.status,
+      stage: first.stage,
+      attempts: first.attempts,
+      maxAttempts: first.maxAttempts,
+      repairs: first.repairs,
+    },
+    code: 'changeset-restart',
+    params: {
+      changeSetId: first.changeSetId,
+      authorRuntime: first.authorRuntime,
+      ...(first.operation ? { operation: first.operation } : {}),
+      ...(others.length ? { others } : {}),
+    },
+  });
+}
+
 function hostStep(ctx: HostContext): HandoffHostNext | undefined {
   const { pack, view, state, h } = ctx;
   // Открытых поручений нет, но доска ещё не принята: шаг — только
   // восстановление её упавшего задания (без него ведущий не узнал бы, что
   // приёмку держит упавшее задание).
-  if (!pack.summary.open) return h.config.approvalMode === 'operator' ? undefined : jobBlocker(ctx);
+  if (!pack.summary.open)
+    return h.config.approvalMode === 'operator'
+      ? undefined
+      : (jobBlocker(ctx) ?? changesetStep(ctx));
   const input = inputNext(ctx);
   if (input) return input;
   if (h.config.approvalMode === 'operator')
@@ -1605,6 +1717,8 @@ function hostStep(ctx: HostContext): HandoffHostNext | undefined {
         .map((j) => boardStep(j.boardId, ctx))
         .find((x) => x?.code === 'board-restart');
       if (restart) return restart;
+      const changeset = changesetStep(ctx);
+      if (changeset) return changeset;
     }
     return chosen;
   }
@@ -1670,6 +1784,10 @@ function hostStep(ctx: HostContext): HandoffHostNext | undefined {
     // решения не обходит: её шаг — прежний.
     const restart = steps.find((x) => x.code === 'board-restart');
     if (restart && !(state.pauseReason === 'operator' && !pausedByLead(state))) return restart;
+    // Задание ChangeSet паузы не снимает и ею не держится: его перезапуск —
+    // шаг ведущего при любой паузе, раньше ожидания и снятия паузы (F84).
+    const changeset = changesetStep(ctx);
+    if (changeset) return changeset;
     // Пауза выдачи общая: её снимает любое действующее задание, чей цикл
     // снимет её — сразу или после такта, который сначала чинит задачу.
     for (const job of live)
@@ -1701,7 +1819,12 @@ function hostStep(ctx: HostContext): HandoffHostNext | undefined {
       });
     }
   }
-  return steps[0];
+  // Перезапуск устаревшего задания ChangeSet — после перезапуска задания
+  // доски и раньше старта нового, ожидания и решения о плане (F84).
+  const first = steps[0];
+  if (!first || rank(first) > 2 || (rank(first) === 2 && first.code !== 'board-restart'))
+    return changesetStep(ctx) ?? first;
+  return first;
 }
 
 /**
@@ -1992,14 +2115,18 @@ export function devcontourHandoffWithin(
       ) {
         changesets = changesets.map((c) => ({
           ...c,
-          waiting: {
-            ...c.waiting,
-            boards: c.waiting.boards.map((b) => ({
-              boardId: b.boardId,
-              ...(b.job ? { job: b.job } : {}),
-              blocker: errorless(b.blocker),
-            })),
-          },
+          ...(c.waiting
+            ? {
+                waiting: {
+                  ...c.waiting,
+                  boards: c.waiting.boards.map((b) => ({
+                    boardId: b.boardId,
+                    ...(b.job ? { job: b.job } : {}),
+                    blocker: errorless(b.blocker),
+                  })),
+                },
+              }
+            : {}),
         }));
         host = { ...host, changesets };
       }
@@ -2080,11 +2207,14 @@ function hostMarkdown(
       (v) =>
         `- Идёт совместная проверка ChangeSet ${v.changeSetId}: ${v.verificationId}, ${v.elapsedMs < 60_000 ? '<1' : Math.floor(v.elapsedMs / 60_000)} мин (задание ${v.job.key} — ${v.job.status}, стадия ${v.job.stage})`,
     ),
-    ...(host.changesets ?? []).map(
-      (c) =>
-        `- ChangeSet ${c.changeSetId} ждёт приёмки досок (задание ${c.job.key} — ${c.job.status}, стадия ${c.job.stage}): ${c.waiting.boards
-          .map((b) => `${b.boardId} — ${blockerText(b.blocker)}`)
-          .join('; ')}${c.waiting.more ? ` и ещё ${c.waiting.more}` : ''}`,
+    ...(host.changesets ?? []).map((c) =>
+      c.stale
+        ? `- Задание ChangeSet ${c.changeSetId} (${c.job.key} — ${c.job.status}, стадия ${c.job.stage}) начато на прежнем входе${c.stale.operation ? ` (его сменила операция ${c.stale.operation})` : ''} и не продолжится — перезапуск: \`${c.stale.command}\``
+        : `- ChangeSet ${c.changeSetId} ждёт приёмки досок (задание ${c.job.key} — ${c.job.status}, стадия ${c.job.stage}): ${(
+            c.waiting?.boards ?? []
+          )
+            .map((b) => `${b.boardId} — ${blockerText(b.blocker)}`)
+            .join('; ')}${c.waiting?.more ? ` и ещё ${c.waiting.more}` : ''}`,
     ),
     ...(host.corrections
       ? [

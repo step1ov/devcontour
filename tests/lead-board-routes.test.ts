@@ -819,7 +819,7 @@ test('F78: пакет в пределе ответа ужимает ожидан
       const { value } = devcontourHandoffWithin(f.h, {}, limit);
       const [entry] = value.host.changesets ?? [];
       assert.equal(entry?.changeSetId, change.id);
-      assert.deepEqual(entry.waiting.boards[0].blocker, { kind: 'input', requestIds });
+      assert.deepEqual(entry.waiting?.boards[0].blocker, { kind: 'input', requestIds });
       assert.match(handoffResponse(value, 'md').markdown ?? '', new RegExp(requestIds[0]));
     }
   } finally {
