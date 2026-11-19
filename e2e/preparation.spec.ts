@@ -382,3 +382,71 @@ test('A product draft over the approved version keeps development and names its 
     rmSync(root, { recursive: true, force: true });
   }
 });
+
+test('F88: the stage screen polls with its etag, backs off while unchanged and stops in a hidden tab', async ({
+  page,
+}) => {
+  test.slow();
+  const root = mkdtempSync(join(tmpdir(), 'devcontour-ui-poll-'));
+  const app = await startWorkspace(join(root, 'workspace'), { port: 0, workspaceMode: 'embedded' });
+  const polled: { at: number; path: string }[] = [];
+  page.on('request', (r) => {
+    const url = new URL(r.url());
+    if (url.pathname === '/api/preparation')
+      polled.push({ at: Date.now(), path: url.pathname + url.search });
+  });
+  const since = (at: number) => polled.filter((p) => p.at >= at);
+  const setHidden = (hidden: boolean) =>
+    page.evaluate((value) => {
+      Object.defineProperty(document, 'hidden', { value, configurable: true });
+      Object.defineProperty(document, 'visibilityState', {
+        value: value ? 'hidden' : 'visible',
+        configurable: true,
+      });
+      document.dispatchEvent(new Event('visibilitychange'));
+    }, hidden);
+  try {
+    await page.goto(app.url + '/?stage=product');
+    await expect(page.getByRole('heading', { name: 'От запроса к разработке' })).toBeVisible();
+    // Без перемен: опрос с меткой, интервал растёт вдвое до 6 с.
+    const start = Date.now();
+    await page.waitForTimeout(19_000);
+    const visible = since(start);
+    expect(visible.length).toBeGreaterThanOrEqual(4);
+    expect(visible.length).toBeLessThanOrEqual(6);
+    expect(visible.every((p) => p.path.includes('etag='))).toBe(true);
+    const gaps = visible.slice(1).map((p, i) => p.at - visible[i].at);
+    expect(Math.max(...gaps)).toBeGreaterThanOrEqual(5_000);
+    // Предел 6 с: два последних интервала — на пределе, не дальше.
+    for (const gap of gaps.slice(-2)) expect(gap).toBeLessThanOrEqual(7_000);
+    expect(gaps.every((g, i) => i === 0 || g >= gaps[i - 1] - 300)).toBe(true);
+
+    // Скрытая вкладка не опрашивает.
+    await setHidden(true);
+    const hiddenAt = Date.now();
+    await page.waitForTimeout(8_000);
+    // Опрос, ушедший до скрытия, мог быть в пути — не больше одного.
+    expect(since(hiddenAt + 500).length).toBe(0);
+
+    // Показ — сразу опрос, и экран снова живой.
+    const shownAt = Date.now();
+    await setHidden(false);
+    await expect.poll(() => since(shownAt).length, { timeout: 3_000 }).toBeGreaterThanOrEqual(1);
+    // Дать опросу снова разойтись, затем действие оператора: после него
+    // частый опрос с меткой возвращается (не через 6 с). Создание меняет
+    // выбранное изменение, и опрос начинается заново.
+    await page.waitForTimeout(6_000);
+    await page.getByLabel('Новое изменение').fill('Опрос экрана');
+    await page.getByRole('button', { name: 'Создать изменение', exact: true }).click();
+    await expect(page.getByRole('heading', { name: 'Опрос экрана' })).toBeVisible();
+    const actedAt = Date.now();
+    await expect
+      .poll(() => since(actedAt).filter((p) => p.path.includes('etag=')).length, {
+        timeout: 3_500,
+      })
+      .toBeGreaterThanOrEqual(1);
+  } finally {
+    await app.close();
+    rmSync(root, { recursive: true, force: true });
+  }
+});

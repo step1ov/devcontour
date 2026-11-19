@@ -46,6 +46,8 @@ import { planIngest } from './plan.ts';
 import { boardOwner, completion, receiptHolds, receiptRecordBytes } from './sync-state.ts';
 import {
   BASE_WAIT_ACTION,
+  leadResumeOf,
+  movePauseTime,
   carriedTaskIds,
   heldBaseOf,
   heldBaseWait,
@@ -2236,9 +2238,12 @@ export class DevContour {
         // Удержанный перенос базы (D42) подтверждает только человек: снятие
         // паузы ведущим (`queue_set`, цикл задания) сняло бы и ожидание
         // проверки базы без подтверждения.
-        if (!value && by === 'lead') {
+        // Что сделает снятие паузы ведущим — `leadResumeOf`, тот же источник,
+        // что у подсказок пакета ведущего, центра внимания и base-update.
+        const resume = !value && by === 'lead' ? leadResumeOf(before) : undefined;
+        if (resume) {
           const held = heldBaseOf(before);
-          if (held)
+          if (resume === 'held' && held)
             throw new DomainError(
               `${BASE_HELD_REFUSAL}: перенос базы меняет приёмку или настройку контура (${held.paths.join(', ') || 'пути — в ожидании base-check'}). ${held.action}`,
               409,
@@ -2247,9 +2252,9 @@ export class DevContour {
           // доски, `base-check`) или запуск человека после проверки. Снятие
           // паузы ведущим (`queue_set`, `queue --start --by host`) снимает в
           // движке и ожидание (`resume`) — то есть перенос без единого gate.
-          if (before.paused && before.waits?.some((w) => w.kind === 'base-check')) {
+          if (resume === 'base-check' || resume === 'keeps-base-check') {
             // Очередь держит только само ожидание: снимать ведущему нечего.
-            if (before.pauseReason === 'base-check')
+            if (resume === 'base-check')
               throw new DomainError(
                 `${BASE_HELD_REFUSAL}: выдача ждёт проверки перенесённой базы gates, а снятие паузы ведущим сняло бы ожидание без gates. ` +
                   ((this.config.approvalMode ?? 'agent') === 'agent'
@@ -2396,11 +2401,12 @@ export class DevContour {
       // провайдера — своей причиной со сбоями: перенос базы провайдер не
       // чинит. Иначе очередь ждёт проверки базы — это техническое ожидание,
       // а не решение человека.
+      // Пауза ведущего — тоже его пауза (F89, `movePauseTime`).
       if (s.pauseReason !== 'operator' && s.pauseReason !== 'runtime') {
         s.pauseReason = 'base-check';
         s.pauseFailures = undefined;
       }
-      s.pausedAt = now();
+      movePauseTime(s, now());
       waitBaseCheck(
         s,
         updated,

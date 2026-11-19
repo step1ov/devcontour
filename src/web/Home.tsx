@@ -1,4 +1,20 @@
 import { useCallback, useEffect, useId, useRef, useState, type ReactNode } from 'react';
+import {
+  Ban,
+  Circle,
+  CircleAlert,
+  CircleCheck,
+  CircleDashed,
+  CircleMinus,
+  CirclePause,
+  CirclePlay,
+  Hourglass,
+  Lock,
+  PencilLine,
+  TriangleAlert,
+  Wrench,
+  type LucideIcon,
+} from 'lucide-react';
 import type { DevelopmentSection, HomeHarness, HomeProgress } from '../application/home.ts';
 import type { HomeView, PreparationSection, SectionQuestions } from '../application/home.ts';
 import { boardPhaseLabels } from '../core/work-status.ts';
@@ -7,10 +23,17 @@ import { Badge } from '@/ui/badge.tsx';
 import { Button } from '@/ui/button.tsx';
 import { cn, humanError, plural } from '@/lib/utils.ts';
 import { AttentionCount, useAttentionScreen } from './AttentionProvider.tsx';
-import { Bar } from '@/ui/progress-bar.tsx';
 import { navigate } from './navigation.ts';
 import { useNow } from './now.ts';
-import { HourlyChart, LoadChart, OverallProgress } from './HomeCharts.tsx';
+import { COST_ESTIMATE_RU } from '../core/usage.ts';
+import {
+  GateTrendChart,
+  HourlyChart,
+  LoadChart,
+  OverallProgress,
+  Ring,
+  SpendChart,
+} from './HomeCharts.tsx';
 
 // Главная панели: по плитке на раздел (продукт, архитектура, дизайн,
 // разработка) с открытыми вопросами, что идёт и кто ждёт, ход работ и
@@ -58,17 +81,37 @@ const devTone: Record<DevelopmentSection['state'], BadgeVariant> = {
   paused: 'warning',
   blocked: 'destructive',
 };
+const stageIcons: Record<StageState, LucideIcon> = {
+  absent: CircleDashed,
+  draft: PencilLine,
+  'in-review': Hourglass,
+  'changes-requested': CircleAlert,
+  approved: CircleCheck,
+  stale: TriangleAlert,
+  'not-applicable': CircleMinus,
+};
+const devIcons: Record<DevelopmentSection['state'], LucideIcon> = {
+  'not-allowed': Lock,
+  'setting-up': Wrench,
+  running: CirclePlay,
+  idle: Circle,
+  paused: CirclePause,
+  blocked: Ban,
+};
+/** Цвет дуги кольца по тону метки: тот же смысл, что у метки рядом. */
+const ringTone: Record<BadgeVariant, string> = {
+  success: 'var(--status-done)',
+  warning: 'var(--status-attention)',
+  destructive: 'var(--status-failed)',
+  ready: 'var(--status-active)',
+  secondary: 'var(--data-accent)',
+  waiting: 'var(--data-accent)',
+};
 const stepNames = { references: 'Референсы', concept: 'Концепт', design: 'Макет' } as const;
 const shellNames: Record<HomeView['shell'], string> = {
   bootstrap: 'Начало',
   preparation: 'Подготовка',
   development: 'Разработка',
-};
-const readinessNames: Record<HomeProgress['releases'][number]['readiness'], string> = {
-  unplanned: 'не запланирован',
-  'in-progress': 'в работе',
-  failed: 'есть сбой',
-  done: 'готов',
 };
 const changeSetNames = {
   accepted: 'принят',
@@ -165,10 +208,119 @@ function Tile({
   );
 }
 
+/**
+ * Пустая плитка в одну строку: раздел без работы (подготовка не ведётся,
+ * дизайн не применяется, этап ещё не начат) не занимает место плитки.
+ */
+function CompactTile({
+  title,
+  badge,
+  text,
+  facts,
+  open,
+}: {
+  title: string;
+  badge?: ReactNode;
+  text: string;
+  facts: { label: string; value: number | string }[];
+  open?: { href: string; label: string };
+}) {
+  const id = useId();
+  return (
+    <section
+      aria-labelledby={id}
+      className="bg-card text-card-foreground flex min-w-0 flex-wrap items-center gap-x-3 gap-y-1 rounded-md border px-4 py-2.5 text-sm [overflow-wrap:anywhere]"
+    >
+      <h2 id={id} className="m-0 text-sm leading-tight font-semibold">
+        {title}
+      </h2>
+      {badge}
+      <span className="text-muted-foreground min-w-0">{text}</span>
+      {facts.map((f) => (
+        <span key={f.label} className="tabular">
+          <span className="text-muted-foreground">{f.label} </span>
+          <span className="font-medium">{f.value}</span>
+        </span>
+      ))}
+      {open && (
+        <PanelLink href={open.href} className="ml-auto font-medium">
+          {open.label} →
+        </PanelLink>
+      )}
+    </section>
+  );
+}
+
+/** Метка состояния со значком: значок дублирует подпись, а не заменяет её. */
+function StateBadge({
+  variant,
+  icon: Icon,
+  children,
+}: {
+  variant: BadgeVariant;
+  icon: LucideIcon;
+  children: ReactNode;
+}) {
+  return (
+    <Badge variant={variant}>
+      <Icon className="size-3.5" aria-hidden="true" strokeWidth={2.25} />
+      {children}
+    </Badge>
+  );
+}
+
+/** Кольцо и главная строка плитки: доля и что она значит. */
+function Headline({
+  ring,
+  children,
+}: {
+  ring?: { done: number; total: number; label: string; tone: string };
+  children: ReactNode;
+}) {
+  return (
+    <div className="flex min-w-0 items-center justify-start gap-3">
+      {ring && <Ring {...ring} />}
+      <div className="grid min-w-0 gap-0.5">{children}</div>
+    </div>
+  );
+}
+
+/** Число крупно, подпись мелко: счётчики плиток без строк текста. */
+function Stats({
+  items,
+  label,
+}: {
+  items: { label: string; value: number | string; tone?: 'warning' | 'destructive' }[];
+  label?: string;
+}) {
+  if (!items.length) return null;
+  return (
+    <dl
+      className="m-0 grid grid-cols-[repeat(auto-fill,minmax(5.5rem,1fr))] gap-x-3 gap-y-2"
+      aria-label={label}
+    >
+      {items.map((f) => (
+        <div key={f.label} className="mb-0 flex min-w-0 flex-col-reverse justify-end gap-0.5">
+          <dt className="text-muted-foreground text-xs leading-tight">{f.label}</dt>
+          <dd
+            className={cn(
+              'tabular m-0 text-left text-lg leading-tight font-semibold',
+              f.tone === 'warning' && 'text-warning',
+              f.tone === 'destructive' && 'text-destructive',
+            )}
+          >
+            {f.value}
+          </dd>
+        </div>
+      ))}
+    </dl>
+  );
+}
+
 function Facts({ items }: { items: { label: string; value: number | string }[] }) {
   if (!items.length) return null;
   return (
-    <dl className="m-0 grid grid-cols-[repeat(auto-fill,minmax(7rem,1fr))] gap-x-3 gap-y-1">
+    <dl className="m-0 flex flex-wrap gap-x-4 gap-y-1">
       {items.map((f) => (
         <div key={f.label} className="mb-0 flex min-w-0 items-baseline justify-start gap-1.5">
           <dt className="text-muted-foreground">{f.label}</dt>
@@ -249,12 +401,12 @@ function Questions({
 
 function StageBadge({ section }: { section: PreparationSection }) {
   return (
-    <Badge variant={stageTone[section.state]}>
+    <StateBadge variant={stageTone[section.state]} icon={stageIcons[section.state]}>
       {stageNames[section.state]}
       {section.revision !== undefined && section.state !== 'not-applicable'
         ? ` · v${section.revision}`
         : ''}
-    </Badge>
+    </StateBadge>
   );
 }
 
@@ -267,9 +419,12 @@ function PreparationTile({
   limit,
   className,
   tracked = true,
+  ring,
   children,
 }: {
   title: string;
+  /** Доля этапа кольцом: релизы, шаги, утверждённая редакция. */
+  ring?: { done: number; total: number; label: string };
   /** Этапы ведутся в панели; без подготовки — без метки состояния этапа. */
   tracked?: boolean;
   /** Подпись ссылки «Открыть …»; без неё ссылки нет. */
@@ -288,10 +443,22 @@ function PreparationTile({
       open={open ? { href: section.href, label: open } : undefined}
       className={className}
     >
+      {ring && (
+        <Headline ring={{ ...ring, tone: ringTone[stageTone[section.state]] }}>
+          <span className="font-medium">
+            {ring.label}: {ring.done} из {ring.total}
+          </span>
+          {section.approvedAt && (
+            <span className="text-muted-foreground text-xs">
+              Утверждено {new Date(section.approvedAt).toLocaleString('ru-RU')}
+            </span>
+          )}
+        </Headline>
+      )}
       {section.state === 'absent' && <p className="text-muted-foreground m-0">{empty}</p>}
       <Facts items={section.facts} />
       {children}
-      {section.approvedAt && (
+      {!ring && section.approvedAt && (
         <p className="text-muted-foreground m-0 text-xs">
           Утверждено {new Date(section.approvedAt).toLocaleString('ru-RU')}
         </p>
@@ -301,71 +468,117 @@ function PreparationTile({
   );
 }
 
+/** Отложенная доска (`board_park`): «отложена до …: причина» вместо фазы. */
+const parkedLabel = (park: { reason: string; until?: string }) =>
+  'отложена' +
+  (park.until
+    ? ' до ' +
+      new Date(park.until).toLocaleString('ru-RU', {
+        day: 'numeric',
+        month: 'short',
+        hour: '2-digit',
+        minute: '2-digit',
+      })
+    : '') +
+  ': ' +
+  park.reason;
+
 function DevelopmentTile({
   dev,
   engine,
+  progress,
   attentionHref,
   limit,
   className,
 }: {
   dev: DevelopmentSection;
   engine: boolean;
+  progress?: HomeProgress;
   attentionHref: string;
   limit: number;
   className?: string;
 }) {
+  const live = progress ? progress.tasks.total - progress.tasks.cancelled : 0;
+  const q = dev.queue;
+  const stats: Parameters<typeof Stats>[0]['items'] = [
+    { label: 'живых досок', value: dev.boards.live },
+    { label: 'досок принято', value: dev.boards.accepted },
+    { label: 'заданий идёт / ждёт', value: `${dev.jobs.running} / ${dev.jobs.waiting}` },
+    ...(dev.jobs.failed
+      ? [{ label: 'заданий остановлено', value: dev.jobs.failed, tone: 'destructive' as const }]
+      : []),
+    { label: q.paused ? 'готово, очередь стоит' : 'готово к выдаче', value: q.ready },
+    ...(q.waitingInput
+      ? [{ label: 'ждут ответа', value: q.waitingInput, tone: 'warning' as const }]
+      : []),
+  ];
+  // Остальное о очереди — одной строкой под счётчиками.
+  const more = [
+    q.blocked ? `ждут зависимостей ${q.blocked}` : '',
+    q.drafts ? `черновиков ${q.drafts}` : '',
+    dev.boards.parked ? `досок отложено ${dev.boards.parked}` : '',
+    dev.jobs.closed ? `заданий закрыто ${dev.jobs.closed}` : '',
+    q.quiet ? `без движения ${q.quiet}` : '',
+    dev.boards.closed ? `досок закрыто ${dev.boards.closed}` : '',
+  ].filter(Boolean);
   return (
     <Tile
       title="Разработка"
-      badge={<Badge variant={devTone[dev.state]}>{devNames[dev.state]}</Badge>}
+      badge={
+        <StateBadge variant={devTone[dev.state]} icon={devIcons[dev.state]}>
+          {devNames[dev.state]}
+        </StateBadge>
+      }
       open={{ href: dev.href, label: engine ? 'Открыть доски' : 'Открыть этап' }}
       className={className}
     >
-      {dev.blocker && <p className="m-0">{dev.blocker}</p>}
-      {engine && (
-        <>
-          <dl className="m-0 grid gap-1">
-            <div className="mb-0 flex flex-wrap justify-start gap-x-1.5 gap-y-0">
-              <dt className="text-muted-foreground">Доски:</dt>
-              <dd className="m-0 text-left">
-                живых {dev.boards.live}, принято {dev.boards.accepted}
-                {dev.boards.closed ? `, закрыто ${dev.boards.closed}` : ''}
-              </dd>
-            </div>
-            <div className="mb-0 flex flex-wrap justify-start gap-x-1.5 gap-y-0">
-              <dt className="text-muted-foreground">Задания ведущего:</dt>
-              <dd className="m-0 text-left">
-                идут {dev.jobs.running}, ждут {dev.jobs.waiting}
-                {dev.jobs.failed ? `, остановлено ${dev.jobs.failed}` : ''}
-              </dd>
-            </div>
-            <div className="mb-0 flex flex-wrap justify-start gap-x-1.5 gap-y-0">
-              <dt className="text-muted-foreground">Очередь:</dt>
-              <dd className="m-0 text-left">
-                {dev.queue.paused ? 'на паузе' : 'выдаёт'}, готово {dev.queue.ready}
-                {dev.queue.blocked ? `, ждут зависимостей ${dev.queue.blocked}` : ''}
-                {dev.queue.waitingInput ? `, ждут ответа ${dev.queue.waitingInput}` : ''}
-                {dev.queue.drafts ? `, черновиков ${dev.queue.drafts}` : ''}
-                {dev.queue.quiet ? `, без движения ${dev.queue.quiet}` : ''}
-              </dd>
-            </div>
-          </dl>
-          {dev.queue.hint && <p className="text-muted-foreground m-0">{dev.queue.hint}</p>}
-          {dev.boards.top.length > 0 && (
+      <div className="grid min-w-0 gap-4 md:grid-cols-2 xl:grid-cols-3 xl:gap-6">
+        <div className="grid min-w-0 content-start gap-2">
+          {engine && live > 0 ? (
+            <Headline
+              ring={{
+                done: progress!.tasks.done,
+                total: live,
+                label: 'Задач выполнено',
+                tone: 'var(--status-done)',
+              }}
+            >
+              <span className="font-medium">
+                Задач выполнено: {progress!.tasks.done} из {live}
+              </span>
+              {dev.blocker && <span>{dev.blocker}</span>}
+            </Headline>
+          ) : (
+            dev.blocker && <p className="m-0">{dev.blocker}</p>
+          )}
+          {q.hint && <p className="text-muted-foreground m-0 text-xs">{q.hint}</p>}
+        </div>
+        {engine && (
+          <div className="grid min-w-0 content-start gap-2">
+            <Stats items={stats} label="Доски, задания и очередь" />
+            {more.length > 0 && (
+              <p className="text-muted-foreground m-0 text-xs">{more.join(' · ')}</p>
+            )}
+          </div>
+        )}
+        <div className="grid min-w-0 content-start gap-3">
+          {engine && dev.boards.top.length > 0 && (
             <ul className="m-0 grid list-none gap-1 p-0" aria-label="Живые доски">
               {dev.boards.top.map((b) => (
                 <li key={b.id} className="flex min-w-0 flex-wrap items-baseline gap-x-2">
                   <PanelLink href={b.href} className="min-w-0 truncate">
                     {b.title}
                   </PanelLink>
-                  <span className="text-muted-foreground text-xs">{boardPhaseLabels[b.phase]}</span>
+                  <span className="text-muted-foreground text-xs">
+                    {b.parked ? parkedLabel(b.parked) : boardPhaseLabels[b.phase]}
+                  </span>
                 </li>
               ))}
             </ul>
           )}
-        </>
-      )}
-      <Questions questions={dev.questions} attentionHref={attentionHref} limit={limit} />
+          <Questions questions={dev.questions} attentionHref={attentionHref} limit={limit} />
+        </div>
+      </div>
     </Tile>
   );
 }
@@ -411,19 +624,30 @@ function NowTile({
       ) : (
         <p className="text-muted-foreground m-0">Сейчас никто не работает над задачами.</p>
       )}
-      <ul className="m-0 grid list-none gap-1 p-0" aria-label="Кто ждёт">
-        <li>
-          <PanelLink href={who('operator')}>
-            Ждут вас: {dev.waitsOn.operator.active}
-            {dev.waitsOn.operator.unread ? ` (новых ${dev.waitsOn.operator.unread})` : ''}
-          </PanelLink>
-        </li>
-        <li>
-          <PanelLink href={who('lead')}>
-            Ждут ведущего: {dev.waitsOn.lead.active}
-            {dev.waitsOn.lead.unread ? ` (новых ${dev.waitsOn.lead.unread})` : ''}
-          </PanelLink>
-        </li>
+      <ul className="m-0 flex list-none flex-wrap gap-x-8 gap-y-2 p-0" aria-label="Кто ждёт">
+        {(
+          [
+            ['operator', 'Ждут вас', dev.waitsOn.operator],
+            ['lead', 'Ждут ведущего', dev.waitsOn.lead],
+          ] as const
+        ).map(([key, label, w]) => (
+          <li key={key}>
+            <PanelLink href={who(key)} className="grid">
+              <span
+                className={cn(
+                  'tabular text-lg leading-tight font-semibold',
+                  key === 'operator' && w.active > 0 && 'text-warning',
+                )}
+              >
+                {w.active}
+              </span>
+              <span className="text-xs">
+                {label}
+                {w.unread ? ` (новых ${w.unread})` : ''}
+              </span>
+            </PanelLink>
+          </li>
+        ))}
       </ul>
       {dev.waitsOn.topWaiting && (
         <p className="m-0">
@@ -464,42 +688,31 @@ function ProgressTile({
       open={engine ? { href: progress.href, label: 'Открыть ход работ' } : undefined}
       className={className}
     >
-      {progress.releases.length > 0 && (
-        <ul className="m-0 grid list-none gap-2 p-0" aria-label="Релизы">
-          {progress.releases.map((r) => (
-            <li key={r.id} className="grid min-w-0 gap-0.5">
-              <Bar done={r.done} total={r.tasks} label={`${r.id} ${r.title}`} />
-              <span className="text-muted-foreground text-xs">
-                {readinessNames[r.readiness]} · критериев {r.criteria}
-                {r.failed ? ` · со сбоем ${r.failed}` : ''}
-              </span>
-            </li>
-          ))}
-          {progress.releasesTotal > progress.releases.length && (
-            <li className="text-muted-foreground">
-              и ещё релизов: {progress.releasesTotal - progress.releases.length}
-            </li>
-          )}
-        </ul>
-      )}
-      <dl className="m-0 grid gap-1">
-        <div className="mb-0 flex flex-wrap justify-start gap-x-1.5 gap-y-0">
-          <dt className="text-muted-foreground">Задачи:</dt>
-          <dd className="m-0 text-left">
-            выполнено {tasks.done} из {tasks.total - tasks.cancelled}, осталось {tasks.remaining}
-            {tasks.failed ? `, со сбоем ${tasks.failed}` : ''}
-            {tasks.cancelled ? `, отменено ${tasks.cancelled}` : ''}
-          </dd>
-        </div>
-        <div className="mb-0 flex flex-wrap justify-start gap-x-1.5 gap-y-0">
-          <dt className="text-muted-foreground">ChangeSet:</dt>
-          <dd className="m-0 text-left">
-            принято {changeSets.accepted} из {changeSets.total}
-            {changeSets.verifying ? `, на проверке ${changeSets.verifying}` : ''}
-            {changeSets.failed ? `, не прошли ${changeSets.failed}` : ''}
-          </dd>
-        </div>
-      </dl>
+      {/* Релизы — полосами общего хода работ над плитками. */}
+      <Stats
+        label="Задачи и ChangeSet"
+        items={[
+          { label: 'задач выполнено', value: `${tasks.done}/${tasks.total - tasks.cancelled}` },
+          { label: 'задач осталось', value: tasks.remaining },
+          ...(tasks.failed
+            ? [{ label: 'задач со сбоем', value: tasks.failed, tone: 'destructive' as const }]
+            : []),
+          ...(tasks.cancelled ? [{ label: 'задач отменено', value: tasks.cancelled }] : []),
+          { label: 'ChangeSet принято', value: `${changeSets.accepted}/${changeSets.total}` },
+          ...(changeSets.verifying
+            ? [{ label: 'ChangeSet на проверке', value: changeSets.verifying }]
+            : []),
+          ...(changeSets.failed
+            ? [
+                {
+                  label: 'ChangeSet не прошли',
+                  value: changeSets.failed,
+                  tone: 'destructive' as const,
+                },
+              ]
+            : []),
+        ]}
+      />
       {changeSets.latest && (
         <p className="m-0">
           <span className="text-muted-foreground">Последний: </span>
@@ -547,6 +760,82 @@ const kindNames: Record<string, string> = {
   other: 'прочие',
 };
 
+const money = (v: number) => '~$' + (v >= 100 ? v.toFixed(0) : v.toFixed(2));
+// Предел — как задан: копейки не теряются и у больших сумм.
+const limitText = (v: number) => '$' + (Number.isInteger(v) ? v.toFixed(0) : v.toFixed(2));
+/** Доля предела: округление, но «100 %» — только у достигнутого предела. */
+const percentOf = (spent: number, limit: number) => {
+  const p = Math.round((spent / limit) * 100);
+  return spent < limit ? Math.min(p, 99) : p;
+};
+const callsText = (n: number) => `${n} ${plural(n, 'вызова', 'вызовов', 'вызовов')}`;
+
+/**
+ * Бюджеты строкой на область: состояние, оценка из предела, время и вызовы с
+ * неизвестной стоимостью. Красный — только исчерпанный, янтарный — не
+ * определённый; точные суммы и текст расчёта — в «подробнее».
+ */
+function BudgetLines({
+  budget,
+  href,
+}: {
+  budget: NonNullable<HomeHarness['budget']>;
+  href: string;
+}) {
+  const scopes = budget.scopes?.length ? budget.scopes : [budget];
+  const hidden = budget.total - scopes.length;
+  return (
+    <div className="grid min-w-0 gap-1">
+      <ul className="m-0 grid list-none gap-1 p-0" aria-label="Бюджеты">
+        {scopes.map((b) => (
+          <li
+            key={b.scope}
+            className={cn(
+              b.state === 'exceeded' && 'text-destructive',
+              b.state === 'undetermined' && 'text-warning',
+            )}
+          >
+            <span className={b.state === 'within' ? 'text-muted-foreground' : undefined}>
+              Бюджет {b.label ?? b.scope}:{' '}
+            </span>
+            <PanelLink
+              href={href}
+              className={b.state !== 'within' ? 'text-current underline' : undefined}
+            >
+              {budgetNames[b.state]}
+            </PanelLink>
+            {' · '}
+            {money(b.spentUsd)}
+            {b.limitUsd !== undefined
+              ? ` из ${limitText(b.limitUsd)} (${percentOf(b.spentUsd, b.limitUsd)} %)`
+              : ''}
+            {b.limitMs !== undefined
+              ? `; время ${minutes(b.spentMs ?? 0)} из ${minutes(b.limitMs)}`
+              : ''}
+            {b.unknownCalls
+              ? `; у ${callsText(b.unknownCalls)} стоимость неизвестна — сумма занижена`
+              : ''}
+          </li>
+        ))}
+        {hidden > 0 && <li className="text-muted-foreground">и ещё бюджетов: {hidden}</li>}
+      </ul>
+      <details className="text-muted-foreground text-xs">
+        <summary className="cursor-pointer">подробнее</summary>
+        <ul className="m-0 mt-1 grid list-none gap-1 p-0">
+          {scopes.map((b) => (
+            <li key={b.scope}>
+              {b.scope}: оценка ${b.spentUsd.toFixed(4)}
+              {b.limitUsd !== undefined ? ` из $${b.limitUsd.toFixed(2)}` : ''}
+              {b.spentMs !== undefined ? `, время ${Math.round(b.spentMs / 1000)} с` : ''}
+              {b.reason ? `. ${b.reason}` : ''}
+            </li>
+          ))}
+        </ul>
+      </details>
+    </div>
+  );
+}
+
 function HarnessTile({
   harness,
   startupError,
@@ -582,35 +871,44 @@ function HarnessTile({
       className={className}
     >
       <div className="grid min-w-0 gap-3 md:grid-cols-3">
-        <dl className="m-0 grid content-start gap-1">
-          <div className="mb-0 flex flex-wrap justify-start gap-x-1.5 gap-y-0">
-            <dt className="text-muted-foreground">Слоты:</dt>
-            <dd className="m-0 text-left">
-              занято {h.active} из {h.concurrency}
-            </dd>
-          </div>
-          <div className="mb-0 flex flex-wrap justify-start gap-x-1.5 gap-y-0">
-            <dt className="text-muted-foreground">Попытки за 24 ч:</dt>
-            <dd className="m-0 text-left">
-              {h.attempts24h.total ? (
-                <>
-                  {h.attempts24h.total}, со сбоем {h.attempts24h.failed}
-                  {kinds.length > 0 &&
-                    ' (' + kinds.map(([k, n]) => `${kindNames[k] ?? k} ${n}`).join(', ') + ')'}
-                </>
-              ) : (
-                'попыток ещё не было'
-              )}
-            </dd>
-          </div>
-          <div className="mb-0 flex flex-wrap justify-start gap-x-1.5 gap-y-0">
-            <dt className="text-muted-foreground">Сбои:</dt>
-            <dd className="m-0 text-left">
-              задач {h.failures.tasks}, разборов свойств {h.failures.recoveries}, без движения{' '}
-              {h.failures.quiet}
-            </dd>
-          </div>
-        </dl>
+        <div className="grid min-w-0 content-start gap-2">
+          <Headline
+            ring={{
+              done: h.active,
+              total: h.concurrency,
+              label: 'Слотов занято',
+              tone: 'var(--status-active)',
+            }}
+          >
+            <span>
+              <span className="text-muted-foreground">Слоты: </span>занято {h.active} из{' '}
+              {h.concurrency}
+            </span>
+          </Headline>
+          <dl className="m-0 grid content-start gap-1">
+            <div className="mb-0 flex flex-wrap justify-start gap-x-1.5 gap-y-0">
+              <dt className="text-muted-foreground">Попытки за 24 ч:</dt>
+              <dd className="m-0 text-left">
+                {h.attempts24h.total ? (
+                  <>
+                    {h.attempts24h.total}, со сбоем {h.attempts24h.failed}
+                    {kinds.length > 0 &&
+                      ' (' + kinds.map(([k, n]) => `${kindNames[k] ?? k} ${n}`).join(', ') + ')'}
+                  </>
+                ) : (
+                  'попыток ещё не было'
+                )}
+              </dd>
+            </div>
+            <div className="mb-0 flex flex-wrap justify-start gap-x-1.5 gap-y-0">
+              <dt className="text-muted-foreground">Сбои:</dt>
+              <dd className="m-0 text-left">
+                задач {h.failures.tasks}, разборов свойств {h.failures.recoveries}, без движения{' '}
+                {h.failures.quiet}
+              </dd>
+            </div>
+          </dl>
+        </div>
         <div className="grid content-start gap-1">
           {h.gates ? (
             h.gates.failing.length ? (
@@ -636,27 +934,7 @@ function HarnessTile({
             )
           ) : null}
           {budget ? (
-            <p className={cn('m-0', budget.state !== 'within' && 'text-destructive')}>
-              <span className={budget.state === 'within' ? 'text-muted-foreground' : undefined}>
-                Бюджет {budget.scope}:{' '}
-              </span>
-              <PanelLink
-                href={h.budgetHref}
-                className={budget.state !== 'within' ? 'text-current underline' : undefined}
-              >
-                {budgetNames[budget.state]}
-              </PanelLink>
-              , оценка ${budget.spentUsd.toFixed(2)}
-              {budget.limitUsd !== undefined ? ` из $${budget.limitUsd.toFixed(2)}` : ''}
-              {budget.unknownCalls ? `; стоимость неизвестна у ${budget.unknownCalls} вызовов` : ''}
-              {budget.limitMs !== undefined
-                ? `; время ${minutes(budget.spentMs ?? 0)} из ${minutes(budget.limitMs)}`
-                : ''}
-              {budget.exceeded > 1 ? `; исчерпано бюджетов: ${budget.exceeded}` : ''}
-              {budget.state !== 'within' && budget.reason && (
-                <span className="block">{budget.reason}</span>
-              )}
-            </p>
+            <BudgetLines budget={budget} href={h.budgetHref} />
           ) : (
             <p className="text-muted-foreground m-0">Бюджеты не заданы.</p>
           )}
@@ -692,6 +970,160 @@ function HarnessTile({
         </ul>
       </div>
     </Tile>
+  );
+}
+
+/** Классы ширины плитки разделов в ряду из 12 колонок по числу полных плиток. */
+const spans: Record<number, string> = {
+  1: 'lg:col-span-12',
+  2: 'lg:col-span-6',
+  3: 'lg:col-span-4',
+  4: 'lg:col-span-3',
+};
+
+/**
+ * Плитки разделов. Раздел без работы — строкой под рядом полных плиток;
+ * полные делят ряд поровну и тянутся до общей высоты. На узком экране
+ * разработка — первой.
+ */
+function SectionTiles({
+  home,
+  tracked,
+  attentionHref,
+  limit,
+}: {
+  home: Home;
+  tracked: boolean;
+  attentionHref: string;
+  limit: number;
+}) {
+  const s = home.sections;
+  const untracked = 'Подготовка не ведётся в панели.';
+  const releases = home.progress?.releases ?? [];
+  const steps = (s.design.design?.steps ?? []).filter((x) => x.state !== 'not-applicable');
+  const approved = (state: StageState) => (state === 'approved' ? 1 : 0);
+  const tiles = [
+    {
+      key: 'product',
+      title: 'Продукт',
+      section: s.product,
+      open: tracked ? 'Открыть продукт' : 'Открыть карту продукта',
+      empty: tracked
+        ? 'Опишите продукт: создайте изменение и поручите агенту постановку.'
+        : untracked,
+      // Постановка — точка входа: пустой она остаётся плиткой с призывом.
+      keep: tracked,
+      ring: !tracked
+        ? undefined
+        : releases.length && home.progress && s.product.state !== 'absent'
+          ? {
+              done: home.progress.releasesDone,
+              total: home.progress.releasesTotal,
+              label: 'Релизов готово',
+            }
+          : s.product.state !== 'absent'
+            ? { done: approved(s.product.state), total: 1, label: 'Утверждено этапов' }
+            : undefined,
+    },
+    {
+      key: 'architecture',
+      title: 'Архитектура',
+      section: s.architecture,
+      open: tracked ? 'Открыть архитектуру' : 'Открыть контракты',
+      empty: tracked ? 'Архитектура и стек — после утверждённой постановки.' : untracked,
+      keep: false,
+      ring:
+        tracked && s.architecture.state !== 'absent'
+          ? { done: approved(s.architecture.state), total: 1, label: 'Утверждено этапов' }
+          : undefined,
+    },
+    {
+      key: 'design',
+      title: 'Дизайн',
+      section: s.design,
+      open: tracked ? 'Открыть дизайн' : undefined,
+      empty: tracked ? 'Референсы, концепт и макет — после архитектуры.' : untracked,
+      keep: false,
+      ring:
+        tracked && s.design.state !== 'absent' && steps.length
+          ? {
+              done: steps.filter((x) => x.state === 'approved').length,
+              total: steps.length,
+              label: 'Шагов дизайна утверждено',
+            }
+          : undefined,
+    },
+  ] as const;
+  const compact = (t: (typeof tiles)[number]) =>
+    t.section.questions.open === 0 &&
+    !t.section.questions.more &&
+    // Ответы без решения ведущего и удержанные черновики — работа раздела.
+    t.section.questions.answeredPendingLead === 0 &&
+    t.section.questions.blockedTasks === 0 &&
+    (t.section.state === 'not-applicable' || (t.section.state === 'absent' && !t.keep));
+  const full = tiles.filter((t) => !compact(t));
+  const rest = tiles.filter(compact);
+  const span = spans[full.length];
+  return (
+    <>
+      {/* Разработка — первой и во всю ширину: её счётчики и списки — в колонки. */}
+      <DevelopmentTile
+        dev={s.development}
+        engine={home.engineConnected}
+        progress={home.progress}
+        attentionHref={attentionHref}
+        limit={limit}
+      />
+      {full.length > 0 && (
+        <div className="grid min-w-0 grid-cols-1 gap-4 sm:grid-cols-2 lg:grid-cols-12">
+          {full.map((t, i) => (
+            <PreparationTile
+              key={t.key}
+              title={t.title}
+              open={t.open}
+              section={t.section}
+              empty={t.empty}
+              attentionHref={attentionHref}
+              limit={limit}
+              tracked={tracked}
+              ring={t.ring}
+              className={cn(
+                span,
+                full.length % 2 === 1 && i === full.length - 1 && 'sm:col-span-2',
+              )}
+            >
+              {t.key === 'design' && tracked && s.design.design && (
+                <ol className="m-0 flex list-none flex-wrap gap-1.5 p-0" aria-label="Шаги дизайна">
+                  {s.design.design.steps.map((step) => (
+                    <li key={step.key}>
+                      <StateBadge variant={stageTone[step.state]} icon={stageIcons[step.state]}>
+                        {stepNames[step.key]}: {stageNames[step.state].toLowerCase()}
+                      </StateBadge>
+                    </li>
+                  ))}
+                </ol>
+              )}
+            </PreparationTile>
+          ))}
+        </div>
+      )}
+      {rest.length > 0 && (
+        <div className="grid min-w-0 gap-2">
+          {rest.map((t) => (
+            <CompactTile
+              key={t.key}
+              title={t.title}
+              badge={tracked ? <StageBadge section={t.section} /> : undefined}
+              text={
+                t.section.state === 'not-applicable' ? 'Дизайн к продукту не применяется.' : t.empty
+              }
+              facts={t.section.facts}
+              open={t.open ? { href: t.section.href, label: t.open } : undefined}
+            />
+          ))}
+        </div>
+      )}
+    </>
   );
 }
 
@@ -773,7 +1205,6 @@ export function Home() {
   const limit = narrow ? 2 : 3;
   // Разработка без подготовки: этапов нет, плитки называют это прямо.
   const tracked = !home || home.preparation || !home.engineConnected;
-  const untracked = 'Подготовка не ведётся в панели.';
   const attentionHref = home?.links.attention ?? '/?view=attention';
   const s = home?.sections;
   return (
@@ -844,93 +1275,47 @@ export function Home() {
               </p>
             )}
             {home.progress && <OverallProgress progress={home.progress} />}
+            <SectionTiles
+              home={home}
+              tracked={tracked}
+              attentionHref={attentionHref}
+              limit={limit}
+            />
             <div className="grid min-w-0 grid-cols-1 gap-4 sm:grid-cols-2 lg:grid-cols-12">
-              <PreparationTile
-                title="Продукт"
-                open={tracked ? 'Открыть продукт' : 'Открыть карту продукта'}
-                section={s.product}
-                empty={
-                  tracked
-                    ? 'Опишите продукт: создайте изменение и поручите агенту постановку.'
-                    : untracked
-                }
-                attentionHref={attentionHref}
-                limit={limit}
-                tracked={tracked}
-                className="max-sm:order-2 lg:col-span-3"
-              />
-              <PreparationTile
-                title="Архитектура"
-                open={tracked ? 'Открыть архитектуру' : 'Открыть контракты'}
-                section={s.architecture}
-                empty={tracked ? 'Архитектура и стек — после утверждённой постановки.' : untracked}
-                attentionHref={attentionHref}
-                limit={limit}
-                tracked={tracked}
-                className="max-sm:order-3 lg:col-span-3"
-              />
-              <PreparationTile
-                title="Дизайн"
-                open={tracked ? 'Открыть дизайн' : undefined}
-                section={s.design}
-                empty={tracked ? 'Референсы, концепт и макет — после архитектуры.' : untracked}
-                attentionHref={attentionHref}
-                limit={limit}
-                tracked={tracked}
-                className="max-sm:order-4 lg:col-span-3"
-              >
-                {tracked && s.design.design && s.design.state !== 'not-applicable' && (
-                  <ol
-                    className="m-0 flex list-none flex-wrap gap-1.5 p-0"
-                    aria-label="Шаги дизайна"
-                  >
-                    {s.design.design.steps.map((step) => (
-                      <li key={step.key}>
-                        <Badge variant={stageTone[step.state]}>
-                          {stepNames[step.key]}: {stageNames[step.state].toLowerCase()}
-                        </Badge>
-                      </li>
-                    ))}
-                  </ol>
-                )}
-              </PreparationTile>
-              <DevelopmentTile
-                dev={s.development}
-                engine={home.engineConnected}
-                attentionHref={attentionHref}
-                limit={limit}
-                className="max-sm:order-1 lg:col-span-3"
-              />
               <NowTile
                 dev={s.development}
                 attentionHref={attentionHref}
-                className="max-sm:order-5 sm:col-span-1 lg:col-span-6"
+                className="sm:col-span-1 lg:col-span-6"
               />
               <ProgressTile
                 progress={home.progress}
                 engine={home.engineConnected}
-                className="max-sm:order-6 sm:col-span-1 lg:col-span-6"
+                className="sm:col-span-1 lg:col-span-6"
               />
               {home.harness?.load && (
                 <Tile
-                  title="Нагрузка"
+                  title="Динамика"
                   badge={
                     <span className="text-muted-foreground text-xs">
                       {asOfText(home.harness.load.asOf)}
                     </span>
                   }
-                  className="max-sm:order-7 sm:col-span-2 lg:col-span-12"
+                  className="sm:col-span-2 lg:col-span-12"
                 >
-                  <div className="grid min-w-0 gap-6 md:grid-cols-2">
+                  <div className="grid min-w-0 gap-6 md:grid-cols-2 xl:grid-cols-4">
                     <LoadChart load={home.harness.load} concurrency={home.harness.concurrency} />
                     <HourlyChart load={home.harness.load} />
+                    {home.harness.gateTrend && <GateTrendChart trend={home.harness.gateTrend} />}
+                    {home.harness.spend && (
+                      <SpendChart spend={home.harness.spend} estimate={COST_ESTIMATE_RU} />
+                    )}
                   </div>
                 </Tile>
               )}
               <HarnessTile
                 harness={home.harness}
                 startupError={home.startupError}
-                className="max-sm:order-8 sm:col-span-2 lg:col-span-12"
+                className="sm:col-span-2 lg:col-span-12"
               />
             </div>
           </>

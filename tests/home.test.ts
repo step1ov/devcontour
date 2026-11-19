@@ -19,6 +19,9 @@ import { DevContour } from '../src/core/service.ts';
 import { loadConfig } from '../src/runner/config.ts';
 import { Preparation } from '../src/core/preparation.ts';
 import { LeadWorkflow } from '../src/core/lead-workflow.ts';
+import { LeadRunner } from '../src/runner/lead-workflow.ts';
+import { closeDeadJob, setPark } from '../src/core/board-hold.ts';
+import { devcontourHandoff } from '../src/application/handoff.ts';
 import {
   attentionSections,
   attentionSources,
@@ -346,6 +349,7 @@ test('Home: before setup — bootstrap and preparation only, without an engine',
       running: 0,
       waiting: 0,
       failed: 0,
+      closed: 0,
       top: [],
     });
 
@@ -512,6 +516,10 @@ test('Home: on a large history the response stays bounded; per-revision cost is 
     const { text } = await get();
     const bytes = Buffer.byteLength(text);
     assert.ok(bytes < HOME_LIMITS.bytes, `${bytes} bytes`);
+    // В пределе — и ряды медленного яруса: проверки по часам и расход по дням.
+    const body = JSON.parse(text) as HomeView;
+    assert.equal(body.harness!.gateTrend!.hourly.length, 24);
+    assert.equal(body.harness!.spend!.days.length, HOME_LIMITS.spendDays);
 
     // Пересчёт на новую ревизию: центр внимания и главная (запрос целиком)
     // и одна главная над готовым центром внимания (homeView).
@@ -684,6 +692,175 @@ test('Home: a failed job of an accepted board is settled; a truncated attention 
   } finally {
     list.mock.restore();
     f.cleanup();
+  }
+});
+
+test('F90: a closed dead job is not a failed job on the home; a parked board says why and until when, and its drafts are not waiting', async () => {
+  const f = fixture();
+  try {
+    // Мёртвая доска: выданная задача упала и отменена, вторая отменена, её
+    // задание упало своим циклом (D46).
+    const dead = f.h.createBoard('Мёртвая доска', '', 'main');
+    const stopped = f.h.addTask(dead.id, input('Падает на проверке'));
+    const dropped = f.h.addTask(dead.id, input('Снята'));
+    f.h.approve(dead.id);
+    const flow = new LeadWorkflow(f.h);
+    const job = flow.start({ kind: 'board', id: dead.id, authorRuntime: 'codex', maxAttempts: 3 });
+    f.h.pause(false);
+    const run = f.h.claim('test')!;
+    f.h.fail(run.id, run.token, 'gate failed', false, 'gate');
+    f.h.cancel(stopped.id, 'Replanned on another board', 'host');
+    f.h.cancel(dropped.id, 'Replanned on another board', 'host');
+    const runner = new LeadRunner(f.h, f.root);
+    for (let i = 0; i < 4; i++) await runner.tick();
+    await runner.stop();
+    assert.equal(flow.get(job.key, job.owner).status, 'failed');
+    // Доска с черновиком, которую потом отложат, и обычная доска с черновиком.
+    const later = f.h.createBoard('Отложенная доска', '', 'main');
+    f.h.addTask(later.id, input('Черновик отложенной'));
+    const plain = f.h.createBoard('Обычная доска', '', 'main');
+    f.h.addTask(plain.id, input('Черновик обычной'));
+    const attention: AttentionView = {
+      revision: 1,
+      generatedAt: '2026-11-19T00:00:00.000Z',
+      engineConnected: true,
+      lead: { present: false, lastActivityAt: null },
+      counts: {
+        active: 0,
+        unread: 0,
+        byActor: { operator: { active: 0, unread: 0 }, lead: { active: 0, unread: 0 } },
+        bySection: zeroSections(),
+      },
+      items: [],
+    };
+    const dev = () =>
+      homeView({ state: f.store.view(), h: f.h, attention, revision: 1, now: Date.now() }).sections
+        .development;
+
+    let d = dev();
+    assert.deepEqual([d.jobs.failed, d.jobs.closed], [1, 0]);
+    assert.deepEqual(
+      d.jobs.top.map((j) => [j.id, j.status]),
+      [[dead.id, 'failed']],
+    );
+    assert.equal(d.queue.drafts, 2);
+    assert.equal(d.boards.parked, 0);
+    const next = (boardId: string) => devcontourHandoff(f.h, { boardId }).host.next;
+    assert.ok(next(dead.id), 'до закрытия остановка — шаг host.next');
+
+    // workflow_close: остановка — не шаг host.next, и главная её не считает.
+    closeDeadJob(f.h, dead.id, 'Work was replanned on another board', 'lead');
+    assert.equal(next(dead.id), undefined);
+    d = dev();
+    assert.deepEqual([d.jobs.failed, d.jobs.closed], [0, 1]);
+    assert.deepEqual(d.jobs.top, []);
+    assert.doesNotMatch(d.blocker ?? '', /остановлены/);
+    assert.notEqual(d.state, 'blocked');
+
+    // board_park: доска помечена причиной и сроком, идёт после остальных, её
+    // черновик не в счёте черновиков, ждущих решения.
+    const until = new Date(Date.now() + 86_400_000).toISOString();
+    setPark(f.h, later.id, { parked: true, reason: 'Ждём решения по API', until }, 'lead');
+    d = dev();
+    assert.equal(d.boards.parked, 1);
+    assert.equal(d.queue.drafts, 1);
+    const shown = d.boards.top.find((b) => b.id === later.id)!;
+    assert.deepEqual(shown.parked, { reason: 'Ждём решения по API', until, by: 'lead' });
+    assert.equal(shown.phase, 'draft');
+    assert.equal(d.boards.top.find((b) => b.id === plain.id)?.parked, undefined);
+    assert.equal(d.boards.top.at(-1)?.id, later.id, 'отложенная — после остальных');
+    // Утверждение снимает действие отметки — доска снова обычная.
+    f.h.approve(later.id);
+    d = dev();
+    assert.equal(d.boards.parked, 0);
+    assert.equal(d.boards.top.find((b) => b.id === later.id)?.parked, undefined);
+
+    // Отложенная пустая доска не живая, но отметка в счёте; истёкшая отметка
+    // без записи снимается и с главной.
+    const empty = f.h.createBoard('Пустая доска', '', 'main');
+    setPark(f.h, empty.id, { parked: true, reason: 'Пока не планируем работу' }, 'operator');
+    const soon = new Date(Date.now() + 1_500).toISOString();
+    setPark(f.h, plain.id, { parked: true, reason: 'Ждём дизайн экрана', until: soon }, 'lead');
+    d = dev();
+    assert.equal(d.boards.parked, 2);
+    assert.equal(d.queue.drafts, 0);
+    assert.equal(
+      d.boards.top.find((b) => b.id === empty.id),
+      undefined,
+    );
+    await new Promise((r) => setTimeout(r, 1_700));
+    d = dev();
+    assert.equal(d.boards.parked, 1);
+    assert.equal(d.queue.drafts, 1);
+    assert.equal(d.boards.top.find((b) => b.id === plain.id)?.parked, undefined);
+
+    // Мёртвая доска, задачи которой не выдавали: у host.next шага нет, и
+    // упавшее задание не держит работу.
+    const unissued = f.h.createBoard('Брошенная доска', '', 'main');
+    const never = f.h.addTask(unissued.id, input('Не выдавалась'));
+    f.h.approve(unissued.id);
+    const other = flow.start({ kind: 'board', id: unissued.id, authorRuntime: 'codex' });
+    f.h.cancel(never.id, 'Replanned before issue', 'host');
+    flow.fail(flow.claim(other.key, other.owner)!, 'stopped before issue');
+    assert.equal(next(unissued.id), undefined);
+    d = dev();
+    assert.deepEqual([d.jobs.failed, d.jobs.closed], [0, 2]);
+
+    // Новый эпизод (повтор задачи) снимает закрытие — задание снова упавшее.
+    f.h.retry(stopped.id, undefined, 'host', { lead: true });
+    assert.ok(next(dead.id));
+    d = dev();
+    assert.deepEqual([d.jobs.failed, d.jobs.closed], [1, 1]);
+    assert.deepEqual(
+      d.jobs.top.map((j) => j.id),
+      [dead.id],
+    );
+  } finally {
+    f.cleanup();
+  }
+});
+
+test('F90: a dead board job on the home is failed exactly when host.next has its stop, whichever cancelled task comes first', async () => {
+  for (const issuedFirst of [false, true]) {
+    const f = fixture();
+    try {
+      const board = f.h.createBoard('Мёртвая доска', '', 'main');
+      const a = f.h.addTask(board.id, input('Первая'));
+      const b = f.h.addTask(board.id, input('Вторая'));
+      const [issued, unissued] = issuedFirst ? [a, b] : [b, a];
+      f.h.approve(board.id);
+      const flow = new LeadWorkflow(f.h);
+      const job = flow.start({
+        kind: 'board',
+        id: board.id,
+        authorRuntime: 'codex',
+        maxAttempts: 3,
+      });
+      // Невыданную отменяет оператор до выдачи; выданная падает и отменена ведущим.
+      f.h.cancel(unissued.id, 'Not needed any more', 'operator');
+      f.h.pause(false);
+      const run = f.h.claim('test')!;
+      assert.equal(run.taskId, issued.id);
+      f.h.fail(run.id, run.token, 'gate failed', false, 'gate');
+      f.h.cancel(issued.id, 'Replanned on another board', 'host');
+      const runner = new LeadRunner(f.h, f.root);
+      for (let i = 0; i < 4; i++) await runner.tick();
+      await runner.stop();
+      assert.equal(flow.get(job.key, job.owner).status, 'failed');
+      const step = devcontourHandoff(f.h, { boardId: board.id }).host.next;
+      const dev = homeView({
+        state: f.store.view(),
+        h: f.h,
+        attention: await new AttentionService(f.store, f.h).active(),
+        revision: f.store.visibleRevision(),
+        now: Date.now(),
+      }).sections.development;
+      const shown = dev.jobs.top.some((j) => j.id === board.id);
+      assert.equal(shown, Boolean(step), `issuedFirst=${issuedFirst}: ${JSON.stringify(step)}`);
+      assert.deepEqual([dev.jobs.failed, dev.jobs.closed], step ? [1, 0] : [0, 1]);
+    } finally {
+      f.cleanup();
+    }
   }
 });
 

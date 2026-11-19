@@ -1038,6 +1038,9 @@ function queuePauseOf(s: AttentionContext['state']) {
  */
 function foldedBaseWait(h: DevContour, s: AttentionContext['state']) {
   if (queuePauseOf(s)?.actor !== 'user') return undefined;
+  // Свою паузу ведущий снимает сам, ожидание остаётся (`leadResumeOf`):
+  // запуск очереди перенос не подтверждает (F89).
+  if ((h.config.approvalMode ?? 'agent') === 'agent' && leadLiftsPause(s)) return undefined;
   const wait = baseWaitOf(h, s);
   if (!wait?.needsOperator || wait.detail.startsWith('Проверка базы не пройдена')) return undefined;
   return wait;

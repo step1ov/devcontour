@@ -1891,6 +1891,120 @@ function boardRestart(ctx: HostContext): HandoffHostNext | undefined {
     .find((x) => x?.code === 'board-restart');
 }
 
+/** Остановка пакета: `next` или запись `stops`. */
+type PackStop = Pick<HandoffPack['stops'][number], 'action' | 'actor' | 'workId' | 'works'> &
+  Partial<Pick<HandoffPack['stops'][number], 'code'>>;
+
+/**
+ * Остановки пакета по порядку harness: `next` первой, затем остальные записи
+ * `stops` (запись, совпадающая с `next`, не повторяется).
+ */
+function packStops(pack: HandoffPack): PackStop[] {
+  const first: PackStop = pack.next;
+  const same = (x: PackStop) =>
+    x.code === first.code && x.action === first.action && x.workId === first.workId;
+  const index = pack.stops.findIndex(same);
+  // Свёрнутая остановка `next` без поручения — поручения той же остановки.
+  const head = index >= 0 ? { ...pack.stops[index], ...first } : first;
+  return [head, ...pack.stops.filter((_, i) => i !== index)];
+}
+
+/**
+ * Решение ведущего или пользователя, не связанное с очередью (разбор отказа,
+ * перепланирование зависимых), — шаг пакета: шага очереди хост не
+ * придумывает.
+ */
+const decides = (stop: PackStop) =>
+  (stop.actor === 'lead' || stop.actor === 'user') &&
+  stop.action !== 'wait' &&
+  stop.action !== 'none' &&
+  stop.action !== 'resume-queue';
+
+/**
+ * Доска, шаги которой DevContour держит сам: отложена (`board_park`) или
+ * упавшее задание мёртвой доски закрыто (`workflow_close`). Остановка такой
+ * доски — не шаг ведущего (F87).
+ */
+function heldBoard(ctx: HostContext, boardId: string) {
+  const { h, state } = ctx;
+  if (ctx.jobs.some((j) => j.id === boardId && ctx.live(j))) return false;
+  if (parkedHold(h, state, boardId)) return true;
+  if (!closedBoard(state, boardId)) return false;
+  const job = ctx.jobs.find((j) => j.id === boardId && ctx.current(j));
+  return job?.status === 'failed' && !!closureOf(h, state, job.id, job);
+}
+
+/**
+ * Шаг решения остановки пакета: решение по заданию или плану её доски.
+ * `held` — шага нет, потому что все доски остановки DevContour держит сам
+ * (`heldBoard`): остановка не заслоняет следующую.
+ */
+function decideStep(ctx: HostContext, stop: PackStop): { step?: HandoffHostNext; held?: true } {
+  const { pack, view, state } = ctx;
+  const workId = stop.workId;
+  const next = (workId ? view.work(workId)?.graphId : undefined) ?? pack.graphId;
+  // Доски решения: его поручение, а у свёрнутой остановки без поручения —
+  // поручения той же остановки (`works`).
+  const ids = next
+    ? [next]
+    : pack.stops
+        .filter((x) => x.code === stop.code && x.action === stop.action)
+        .flatMap((x) => [...(x.workId ? [x.workId] : []), ...(x.works ?? [])])
+        .concat(stop.works ?? [])
+        .map((id) => view.work(id)?.graphId);
+  const own = [...new Set(ids)].filter(
+    (id): id is string => !!id && state.boards.some((b) => b.id === id),
+  );
+  // Выдуманный шаг очереди (начать задание, снять паузу) отбрасывается;
+  // ожидание действующего задания и повтор упавшего — шаги самой доски:
+  // без них ведущий начал бы то же решение вручную наперегонки с заданием.
+  // Ожидание задания, цикл которого лишь ждёт задач, спрятало бы решение
+  // пакета за «сервер продолжит»: вместо него — решение о плане доски,
+  // если план не согласован, иначе шага нет и стоит шаг пакета.
+  const pick = (ids: string[]) =>
+    ids
+      .map((id) => {
+        const step = boardStep(id, ctx);
+        if (step?.action === 'wait' && !acts(step.loop)) return planStep(id, ctx);
+        return step;
+      })
+      .filter((x): x is HandoffHostNext => !!x)
+      .filter((x) => x.action !== 'workflow_start' && x.action !== 'queue_set')
+      .sort((a, b) => rank(a) - rank(b))[0];
+  const chosen = pick(own);
+  if (!chosen && own.length && own.every((id) => heldBoard(ctx, id))) {
+    // Поручения свёрнутой остановки в пакете усечены: решение о плане другой,
+    // не отложенной доски могло в список не попасть — оно и есть эта
+    // остановка без отложенных досок.
+    // Шаг такой доски — тот же, что у доски из списка (действующее задание
+    // раньше решения о плане).
+    if (stop.action === 'review-plan') {
+      const step = pick(
+        state.boards
+          .filter((b) => !own.includes(b.id) && (!pack.graphId || b.id === pack.graphId))
+          .filter((b) => planStep(b.id, ctx)?.decision === 'plan')
+          .map((b) => b.id),
+      );
+      if (step) return { step };
+    }
+    return { held: true };
+  }
+  // Решение о плане — о будущем объёме; задание другой доски, которое
+  // устарело после перепривязки, стоит уже сейчас: сначала его перезапуск
+  // (F66). Перезапуск — шаг той доски, а не выдуманный шаг очереди.
+  if (chosen?.decision === 'plan' || (!chosen && stop.action === 'review-plan')) {
+    const restart = ctx
+      .invalidated()
+      .filter((j) => !own.includes(j.boardId))
+      .map((j) => boardStep(j.boardId, ctx))
+      .find((x) => x?.code === 'board-restart');
+    if (restart) return { step: restart };
+    const changeset = changesetStep(ctx);
+    if (changeset) return { step: changeset };
+  }
+  return chosen ? { step: chosen } : {};
+}
+
 function hostStep(ctx: HostContext): HandoffHostNext | undefined {
   const { pack, view, state, h } = ctx;
   // Открытых поручений нет, но доска ещё не принята: шаг — только
@@ -1904,61 +2018,45 @@ function hostStep(ctx: HostContext): HandoffHostNext | undefined {
       : (jobBlocker(ctx) ?? boardRestart(ctx) ?? changesetStep(ctx));
   const input = inputNext(ctx);
   if (input) return input;
-  if (h.config.approvalMode === 'operator')
-    return withDetail(h, { action: 'operator', code: 'operator', params: {} });
-  const workId = pack.next.workId;
-  const next = (workId ? view.work(workId)?.graphId : undefined) ?? pack.graphId;
-  // Решение ведущего или пользователя, не связанное с очередью (разбор
-  // отказа, перепланирование зависимых), — шаг пакета: шага очереди хост
-  // не придумывает. Остаётся лишь решение по заданию или плану доски этого
-  // решения.
-  const nextDecides =
-    (pack.next.actor === 'lead' || pack.next.actor === 'user') &&
-    pack.next.action !== 'wait' &&
-    pack.next.action !== 'none' &&
-    pack.next.action !== 'resume-queue';
-  if (nextDecides) {
-    // Доски решения: его поручение, а у свёрнутой остановки без поручения —
-    // поручения той же остановки (`works`).
-    const ids = next
-      ? [next]
-      : pack.stops
-          .filter((x) => x.code === pack.next.code && x.action === pack.next.action)
-          .flatMap((x) => [...(x.workId ? [x.workId] : []), ...(x.works ?? [])])
-          .map((id) => view.work(id)?.graphId);
-    const own = [...new Set(ids)].filter(
-      (id): id is string => !!id && state.boards.some((b) => b.id === id),
-    );
-    // Выдуманный шаг очереди (начать задание, снять паузу) отбрасывается;
-    // ожидание действующего задания и повтор упавшего — шаги самой доски:
-    // без них ведущий начал бы то же решение вручную наперегонки с заданием.
-    // Ожидание задания, цикл которого лишь ждёт задач, спрятало бы решение
-    // пакета за «сервер продолжит»: вместо него — решение о плане доски,
-    // если план не согласован, иначе шага нет и стоит шаг пакета.
-    const chosen = own
-      .map((id) => {
-        const step = boardStep(id, ctx);
-        if (step?.action === 'wait' && !acts(step.loop)) return planStep(id, ctx);
-        return step;
-      })
-      .filter((x): x is HandoffHostNext => !!x)
-      .filter((x) => x.action !== 'workflow_start' && x.action !== 'queue_set')
-      .sort((a, b) => rank(a) - rank(b))[0];
-    // Решение о плане — о будущем объёме; задание другой доски, которое
-    // устарело после перепривязки, стоит уже сейчас: сначала его перезапуск
-    // (F66). Перезапуск — шаг той доски, а не выдуманный шаг очереди.
-    if (chosen?.decision === 'plan' || (!chosen && pack.next.action === 'review-plan')) {
-      const restart = ctx
-        .invalidated()
-        .filter((j) => !own.includes(j.boardId))
-        .map((j) => boardStep(j.boardId, ctx))
-        .find((x) => x?.code === 'board-restart');
-      if (restart) return restart;
-      const changeset = changesetStep(ctx);
-      if (changeset) return changeset;
+  const operatorMode = h.config.approvalMode === 'operator';
+  // Остановки пакета по порядку harness. Остановку, которую DevContour
+  // держит сам (доска отложена `board_park`, упавшее задание мёртвой доски
+  // закрыто `workflow_close`), ведущий не может продвинуть: она не заслоняет
+  // следующую — шаг считается так, будто её нет (F87). Иначе пустой шаг
+  // спрятал бы вопрос исполнителя, который ждёт оператора, и работу других
+  // досок. В режиме operator — так же: вопрос за пропущенной остановкой
+  // называет свой шаг, иначе — общий шаг оператора.
+  let stop: PackStop | undefined;
+  let skipped = false;
+  const stops = packStops(pack);
+  for (const [i, candidate] of stops.entries()) {
+    // Вопрос, названный первым, — уже `inputNext` (без шага — решение пакета).
+    if (i > 0 && candidate.code === 'INPUT_REQUIRED') {
+      const asked = candidate.workId ? inputStep(ctx, candidate.workId) : undefined;
+      if (asked) return asked;
+      continue;
     }
-    return chosen;
+    if (!decides(candidate)) {
+      stop = candidate;
+      break;
+    }
+    const decided = decideStep(ctx, candidate);
+    if (!decided.held) {
+      if (operatorMode) break;
+      return decided.step;
+    }
+    skipped = true;
   }
+  if (operatorMode) return withDetail(h, { action: 'operator', code: 'operator', params: {} });
+  // Пакет одной доски, остановку которой DevContour держит сам: шагов этой
+  // доски нет (F86), а шаги других досок — вне области пакета.
+  if (skipped && pack.graphId) return undefined;
+  // После пропущенной остановки остановка, ставшая первой, не задаёт доску:
+  // порядок harness (например, идущая попытка раньше других ожиданий) без
+  // пропущенной был бы другим, а списки поручений пакета усечены. Кандидаты —
+  // все доски области, их порядок — общий `rank`.
+  const workId = skipped ? undefined : stop?.workId;
+  const next = (workId ? view.work(workId)?.graphId : undefined) ?? pack.graphId;
   // Доски, чьи задания устарели (перепривязка контракта и т. п.), — среди
   // кандидатов всегда: их перезапуск идёт раньше решения о плане другой
   // доски, на которую указывает пакет (F66).
@@ -1966,9 +2064,19 @@ function hostStep(ctx: HostContext): HandoffHostNext | undefined {
     ...new Set([
       ...(next && state.boards.some((b) => b.id === next)
         ? [next]
-        : [...new Set(pack.works.map((w) => w.graphId))].filter((id) =>
-            state.boards.some((b) => b.id === id),
-          )),
+        : skipped
+          ? state.boards
+              .filter(
+                (b) =>
+                  ctx.jobs.some((j) => j.id === b.id) ||
+                  boardTasks(state, b.id)?.tasks.some(
+                    (t) => t.status !== 'done' && t.status !== 'cancelled',
+                  ),
+              )
+              .map((b) => b.id)
+          : [...new Set(pack.works.map((w) => w.graphId))].filter((id) =>
+              state.boards.some((b) => b.id === id),
+            )),
       ...ctx.invalidated().map((j) => j.boardId),
     ]),
   ];
