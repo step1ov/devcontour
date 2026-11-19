@@ -96,6 +96,11 @@ test('F81: untriaged finding drafts are rebound but stay drafts outside the plan
     });
     mark(untriaged.id, false);
     mark(triaged.id, true);
+    // A live job of the findings board: the rebind invalidates it, and the
+    // restart advice must not send the kept finding into its whole-plan review.
+    const lead = new LeadWorkflow(s.h);
+    const job = lead.start({ kind: 'board', id: findings.id, authorRuntime: 'codex' });
+    assert.equal(lead.claim(job.key, job.owner)?.status, 'running');
     // A reviewer that rejects any untriaged finding in its scope, as the
     // real plan reviewer does: the old flow failed the operation here.
     const plans: string[] = [];
@@ -146,6 +151,15 @@ test('F81: untriaged finding drafts are rebound but stay drafts outside the plan
     assert.equal(s.task(triaged.id).status, 'ready');
     assert.ok(plans.includes(triaged.id), 'plan review approved the triaged finding');
     assert.ok(!plans.includes(untriaged.id), 'the untriaged finding was never in the review scope');
+    assert.deepEqual(
+      done.boardJobs?.jobs.map((j) => j.boardId),
+      [findings.id],
+    );
+    assert.match(
+      done.boardJobs?.next ?? '',
+      new RegExp(`Сначала разберите \\(edit-task\\).*${untriaged.id}.*workflow_start`),
+    );
+    assert.ok(!done.boardJobs?.next.includes(triaged.id), 'only untriaged drafts are named');
   } finally {
     await s.remove();
   }

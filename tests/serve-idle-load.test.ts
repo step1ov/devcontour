@@ -162,16 +162,26 @@ test('F79: свои продления сроков и такт ожидающе
       await interval();
       assert.equal(budget.count, 1, 'первый такт выдаёт');
       const before = f.store.version();
+      // Продление под видом heartbeat, меняющее документ (срок поставки,
+      // совместной проверки), — счётчик сроков, не выдача.
+      const heartbeat = (i: number) =>
+        f.store.update('heartbeat', (draft) => {
+          draft.edit().pausedAt = `2026-01-01T00:00:0${i}.000Z`;
+        });
       for (let i = 0; i < 5; i++) {
         waitingStage();
         driverBeat();
+        heartbeat(i);
         await interval();
       }
       const after = f.store.version();
       // Поломка, которую ловит: ревизия не росла бы — тогда тест ничего не
       // проверял бы (шлюз держал бы и по `version()`).
       assert.ok(after.revision >= before.revision + 15, 'такты задания подняли ревизию данных');
-      assert.ok(after.lease >= before.lease + 5, 'отметка прохода подняла счётчик сроков');
+      assert.ok(
+        after.lease >= before.lease + 10,
+        'отметка прохода и heartbeat документа подняли счётчик сроков',
+      );
       assert.equal(budget.count, 1, 'свои нейтральные записи выдачу не открыли');
 
       // Чужой процесс той же базы продлил то же задание — шлюз открыт: его

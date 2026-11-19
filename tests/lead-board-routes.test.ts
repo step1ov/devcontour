@@ -164,9 +164,10 @@ test('F80: правка одной роли и перенос не разбир�
     f.h.approve(b.id);
     f.h.pause(false);
     const run = f.h.claim('writer')!;
-    const [held, other] = f.h.discoveries(run.id, run.token, 'a'.repeat(40), [
+    const [held, other, gated] = f.h.discoveries(run.id, run.token, 'a'.repeat(40), [
       finding('packages/engine/src/budget.ts'),
       finding('packages/engine/src/limits.ts'),
+      finding('packages/engine/src/gates.ts'),
     ]);
     const task = (id: string) => f.store.read().tasks.find((t) => t.id === id)!;
     const plan = () => {
@@ -176,7 +177,7 @@ test('F80: правка одной роли и перенос не разбир�
     };
     assert.deepEqual(
       plan().plan?.misrouted?.map((m) => m.id),
-      [held, other],
+      [held, other, gated],
     );
     // Роль-владелец пути — только роль: находка ждёт решения владельца.
     const t = task(held);
@@ -196,7 +197,7 @@ test('F80: правка одной роли и перенос не разбир�
     assert.ok(!next.plan?.review.includes(held), 'и не предложена к ревью');
     assert.deepEqual(
       next.plan?.misrouted?.map((m) => m.id),
-      [other],
+      [other, gated],
       'флаг не той роли снят',
     );
     assert.match(next.detail, /an edit that changes only the role keeps the finding unverified/);
@@ -225,6 +226,21 @@ test('F80: правка одной роли и перенос не разбир�
       specDigest(o),
     );
     assert.ok(task(other).triagedAt, 'роль и приёмка — разбор');
+    // Роль вместе с областью проверок (вне digest постановки) — тоже разбор.
+    const g = task(gated);
+    f.h.editTask(
+      gated,
+      {
+        repositoryId: g.repositoryId,
+        role: 'engine',
+        title: g.title,
+        description: g.description,
+        acceptance: g.acceptance,
+        gates: ['test'],
+      },
+      specDigest(g),
+    );
+    assert.ok(task(gated).triagedAt, 'роль и gates — разбор');
     // Правка без перемен по-прежнему явный разбор.
     after = task(held);
     f.h.editTask(held, { ...roleOnly }, specDigest(after));

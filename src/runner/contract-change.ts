@@ -429,9 +429,29 @@ export class ContractChanges {
           `workflow_start {"kind": "board", "id": ${JSON.stringify(j.boardId)}, "authorRuntime": ${JSON.stringify(j.authorRuntime)}}`,
       )
       .join('; ');
+    // Новое задание доски отправит на ревью весь её план: неразобранные
+    // находки, которые операция оставила вне ревью (F81), сначала
+    // разбираются, переносятся или отменяются.
+    const s = this.h.store.read();
+    const untriaged = (op.findingDrafts ?? []).filter((id) => {
+      const t = s.tasks.find((x) => x.id === id);
+      return (
+        t?.status === 'draft' &&
+        unverifiedFinding(t) &&
+        jobs.some((j) =>
+          s.boards
+            .find((b) => b.id === j.boardId)
+            ?.revisions.at(-1)
+            ?.taskIds.includes(id),
+        )
+      );
+    });
+    const first = untriaged.length
+      ? ` Сначала разберите (edit-task), перенесите (task_move) или отмените (cancel --by host) неразобранные находки этих досок, оставленные вне ревью: ${untriaged.join(', ')} — новое задание отправит на ревью весь план доски, и ревьюер отверг бы их.`
+      : '';
     return {
       jobs,
-      next: `Перепривязка задач сделала устаревшими задания ведущего досок (${jobs.map((j) => `${j.boardId}: ${j.status}`).join(', ')}): они не продолжатся. Начните новое задание каждой доски — ${starts}; прежнее закроется как stale. Новое задание само проверит перенесённую базу (ожидание base-check) и продолжит выдачу; session_handoff называет этот шаг (host.next workflow_start, code board-restart).`,
+      next: `Перепривязка задач сделала устаревшими задания ведущего досок (${jobs.map((j) => `${j.boardId}: ${j.status}`).join(', ')}): они не продолжатся.${first} Начните новое задание каждой доски — ${starts}; прежнее закроется как stale. Новое задание само проверит перенесённую базу (ожидание base-check) и продолжит выдачу; session_handoff называет этот шаг (host.next workflow_start, code board-restart).`,
     };
   }
 
