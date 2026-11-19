@@ -842,12 +842,34 @@ test('Home spend: per server-local day over a week, unknown cost counted apart, 
     record({ id: 'future', startedAt: iso(NOW + HOUR), costUsd: 0.25 }),
   ];
   const spend = spendOf(records, NOW, 100);
+  const omitDate = ({ date, ...rest }: (typeof spend.days)[number]) => (void date, rest);
+  // Дата дня — календарная по часам сервера.
+  const local = new Date(midnight(-6));
+  assert.equal(
+    spend.days[0].date,
+    `${local.getFullYear()}-${String(local.getMonth() + 1).padStart(2, '0')}-${String(local.getDate()).padStart(2, '0')}`,
+  );
   assert.equal(spend.days.length, HOME_LIMITS.spendDays);
   assert.equal(spend.days[0].start, iso(midnight(-6)));
   assert.equal(spend.days[6].start, iso(midnight(0)));
-  assert.deepEqual(spend.days[6], { start: iso(midnight(0)), usd: 3, calls: 3, unknown: 0 });
-  assert.deepEqual(spend.days[0], { start: iso(midnight(-6)), usd: 1, calls: 1, unknown: 0 });
-  assert.deepEqual(spend.days[4], { start: iso(midnight(-2)), usd: 0.5, calls: 2, unknown: 2 });
+  assert.deepEqual(omitDate(spend.days[6]), {
+    start: iso(midnight(0)),
+    usd: 3,
+    calls: 3,
+    unknown: 0,
+  });
+  assert.deepEqual(omitDate(spend.days[0]), {
+    start: iso(midnight(-6)),
+    usd: 1,
+    calls: 1,
+    unknown: 0,
+  });
+  assert.deepEqual(omitDate(spend.days[4]), {
+    start: iso(midnight(-2)),
+    usd: 0.5,
+    calls: 2,
+    unknown: 2,
+  });
   assert.equal(spend.beforeUsd, 10);
   assert.equal(spend.beforeUnknown, 1);
   assert.equal(spend.limitUsd, 100);
@@ -949,7 +971,7 @@ test('Home progress: without preparation releases the product map releases feed 
     const coverage = coverageOf(view, at(0), false)!;
     assert.ok(coverage.available);
     assert.deepEqual(coverage.releases, [
-      { id: 'r1', title: 'Первый', features: 3, done: 2 },
+      { id: 'r1', title: 'Первый', features: 3, done: 2, started: 3 },
       { id: 'r2', title: 'Второй' },
     ]);
     const slow = {
@@ -984,6 +1006,123 @@ test('Home progress: without preparation releases the product map releases feed 
     });
     assert.deepEqual(bare.progress!.releases, []);
     assert.equal(bare.progress!.releasesFrom, undefined);
+  } finally {
+    f.cleanup();
+  }
+});
+
+test('Home spend: a midnight DST switch does not shift earlier days', () => {
+  // Чили: 2026-09-06 часы переводятся в полночь, день начинается в 01:00.
+  const before = process.env.TZ;
+  process.env.TZ = 'America/Santiago';
+  try {
+    const now = Date.parse('2026-09-06T12:00:00Z');
+    const records = [
+      // 5 сентября 00:30 по местному времени (UTC−4).
+      {
+        id: 'a',
+        startedAt: '2026-09-05T04:30:00.000Z',
+        outcome: 'returned',
+        usage: { complete: true },
+        costUsd: 1,
+        costSource: 'provider-reported',
+      },
+    ] as unknown as UsageRecord[];
+    const spend = spendOf(records, now);
+    assert.deepEqual(
+      spend.days.map((d) => d.date),
+      [
+        '2026-08-31',
+        '2026-09-01',
+        '2026-09-02',
+        '2026-09-03',
+        '2026-09-04',
+        '2026-09-05',
+        '2026-09-06',
+      ],
+    );
+    assert.equal(spend.days[5].usd, 1, 'charged to 5 September, not 4');
+    assert.equal(spend.days[4].usd, 0);
+    // Каждый день начинается в местную полночь (кроме дня перевода — в 01:00).
+    for (const d of spend.days.slice(0, 6)) assert.equal(new Date(d.start).getHours(), 0, d.date);
+  } finally {
+    if (before === undefined) delete process.env.TZ;
+    else process.env.TZ = before;
+  }
+});
+
+test('Home progress: the current map release follows the map acceptance and started features; done counts all releases', () => {
+  const f = fixture();
+  try {
+    // Прежняя приёмка ChangeSet текущего релиза не делает его готовым.
+    const state = {
+      ...f.store.view(),
+      changeSets: [
+        {
+          id: 'CS-1',
+          title: 'CS-1',
+          boardIds: [],
+          verifications: [],
+          createdAt: at(HOUR),
+          releaseId: 'r1',
+          acceptance: { at: at(HOUR) },
+        },
+        {
+          id: 'CS-2',
+          title: 'CS-2',
+          boardIds: [],
+          verifications: [],
+          createdAt: at(HOUR),
+          releaseId: 'r2',
+          acceptance: { at: at(HOUR) },
+        },
+      ],
+    } as unknown as DevContourState;
+    const coverage = (accepted: boolean, statuses: string[]) =>
+      coverageOf(
+        {
+          available: true,
+          releaseId: 'r1',
+          coverageComplete: false,
+          releaseAccepted: accepted,
+          issues: [],
+          unconfirmedScenarios: [],
+          deferredScenarios: [],
+          releases: [
+            { id: 'r1', title: 'Текущий' },
+            { id: 'r2', title: 'Принятый' },
+            { id: 'r3', title: 'Потом' },
+          ],
+          features: statuses.map((status, i) => ({ id: `F${i}`, status })),
+        } as unknown as ProductView,
+        at(0),
+        false,
+      )!;
+    const progress = (c: ReturnType<typeof coverage>) =>
+      homeView({
+        state,
+        h: f.h,
+        attention: emptyAttention,
+        revision: 1,
+        now: NOW,
+        slow: { ...homeSlowView({ state, now: NOW, preparation: false }), coverage: c },
+      }).progress!;
+    const stale = progress(coverage(false, ['awaiting-verification', 'in-progress']));
+    assert.deepEqual(
+      stale.releases.map((r) => [r.id, r.done, r.tasks, r.readiness]),
+      [
+        ['r1', 0, 2, 'in-progress'],
+        ['r2', 0, 0, 'done'],
+        ['r3', 0, 0, 'unplanned'],
+      ],
+    );
+    assert.equal(stale.releasesDone, 1);
+    assert.equal(stale.releasesTotal, 3);
+    const accepted = progress(coverage(true, ['accepted', 'accepted']));
+    assert.equal(accepted.releases[0].readiness, 'done');
+    assert.equal(accepted.releasesDone, 2);
+    const fresh = progress(coverage(false, ['unplanned']));
+    assert.equal(fresh.releases[0].readiness, 'unplanned');
   } finally {
     f.cleanup();
   }

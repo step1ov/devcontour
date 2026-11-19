@@ -227,6 +227,11 @@ export interface HomeProgress {
     measured?: false;
   }[];
   releasesTotal: number;
+  /**
+   * Готовых релизов среди всех (не только показанных); у карты продукта
+   * релизы за пределом списка не считаются готовыми.
+   */
+  releasesDone: number;
   /** Откуда релизы: утверждённая постановка или карта продукта (медленный ярус). */
   releasesFrom?: 'preparation' | 'product-map';
   tasks: { total: number; done: number; remaining: number; failed: number; cancelled: number };
@@ -253,7 +258,17 @@ export interface HomeProgress {
         unconfirmed: number;
         deferred: number;
         /** Релизы карты; фичи посчитаны только у текущего (`releaseId`). */
-        releases?: { id: string; title: string; features?: number; done?: number }[];
+        /**
+         * Релизы карты. У текущего (`releaseId`): фичи в объёме, доказанные и
+         * начатые; его приёмка — `accepted` покрытия, а не прежний ChangeSet.
+         */
+        releases?: {
+          id: string;
+          title: string;
+          features?: number;
+          done?: number;
+          started?: number;
+        }[];
         releasesTotal?: number;
         asOf: string;
         href: string;
@@ -345,7 +360,8 @@ export interface HomeGateTrend {
  * отдельно: при них сумма — нижняя граница.
  */
 export interface HomeSpend {
-  days: { start: string; usd: number; calls: number; unknown: number }[];
+  /** `start` — момент начала дня, `date` — его календарная дата (YYYY-MM-DD) на сервере. */
+  days: { start: string; date: string; usd: number; calls: number; unknown: number }[];
   /** Известная оценка до первого дня окна. */
   beforeUsd: number;
   /** Вызовы с неизвестной стоимостью до окна. */
@@ -814,10 +830,13 @@ function progressOf(
   const coverage = ctx.slow?.coverage;
   const mapped =
     !prepared.length && coverage?.available && coverage.releases?.length
-      ? mapReleases(coverage.releases, state)
+      ? mapReleases(coverage.releases, coverage.accepted, state)
       : [];
   return {
     releases: prepared.length ? prepared : mapped,
+    releasesDone: prepared.length
+      ? releases.filter((r) => r.readiness === 'done').length
+      : mapped.filter((r) => r.readiness === 'done').length,
     releasesTotal: prepared.length
       ? releases.length
       : mapped.length
@@ -863,8 +882,11 @@ function progressOf(
  */
 function mapReleases(
   releases: NonNullable<Extract<HomeProgress['coverage'], { available: true }>['releases']>,
+  currentAccepted: boolean,
   state: Readonly<DevContourState>,
 ): HomeProgress['releases'] {
+  // Прежняя приёмка ChangeSet — только для релизов, которые карта не считает:
+  // у текущего приёмку проверяет карта (она устаревает при смене объёма).
   const accepted = new Set(
     state.changeSets.flatMap((c) => (c.acceptance && c.releaseId ? [c.releaseId] : [])),
   );
@@ -884,9 +906,9 @@ function mapReleases(
       tasks: r.features,
       done,
       readiness:
-        accepted.has(r.id) || (r.features > 0 && done === r.features)
+        currentAccepted || (r.features > 0 && done === r.features)
           ? ('done' as const)
-          : done > 0
+          : done > 0 || (r.started ?? 0) > 0
             ? ('in-progress' as const)
             : ('unplanned' as const),
     };
@@ -1103,11 +1125,23 @@ export function gateTrendOf(
 }
 
 /** Полночь дня `at` по часам сервера, `shift` дней спустя. */
+/**
+ * Начало дня `at` + `shift` дней по часам сервера. День сдвигается до
+ * обнуления часов: при переводе часов в полночь (день начинается в 01:00)
+ * каждый день получает своё начало, а не час соседнего.
+ */
 const midnight = (at: number, shift = 0) => {
   const d = new Date(at);
-  d.setHours(0, 0, 0, 0);
+  d.setHours(12, 0, 0, 0);
   d.setDate(d.getDate() + shift);
+  d.setHours(0, 0, 0, 0);
   return d.getTime();
+};
+/** Календарная дата дня по часам сервера: подпись не зависит от пояса браузера. */
+const localDate = (ms: number) => {
+  const d = new Date(ms);
+  const pad = (n: number) => String(n).padStart(2, '0');
+  return `${d.getFullYear()}-${pad(d.getMonth() + 1)}-${pad(d.getDate())}`;
 };
 
 /**
@@ -1125,6 +1159,7 @@ export function spendOf(
   const starts = Array.from({ length: n }, (_, i) => midnight(now, i - n + 1));
   const days = starts.map((start) => ({
     start: new Date(start).toISOString(),
+    date: localDate(start),
     usd: 0,
     calls: 0,
     unknown: 0,
@@ -1230,6 +1265,7 @@ export function coverageOf(
               title: clip(r.title),
               features: scoped.length,
               done: scoped.filter((f) => f.status === 'verified' || f.status === 'accepted').length,
+              started: scoped.filter((f) => f.status !== 'unplanned').length,
             };
           }),
           releasesTotal: view.releases.length,

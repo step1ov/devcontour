@@ -20,8 +20,11 @@ const OUTCOMES = [
 
 const hhmm = (ms: number) =>
   new Date(ms).toLocaleTimeString('ru-RU', { hour: '2-digit', minute: '2-digit' });
-const dayName = (ms: number) =>
-  new Date(ms).toLocaleDateString('ru-RU', { weekday: 'short', day: 'numeric' });
+/** Подпись календарной даты сервера (YYYY-MM-DD) — без пересчёта в пояс браузера. */
+const dayName = (date: string) => {
+  const [y, m, d] = date.split('-').map(Number);
+  return new Date(y, m - 1, d).toLocaleDateString('ru-RU', { weekday: 'short', day: 'numeric' });
+};
 const agents = (n: number) => `${n} ${plural(n, 'агент', 'агента', 'агентов')}`;
 const calls = (n: number) => `${n} ${plural(n, 'вызова', 'вызовов', 'вызовов')}`;
 const usd = (v: number) => '$' + (v >= 100 ? v.toFixed(0) : v.toFixed(2));
@@ -451,7 +454,7 @@ export function SpendChart({ spend, estimate }: { spend: HomeSpend; estimate: st
       : [{ label: 'за день', color: colors[0] }];
   const titles = spend.days.map(
     (d, i) =>
-      `${dayName(Date.parse(d.start))}: ${usd(d.usd)}, вызовов ${d.calls}` +
+      `${dayName(d.date)}: ${usd(d.usd)}, вызовов ${d.calls}` +
       (d.unknown ? `, стоимость неизвестна у ${calls(d.unknown)}` : '') +
       (limit !== undefined ? `; всего к концу дня ${usd(rows[i][0] + d.usd)}` : ''),
   );
@@ -481,7 +484,7 @@ export function SpendChart({ spend, estimate }: { spend: HomeSpend; estimate: st
           <tbody>
             {spend.days.map((d, i) => (
               <tr key={d.start}>
-                <th scope="row">{dayName(Date.parse(d.start))}</th>
+                <th scope="row">{dayName(d.date)}</th>
                 <td>{d.usd.toFixed(2)}</td>
                 <td>{d.calls}</td>
                 <td>{d.unknown}</td>
@@ -507,7 +510,7 @@ export function SpendChart({ spend, estimate }: { spend: HomeSpend; estimate: st
       >
         {spend.days.map((d) => (
           <li key={d.start} className="grid min-w-0">
-            <span className="truncate">{dayName(Date.parse(d.start))}</span>
+            <span className="truncate">{dayName(d.date)}</span>
             {d.unknown > 0 && <span className="text-warning truncate">?{d.unknown}</span>}
           </li>
         ))}
@@ -636,7 +639,8 @@ export function OverallProgress({ progress }: { progress: HomeProgress }) {
                     </span>
                   </span>
                   <span className="text-muted-foreground tabular shrink-0">
-                    {measured ? `${r.done}/${r.tasks} ${unit}` : readinessLabel[r.readiness]}
+                    {measured ? `${r.done}/${r.tasks} ${unit} · ` : ''}
+                    {readinessLabel[r.readiness]}
                   </span>
                 </span>
                 <span

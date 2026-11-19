@@ -305,6 +305,7 @@ test('Charts: overall progress, agent load and hourly attempts render from route
     harness.spend = {
       days: Array.from({ length: 7 }, (_, i) => ({
         start: new Date(Date.parse('2026-11-13T00:00:00') + i * 86_400_000).toISOString(),
+        date: `2026-11-${13 + i}`,
         usd: i === 5 ? 12.5 : i === 6 ? 2.5 : 0,
         calls: i >= 5 ? 4 : 0,
         unknown: i === 6 ? 3 : 0,
@@ -360,14 +361,54 @@ test('Charts: overall progress, agent load and hourly attempts render from route
     '2',
   ]);
   // Стек часа: отказ, прошло, взято — три сегмента.
+  const segments = gateChart
+    .locator('svg g')
+    .nth(10)
+    .locator('rect[fill]:not([fill="transparent"])');
+  await expect(segments).toHaveCount(3);
+  // Отказы — у основания, затем прошедшие и взятые; высоты — по шкале часа (11).
+  const geometry = await segments.evaluateAll((rects) =>
+    rects.map((r) => ({
+      fill: r.getAttribute('fill'),
+      y: Number(r.getAttribute('y')),
+      height: Number(r.getAttribute('height')),
+    })),
+  );
+  expect(geometry.map((g) => g.fill)).toEqual([
+    'var(--status-failed)',
+    'var(--status-done)',
+    'var(--status-waiting)',
+  ]);
+  const scale = (v: number) => (v / 11) * 118 - 1.5;
+  for (const [i, v] of [3, 6, 2].entries()) expect(geometry[i].height).toBeCloseTo(scale(v), 1);
+  expect(geometry[0].y).toBeGreaterThan(geometry[1].y);
+  expect(geometry[1].y).toBeGreaterThan(geometry[2].y);
+  // Час без отказов — без красного сегмента.
   await expect(
-    gateChart.locator('svg g').nth(10).locator('rect[fill]:not([fill="transparent"])'),
-  ).toHaveCount(3);
+    gateChart.locator('svg g').nth(20).locator('rect[fill="var(--status-failed)"]'),
+  ).toHaveCount(0);
   const spendChart = page.getByRole('figure', { name: /Расход по дням/ });
   await expect(spendChart).toContainText('За неделю $15.00, всего $50.00 из предела $100 (50%)');
   await expect(spendChart).toContainText('стоимость неизвестна у 3 вызовов — суммы занижены');
   await expect(spendChart).toContainText('предел $100');
   await expect(spendChart.locator('table tbody tr')).toHaveCount(7);
+  await expect(spendChart.locator('svg')).toBeVisible();
+  // Предел — пунктир на шкале предела (вершина: предел выше суммы).
+  const limitLine = spendChart.locator('svg line[stroke-dasharray]');
+  await expect(limitLine).toHaveCount(1);
+  expect(Number(await limitLine.getAttribute('y1'))).toBeCloseTo(2, 1);
+  // Последний день: раньше 47.50, за день 2.50 — два сегмента стека.
+  const lastDay = spendChart
+    .locator('svg g')
+    .nth(6)
+    .locator('rect[fill]:not([fill="transparent"])');
+  await expect(lastDay).toHaveCount(2);
+  expect(Number(await lastDay.nth(0).getAttribute('height'))).toBeCloseTo(
+    (47.5 / 100) * 118 - 1.5,
+    1,
+  );
+  // Подпись дня — календарная дата сервера, не пересчёт в пояс браузера.
+  await expect(spendChart.locator('table tbody tr').first().locator('th')).toContainText('13');
   await expect(spendChart.locator('table tbody tr').last().locator('td')).toHaveText([
     '2.50',
     '4',
@@ -444,6 +485,21 @@ test('Rings and compact tiles: preparation tiles with rings and a one-line not-a
       },
     ];
     home.progress!.releasesTotal = 2;
+    home.progress!.releasesDone = 0;
+    // Расход выше предела: столбик выше пунктира, сводка — больше 100 %.
+    home.harness!.spend = {
+      days: Array.from({ length: 7 }, (_, i) => ({
+        start: new Date(Date.parse('2026-11-13T00:00:00') + i * 86_400_000).toISOString(),
+        date: `2026-11-${13 + i}`,
+        usd: i === 6 ? 20 : 0,
+        calls: i === 6 ? 2 : 0,
+        unknown: 0,
+      })),
+      beforeUsd: 30,
+      beforeUnknown: 0,
+      limitUsd: 40,
+      asOf: home.generatedAt,
+    };
     await route.fulfill({ json: home });
   });
   await page.setViewportSize({ width: 1440, height: 900 });
@@ -473,6 +529,18 @@ test('Rings and compact tiles: preparation tiles with rings and a one-line not-a
     'aria-valuetext',
     'не начат; фичи этого релиза карта не считает',
   );
+  const spend = page.getByRole('figure', { name: /Расход по дням/ });
+  await expect(spend).toContainText('всего $50.00 из предела $40.00 (125%)');
+  const limitY = Number(await spend.locator('svg line[stroke-dasharray]').getAttribute('y1'));
+  const top = Number(
+    await spend
+      .locator('svg g')
+      .nth(6)
+      .locator('rect[fill]:not([fill="transparent"])')
+      .last()
+      .getAttribute('y'),
+  );
+  expect(top).toBeLessThan(limitY);
   await axeClean(page);
   await page.setViewportSize({ width: 390, height: 844 });
   expect(await noHorizontalScroll(page)).toBe(true);

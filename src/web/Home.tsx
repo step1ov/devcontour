@@ -940,10 +940,10 @@ function SectionTiles({
       keep: tracked,
       ring: !tracked
         ? undefined
-        : releases.length && s.product.state !== 'absent'
+        : releases.length && home.progress && s.product.state !== 'absent'
           ? {
-              done: releases.filter((r) => r.readiness === 'done').length,
-              total: releases.length,
+              done: home.progress.releasesDone,
+              total: home.progress.releasesTotal,
               label: 'Релизов готово',
             }
           : s.product.state !== 'absent'
