@@ -707,8 +707,16 @@ export class AgentService {
       return operation === 'project_context' ? { ...result, operations: agentOperations } : result;
     }
     const h = this.h;
-    if (operation in preparationInputs)
+    if (operation in preparationInputs) {
+      // Решение по вопросу ссылается на операцию изменения контракта этого
+      // workspace: её записи — в хранилище движка, не в подготовке.
+      if (operation === 'preparation_resolve') {
+        const ref = preparationInputs.preparation_resolve.parse(input).refs?.contractChangeId;
+        if (ref && !new ContractChanges(h, this.root ?? '').list().some((op) => op.id === ref))
+          throw new DomainError('Изменение контракта не найдено: ' + ref, 404);
+      }
       return new Preparation(h.store).execute(operation as PreparationOperation, input);
+    }
     if (!readOnly(operation) && h.store.projectionKind !== 'full') attachJournal(h);
     switch (operation) {
       case 'intent_render':

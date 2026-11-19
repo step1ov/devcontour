@@ -2071,7 +2071,9 @@ existing}]`.
   дизайна — на вкладке своего шага, разработки — на вкладке «Разработка»;
   рекомендованный вариант выделен, у вариантов показаны последствия. Ответ —
   вариант (`choice`, текст ответа — его подпись) и/или свой текст: `POST
-/api/preparation/answer {changeId, questionId, choice?, text?}`, действие
+/api/preparation/answer {changeId, questionId, choice?, text?, expectedVersion?}`
+  (`version` вопроса из `preparation_status`; ответ на уточнённую после показа
+  редакцию — 409 `question-stale`), действие
   `answer` карточки `prep-question` (`optionId` — индекс варианта), CLI
   `devcontour question-answer --id Q-… [--option N] [--text …]`. Список —
   `devcontour questions [--section …] [--all]` (только чтение).
@@ -2080,11 +2082,13 @@ existing}]`.
   ведущего (выдержки после маски секретов, выбранный вариант, ссылки,
   удержанные черновики) и число удержанных черновиков. `host.next` — `decide`
   с `decision: question` и кодом `owner-answer` для старейшего ответа (после
-  шагов вопросов исполнителя и решений о задании, до решения о плане); когда
+  шагов вопросов исполнителя, решений о задании и восстановления заданий, до
+  решения о плане, старта заданий и ожиданий; в режиме operator — раньше
+  общего шага оператора); когда
   вся оставшаяся работа плана удержана открытыми вопросами — `wait` с кодом
   `owner-question-pending`. `preparation_resolve` принимает `refs
-{productRevision, boardId, taskIds, contractChangeId, adr}`, а этап решения
-  по умолчанию — этап вопроса.
+{productRevision, boardId, taskIds, contractChangeId, adr}` (названное должно
+  существовать), а этап решения по умолчанию — этап вопроса.
 - **Удержание черновиков.** Черновик из `blocks.taskIds` открытого вопроса
   или отвеченного без действующего решения не выпускается: подсказка плана
   называет его в `plan.questions` вне области ревью, утверждение,

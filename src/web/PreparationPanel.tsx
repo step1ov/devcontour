@@ -309,11 +309,12 @@ function Questions({
   onAnswer,
 }: {
   stage: Stage;
-  questions: PreparationQuestion[];
+  questions: (PreparationQuestion & { version?: string })[];
   busy: boolean;
-  onAnswer: (questionId: string, text: string, choice?: number) => void;
+  onAnswer: (questionId: string, text: string, choice?: number, version?: string) => void;
 }) {
   const [drafts, setDrafts] = useState<Record<string, string>>({});
+  // Выбор привязан к редакции вопроса: уточнение вариантов его сбрасывает.
   const [chosen, setChosen] = useState<Record<string, number>>({});
   const mine = questions.filter((q) => q.stage === stage && q.status !== 'withdrawn');
   const open = mine.filter((q) => q.status === 'open');
@@ -329,7 +330,8 @@ function Questions({
         {mine.map((q) => {
           const choices =
             q.choices ?? q.options.map((label) => ({ label, consequence: undefined }));
-          const picked = chosen[q.id];
+          const pick = q.id + ':' + (q.version ?? '');
+          const picked = chosen[pick];
           const text = (drafts[q.id] ?? '').trim();
           const blocks = q.blocks?.taskIds ?? [];
           const links = q.links?.taskIds ?? [];
@@ -390,7 +392,7 @@ function Questions({
                       className="grid gap-3"
                       onSubmit={(e) => {
                         e.preventDefault();
-                        onAnswer(q.id, text, picked);
+                        onAnswer(q.id, text, picked, q.version);
                       }}
                     >
                       {choices.length > 0 && (
@@ -413,7 +415,7 @@ function Questions({
                                   name={'choice-' + q.id}
                                   className="mt-1"
                                   checked={picked === i}
-                                  onChange={() => setChosen({ ...chosen, [q.id]: i })}
+                                  onChange={() => setChosen({ ...chosen, [pick]: i })}
                                 />
                                 <span className="grid gap-1 break-words">
                                   <span>
@@ -658,7 +660,7 @@ function Decisions({
   decisions,
   questions,
 }: {
-  stage: Exclude<Stage, 'development'>;
+  stage: Stage;
   decisions: PreparationRecord[];
   questions: PreparationQuestion[];
 }) {
@@ -850,13 +852,14 @@ export function PreparationPanel() {
     }
   };
   // Ответ на вопрос владельцу: выбранный вариант и (или) свой текст.
-  const answerQuestion = (questionId: string, text: string, choice?: number) => {
+  const answerQuestion = (questionId: string, text: string, choice?: number, version?: string) => {
     const changeId = view?.enabled ? view.current?.id : undefined;
     if (!changeId) return;
     void run(() =>
       request('preparation/answer', {
         changeId,
         questionId,
+        ...(version ? { expectedVersion: version } : {}),
         ...(text ? { text } : {}),
         ...(choice !== undefined ? { choice } : {}),
       }),
@@ -1248,6 +1251,11 @@ export function PreparationPanel() {
                         questions={c.questions}
                         busy={busy}
                         onAnswer={answerQuestion}
+                      />
+                      <Decisions
+                        stage="development"
+                        decisions={c.decisions}
+                        questions={c.questions}
                       />
                       {/* Принятые доски — история релиза. В общем списке они
                       выглядели параллельными потоками рядом с текущей работой. */}

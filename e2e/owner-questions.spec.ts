@@ -90,8 +90,22 @@ test('Owner question: answered in the product section with the recommended optio
 
     // Вопрос разработки отвечается на вкладке «Разработка».
     await page.goto(`${app.url}/?change=${changeId}&stage=development#questions-development`);
-    await expect(page.locator(`li[data-question="${devQ}"]`)).toContainText(
-      'Какой линтер ставить в репозиторий?',
+    const dev = page.locator(`li[data-question="${devQ}"]`);
+    await expect(dev).toContainText('Какой линтер ставить в репозиторий?');
+    await dev.getByLabel('Ваш ответ').fill('ESLint с конфигурацией проекта');
+    await dev.getByRole('button', { name: 'Ответить' }).click();
+    await expect(dev).toContainText('Отвечено');
+    await expect(dev).toContainText('ESLint с конфигурацией проекта');
+    // Решение ведущего по вопросу разработки видно в том же разделе.
+    await agent('preparation_resolve', {
+      changeId,
+      questionId: devQ,
+      statement: 'Ставим ESLint с конфигурацией проекта',
+      rationale: 'Ответ владельца',
+    });
+    await page.reload();
+    await expect(page.locator('#decisions-development')).toContainText(
+      'Ставим ESLint с конфигурацией проекта',
     );
   } finally {
     await app.close();

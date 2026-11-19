@@ -11,6 +11,34 @@ import type {
   QuestionStage,
 } from './preparation-model.ts';
 import { questionSections } from './preparation-model.ts';
+import { digest } from './task-digest.ts';
+
+/** Учётные данные в URL (`scheme://user:secret@host`) — маска до показа. */
+export const maskUrlCredentials = (text: string) =>
+  text.replace(/\b([a-z][a-z0-9+.-]*:\/\/)[^\s/?#@]+@/gi, '$1[REDACTED]@');
+
+/**
+ * Версия вопроса: всё, что ведущий может уточнить, пока вопрос открыт. Ответ
+ * сверяет её (`expectedVersion`), чтобы вариант по индексу не лёг на другую
+ * редакцию вариантов. У строк без полей разделов — прежняя формула карточки.
+ */
+export function questionVersion(q: PreparationQuestion) {
+  return digest({
+    text: q.text,
+    why: q.why,
+    options: q.options,
+    ...(q.section || q.choices || q.recommended !== undefined || q.links || q.blocks
+      ? {
+          section: sectionOf(q),
+          stage: q.stage,
+          choices: q.choices ?? null,
+          recommended: q.recommended ?? null,
+          links: q.links ?? null,
+          blocks: q.blocks ?? null,
+        }
+      : {}),
+  }).slice(0, 32);
+}
 
 /** Раздел этапа: референсы, концепт и дизайн — раздел дизайна. */
 export function sectionOfStage(stage: QuestionStage): QuestionSection {
@@ -143,6 +171,7 @@ const clip = (text: string, n: number) => {
 export function questionSummary(
   s: Readonly<DevContourState>,
   href: (changeId: string, stage: QuestionStage, anchor: string) => string,
+  redact: (text: string) => string = maskUrlCredentials,
 ): Record<QuestionSection, QuestionSummarySection> {
   const holds = questionHolds(s);
   const sections = Object.fromEntries(
@@ -167,11 +196,11 @@ export function questionSummary(
         changeId: c.id,
         kind: 'question',
         status: open ? 'open' : 'answered',
-        title: clip(q.text, 160),
+        title: clip(redact(q.text), 160),
         since: open ? q.createdAt : q.answer!.at,
         href: href(c.id, q.stage, `questions-${q.stage}`),
         ...(q.recommended !== undefined && choices[q.recommended]
-          ? { recommended: choices[q.recommended].label }
+          ? { recommended: clip(redact(choices[q.recommended].label), 300) }
           : {}),
         blocks,
         ...(q.links ? { links: q.links } : {}),

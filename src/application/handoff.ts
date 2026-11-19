@@ -33,7 +33,13 @@ import { dirname, resolve } from 'node:path';
 import { heldByServer } from '../runner/server-record.ts';
 import { DomainError, type Config, type DevContourState } from '../core/model.ts';
 import type { QuestionSection } from '../core/preparation-model.ts';
-import { answeredPending, choicesOf, questionHolds, sectionOf } from '../core/owner-questions.ts';
+import {
+  answeredPending,
+  choicesOf,
+  maskUrlCredentials,
+  questionHolds,
+  sectionOf,
+} from '../core/owner-questions.ts';
 import type { DevContour } from '../core/service.ts';
 import {
   LeadWorkflow,
@@ -325,7 +331,9 @@ function answeredQuestions(state: State) {
 }
 
 /** `host.questions` по состоянию; маска — до выдержки. */
-function questionsOfHandoff(state: State, redact: Redactor): HandoffQuestions | undefined {
+function questionsOfHandoff(state: State, known: Redactor): HandoffQuestions | undefined {
+  // Секреты конфигурации и учётные данные в URL — как у карточек центра внимания.
+  const redact = (text: string) => maskUrlCredentials(known(text));
   const open: HandoffQuestions['open'] = { product: 0, architecture: 0, design: 0, development: 0 };
   for (const c of state.preparation?.changes ?? [])
     for (const q of c.questions ?? []) if (q.status === 'open') open[sectionOf(q)]++;
@@ -1565,8 +1573,18 @@ function hostNext(ctx: HostContext): HandoffHostNext | undefined {
   // Ответ владельца на вопрос ведущего — ниже вопросов исполнителя и
   // решений о задании, выше решения о плане: удержанные им черновики ждут
   // решения ведущего по ответу.
-  if (step?.decision === 'plan')
-    return liveBlocker(ctx) ?? ownerAnswerStep(ctx) ?? liveJobStep(ctx, step.boardId) ?? step;
+  // Ожидание владельца по удержанным черновикам — тоже о будущем объёме:
+  // блокеры живой работы и задания других досок его опережают.
+  if (step?.decision === 'plan' || step?.code === 'owner-question-pending') {
+    const blocker = liveBlocker(ctx);
+    if (blocker) return blocker;
+    const live = liveJobStep(ctx, step.boardId);
+    if (live && live.action !== 'wait') return live;
+    return ownerAnswerStep(ctx) ?? live ?? step;
+  }
+  // Режим operator: общий шаг оператора не решает ответ владельца, который
+  // ведущий превращает в решение — сначала он.
+  if (step?.code === 'operator') return ownerAnswerStep(ctx) ?? step;
   // Перенос ответа — раньше шагов очереди и ожидания (`rank` больше 0): они
   // выдали бы задачу без ответа. Решения о задании, вопросы и режим
   // оператора — прежде переноса.
@@ -1578,18 +1596,19 @@ function hostNext(ctx: HostContext): HandoffHostNext | undefined {
   // другие ожидания и шаги паузы: снятие паузы до переноса выдало бы задачу
   // без ответа.
   const carry = carryNext(ctx);
-  if (carry && carry.action !== 'wait') return carry;
-  const owner = ownerAnswerStep(ctx);
-  if (owner) return owner;
-  if (
+  const chosen =
     carry &&
-    (!step ||
+    (carry.action !== 'wait' ||
+      !step ||
       rank(step) >= rank(carry) ||
       step.action === 'queue_set' ||
       step.boardId === carry.boardId)
-  )
-    return carry;
-  return step ?? followUpNext(ctx) ?? ownerWaitStep(ctx);
+      ? carry
+      : step;
+  // Ответ владельца — после переноса ответа и шагов восстановления (повтор
+  // задания, пауза, перенос базы), раньше старта задания и ожиданий.
+  if (chosen && chosen.action !== 'wait' && rank(chosen) <= 1) return chosen;
+  return ownerAnswerStep(ctx) ?? chosen ?? followUpNext(ctx) ?? ownerWaitStep(ctx);
 }
 
 /**

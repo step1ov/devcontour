@@ -9,7 +9,12 @@ import { startWorkspace, requirePreparation, preparationStore } from './runner/s
 import { PreparationAgent, WorkspaceAgent } from './application/preparation-agent.ts';
 import { Preparation } from './core/preparation.ts';
 import { questionSections } from './core/preparation-model.ts';
-import { answeredPending, choicesOf, sectionOf } from './core/owner-questions.ts';
+import {
+  answeredPending,
+  choicesOf,
+  maskUrlCredentials,
+  sectionOf,
+} from './core/owner-questions.ts';
 import { preparationInputs } from './core/preparation-model.ts';
 import { proveScenario } from './runner/scenario-proof.ts';
 import { IntentService } from './runner/intent.ts';
@@ -463,7 +468,8 @@ async function main() {
             ...(q.answer ? { answer: q.answer } : {}),
           })),
       );
-      console.log(JSON.stringify({ questions: rows }, null, 2));
+      // Учётные данные в URL — под маской, как у карточек центра внимания.
+      console.log(maskUrlCredentials(JSON.stringify({ questions: rows }, null, 2)));
     } finally {
       store.close();
     }

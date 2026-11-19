@@ -88,7 +88,14 @@ import {
   type AttentionSubjectKind,
   attentionSections,
 } from '../core/attention-model.ts';
-import { answeredPending, choicesOf, questionHolds, sectionOf } from '../core/owner-questions.ts';
+import {
+  answeredPending,
+  choicesOf,
+  maskUrlCredentials,
+  questionHolds,
+  questionVersion,
+  sectionOf,
+} from '../core/owner-questions.ts';
 import type { PreparationQuestion } from '../core/preparation-model.ts';
 import {
   leadPresence,
@@ -183,25 +190,6 @@ const stageTitles: Record<(typeof stages)[number], string> = {
 };
 const changesOf = (ctx: AttentionContext): ProductChange[] => ctx.state.preparation?.changes ?? [];
 
-/** Версия вопроса: всё, что ведущий может уточнить, пока вопрос открыт. */
-const questionVersion = (q: PreparationQuestion) =>
-  d({
-    text: q.text,
-    why: q.why,
-    options: q.options,
-    // Поля разделов — только у новых строк: версия прежних вопросов не меняется.
-    ...(q.section || q.choices || q.recommended !== undefined || q.links || q.blocks
-      ? {
-          section: sectionOf(q),
-          stage: q.stage,
-          choices: q.choices ?? null,
-          recommended: q.recommended ?? null,
-          links: q.links ?? null,
-          blocks: q.blocks ?? null,
-        }
-      : {}),
-  });
-
 /** Ссылка вопроса: вкладка его этапа и блок вопросов. */
 const questionHref = (c: ProductChange, q: PreparationQuestion) =>
   hrefs.preparation(c.id, q.stage, `questions-${q.stage}`);
@@ -268,7 +256,12 @@ const prepQuestion: AttentionSourceRule = {
               ctx,
               (q.blocks?.taskIds ?? []).filter((id) => holds.get(id)?.questionId === q.id),
             ),
-            basis: { changeId: c.id, questionId: q.id, options: choices.map((x) => x.label) },
+            basis: {
+              changeId: c.id,
+              questionId: q.id,
+              options: choices.map((x) => x.label),
+              version: questionVersion(q),
+            },
           };
         }),
     );
@@ -1645,6 +1638,9 @@ const planSource: AttentionSourceRule = {
           stale: why.stale,
           blocked: why.blocked.map((b) => b.id),
           unverified: why.unverified,
+          // Удержание вопросом меняет область утверждения: снятие вопроса —
+          // новая версия карточки, а не утверждение расширенной области по старой.
+          ...(asked.size ? { questions: [...asked].sort() } : {}),
         }),
         source: 'plan' as const,
         since: found.revision.createdAt,
@@ -1672,7 +1668,10 @@ const planSource: AttentionSourceRule = {
           reason:
             `Черновиков: ${why.drafts.length}` +
             (why.stale.length ? `, утверждённых при другой политике: ${why.stale.length}` : '') +
-            (blocked.length ? `. Не пройдут утверждение: ${blocked.join('; ')}` : ''),
+            (blocked.length ? `. Не пройдут утверждение: ${blocked.join('; ')}` : '') +
+            (asked.size
+              ? `. Ждут решения владельца и не утверждаются: ${[...asked].join(', ')}`
+              : ''),
           actions: [{ id: 'approve', kind: 'domain', label: 'Утвердить план', input: 'confirm' }],
           basis: {
             boardId: board.id,
@@ -2246,7 +2245,12 @@ const rule = (
 
 const actionHandlers: Record<string, (a: ActContext) => ActOutcome> = {
   'prep-question/answer': ({ ctx, item, input }) => {
-    const b = basisOf<{ changeId: string; questionId: string; options: string[] }>(item);
+    const b = basisOf<{
+      changeId: string;
+      questionId: string;
+      options: string[];
+      version: string;
+    }>(item);
     const choice =
       input.optionId !== undefined && /^\d+$/.test(input.optionId)
         ? Number(input.optionId)
@@ -2259,6 +2263,9 @@ const actionHandlers: Record<string, (a: ActContext) => ActOutcome> = {
     new Preparation(ctx.store, 'operator').answer({
       changeId: b.changeId,
       questionId: b.questionId,
+      // Ответ ложится только на показанную редакцию вопроса: уточнение между
+      // проверкой карточки и записью отклоняет сама запись.
+      expectedVersion: b.version,
       ...(text ? { text } : {}),
       ...(choice !== undefined ? { choice } : {}),
     });
@@ -2828,8 +2835,7 @@ function boardsOf(state: Readonly<DevContourState>) {
 }
 
 /** Учётные данные в URL (`scheme://user:secret@host`) — маска до показа. */
-export const maskUrlCredentials = (text: string) =>
-  text.replace(/\b([a-z][a-z0-9+.-]*:\/\/)[^\s/?#@]+@/gi, '$1[REDACTED]@');
+export { maskUrlCredentials };
 
 /** Полный вопрос и варианты действия — под маской и в пределах договора. */
 function boundedAction(
@@ -3099,7 +3105,7 @@ export class AttentionService {
    * вопросы и причины пишет ведущий агент, ошибки Git повторяют адрес
    * репозитория), известные секреты конфигурации — маской пакета передачи.
    */
-  private redactor(): (text: string) => string {
+  redactor(): (text: string) => string {
     if (!this.h) return maskUrlCredentials;
     const known = handoffRedactor(this.h.config, executionOf(this.h).engine.policy);
     return (text) => maskUrlCredentials(known(text));

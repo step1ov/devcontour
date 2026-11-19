@@ -1,7 +1,7 @@
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
 import { fixture, input } from './helpers.ts';
-import { approvePreparation } from './preparation-fixture.ts';
+import { approvePreparation, product } from './preparation-fixture.ts';
 import { byKey, preparationFixture } from './attention-fixture.ts';
 import { Preparation } from '../src/core/preparation.ts';
 import { DomainError } from '../src/core/model.ts';
@@ -470,6 +470,190 @@ test('Сводка вопросов по разделам: счёт, удерж�
     } finally {
       await app.close();
     }
+  } finally {
+    f.cleanup();
+  }
+});
+
+test('Ответ по индексу варианта ложится только на показанную редакцию вопроса', async () => {
+  const f = preparationFixture();
+  try {
+    f.p.execute('preparation_question', {
+      changeId: f.changeId,
+      add: [
+        { text: 'Публичный профиль?', choices: [{ label: 'Закрытый' }, { label: 'Открытый' }] },
+        { text: 'Прежний вопрос с options', options: ['Да', 'Нет'] },
+      ],
+    });
+    const status = f.p.status(f.changeId) as unknown as {
+      current: { questions: { id: string; version: string }[] };
+    };
+    const [shown, legacy] = status.current.questions;
+    // Уточнение меняет порядок вариантов: прежний индекс 0 значил бы другое.
+    f.p.execute('preparation_question', {
+      changeId: f.changeId,
+      revise: [{ id: shown.id, choices: [{ label: 'Открытый' }, { label: 'Закрытый' }] }],
+    });
+    const operator = new Preparation(f.store, 'operator');
+    assert.throws(
+      () =>
+        operator.answer({
+          changeId: f.changeId,
+          questionId: shown.id,
+          choice: 0,
+          expectedVersion: shown.version,
+        }),
+      (e: unknown) => e instanceof DomainError && e.details?.code === 'question-stale',
+    );
+    assert.equal(f.store.read().preparation!.changes[0].questions[0].status, 'open');
+    // Ответ одним вариантом, без текста; у прежней строки — вариант options.
+    operator.answer({
+      changeId: f.changeId,
+      questionId: legacy.id,
+      choice: 1,
+      expectedVersion: legacy.version,
+    });
+    const saved = f.store.read().preparation!.changes[0].questions[1];
+    assert.deepEqual(saved.answer && [saved.answer.choice, saved.answer.text], [1, 'Нет']);
+
+    // Карточка: уточнение между проверкой и записью отклоняет сама запись.
+    const key = `prep:q:${f.changeId}:${shown.id}`;
+    const card = byKey((await new AttentionService(f.store, undefined).active()).items, key)!;
+    const racing = new AttentionService(f.store, undefined, {
+      afterCheck: (a) => {
+        f.p.execute('preparation_question', {
+          changeId: f.changeId,
+          revise: [{ id: shown.id, choices: [{ label: 'Закрытый' }, { label: 'Открытый' }] }],
+        });
+        return a;
+      },
+    });
+    await assert.rejects(
+      racing.act({
+        sourceKey: key,
+        occurrenceId: card.occurrenceId,
+        expectedVersion: card.sourceVersion,
+        action: 'answer',
+        input: { optionId: '0' },
+      }),
+      /уточнён после показа/,
+    );
+    assert.equal(f.store.read().preparation!.changes[0].questions[0].status, 'open');
+  } finally {
+    f.cleanup();
+  }
+});
+
+test('Отправка этапа: держит только открытый вопрос своего этапа, не вопрос разработки', () => {
+  const f = preparationFixture();
+  try {
+    f.p.execute('preparation_product', {
+      changeId: f.changeId,
+      expectedDigest: null,
+      reason: 'Первичная постановка',
+      content: product,
+    });
+    const digest = f.store.read().preparation!.changes[0].product.at(-1)!.digest;
+    const submit = () =>
+      f.p.execute('preparation_submit', {
+        changeId: f.changeId,
+        stage: 'product',
+        expectedDigest: digest,
+      });
+    const asked = f.p.execute('preparation_question', {
+      changeId: f.changeId,
+      add: [{ text: 'Вопрос продукта', section: 'product' }],
+    }) as unknown as { questions: { id: string }[] };
+    assert.throws(submit, /открытые вопросы этапа: 1/);
+    f.p.execute('preparation_question', {
+      changeId: f.changeId,
+      withdraw: [asked.questions[0].id],
+      add: [{ text: 'Вопрос разработки', section: 'development' }],
+    });
+    submit();
+    assert.equal(f.store.read().preparation!.changes[0].product.at(-1)!.status, 'in-review');
+  } finally {
+    f.cleanup();
+  }
+});
+
+test('Удержание: карточка плана оператора меняет версию при снятии вопроса; режим operator называет owner-answer', async () => {
+  const f = heldFixture();
+  try {
+    f.h.config.approvalMode = 'operator';
+    const qid = ask(f.p, f.changeId, [f.held.id]);
+    const key = `plan:${f.board.id}`;
+    const before = byKey((await new AttentionService(f.store, f.h).active()).items, key)!;
+    assert.match(before.reason, /Ждут решения владельца и не утверждаются/);
+    f.p.execute('preparation_question', { changeId: f.changeId, withdraw: [qid] });
+    const after = byKey((await new AttentionService(f.store, f.h).active()).items, key)!;
+    assert.notEqual(after.sourceVersion, before.sourceVersion, 'область утверждения изменилась');
+    await assert.rejects(
+      new AttentionService(f.store, f.h).act({
+        sourceKey: key,
+        occurrenceId: before.occurrenceId,
+        expectedVersion: before.sourceVersion,
+        action: 'approve',
+      }),
+      /изменилась/,
+    );
+    assert.equal(f.store.read().tasks.find((t) => t.id === f.held.id)!.status, 'draft');
+    // Ответ владельца в режиме operator — шаг ведущего, не общий шаг оператора.
+    f.h.approve(f.board.id, [f.free.id]);
+    const other = f.h.addTask(f.board.id, {
+      ...input('Ещё удержанный'),
+      featureId: 'member-block',
+    });
+    const second = ask(f.p, f.changeId, [other.id]);
+    answer(f, f.changeId, second);
+    const next = devcontourHandoff(f.h).host.next;
+    assert.equal(next?.code, 'owner-answer');
+    assert.equal(next?.question?.id, second);
+  } finally {
+    f.cleanup();
+  }
+});
+
+test('Удержание: повтор workflow_start действующего задания возвращает его', () => {
+  const f = heldFixture();
+  try {
+    const workflow = new LeadWorkflow(f.h);
+    const job = workflow.start({ kind: 'board', id: f.board.id, authorRuntime: 'codex' });
+    const qid = ask(f.p, f.changeId, [f.held.id]);
+    const again = workflow.start({ kind: 'board', id: f.board.id, authorRuntime: 'codex' });
+    assert.equal(again.key, job.key);
+    assert.ok(qid);
+  } finally {
+    f.cleanup();
+  }
+});
+
+test('Вопросы владельцу: учётные данные в URL под маской в сводке и пакете передачи', () => {
+  const f = heldFixture();
+  try {
+    const leaked = 'https://alice:synthetic-pass@example.invalid/repo.git';
+    const qid = (
+      f.p.execute('preparation_question', {
+        changeId: f.changeId,
+        add: [
+          {
+            text: `Можно ли зеркалить ${leaked}?`,
+            choices: [{ label: `Да, ${leaked}` }, { label: 'Нет' }],
+            recommended: 0,
+          },
+        ],
+      }) as unknown as { questions: { id: string }[] }
+    ).questions[0].id;
+    const summary = JSON.stringify(questionSummary(f.store.read(), hrefs.preparation));
+    assert.doesNotMatch(summary, /synthetic-pass/);
+    new Preparation(f.store, 'operator').answer({
+      changeId: f.changeId,
+      questionId: qid,
+      choice: 0,
+    });
+    const host = JSON.stringify(devcontourHandoff(f.h).host);
+    assert.doesNotMatch(host, /synthetic-pass/);
+    assert.match(host, /\[REDACTED\]@example\.invalid/);
   } finally {
     f.cleanup();
   }

@@ -510,7 +510,17 @@ export class LeadWorkflow {
     // Задание доски с неутверждённым планом отправит на ревью весь план, а
     // черновик, который держит вопрос владельцу, ревью не выпустит: отказ
     // 409 QUESTION_PENDING до регистрации задания.
-    if (input.kind === 'board') {
+    // Повтор для действующего задания возвращает его (идемпотентность
+    // очереди): удержание касается только регистрации нового задания.
+    const live = [undefined, ...repositories(this.h.config).map((r) => r.id)]
+      .flatMap((owner) => this.list(owner))
+      .some(
+        (j) =>
+          j.kind === 'board' &&
+          j.id === input.id &&
+          (j.status === 'queued' || j.status === 'running'),
+      );
+    if (input.kind === 'board' && !live) {
       const s = this.h.store.read();
       const revision = s.boards.find((b) => b.id === input.id)?.revisions.at(-1);
       if (revision && revision.status !== 'accepted')

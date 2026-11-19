@@ -20,7 +20,7 @@ import {
   type C4Diagram,
 } from './preparation-model.ts';
 import { slugify } from './slug.ts';
-import { choicesOf, placeQuestion, sectionOf } from './owner-questions.ts';
+import { choicesOf, placeQuestion, questionVersion, sectionOf } from './owner-questions.ts';
 const hash = (value: unknown) =>
   createHash('sha256')
     .update(
@@ -698,6 +698,21 @@ export function validatePreparation(s: DevContourState, previous?: DevContourSta
     (p.activeChangeId && !p.changes.some((c) => c.id === p.activeChangeId))
   )
     throw new DomainError('Некорректный реестр продуктовых изменений');
+  // Источник вопроса (origin.ref) уникален во всём workspace, как при добавлении.
+  const origins = p.changes.flatMap((c) =>
+    (c.questions ?? []).flatMap((q) => (q.origin?.ref ? [q.origin.kind + ':' + q.origin.ref] : [])),
+  );
+  if (new Set(origins).size !== origins.length)
+    throw new DomainError('Повтор источника вопроса (origin.ref) в workspace', 409);
+  for (const c of s.preparation.changes) {
+    const old = previous?.preparation?.changes.find((o) => o.id === c.id);
+    // Новый или изменённый открытый вопрос (и пришедший импортом) ссылается
+    // на существующее и держит только черновики; решённые — как записаны.
+    for (const q of c.questions ?? []) {
+      const before = old?.questions?.find((x) => x.id === q.id);
+      if (q.status === 'open' && (!before || hash(before) !== hash(q))) assertQuestionRefs(s, q);
+    }
+  }
   for (const c of p.changes) {
     validateJournal(c);
     validateQuick(
@@ -1048,7 +1063,8 @@ export class Preparation {
             setup: c.setup?.at(-1),
             expanded: c.expanded,
             activity: [...(c.activity ?? [])].reverse().slice(0, 40),
-            questions: c.questions ?? [],
+            // `version` — редакция вопроса для ответа (`expectedVersion`).
+            questions: (c.questions ?? []).map((q) => ({ ...q, version: questionVersion(q) })),
             decisions: [...(c.decisions ?? [])].reverse(),
             releases,
             features,
@@ -1448,6 +1464,11 @@ export class Preparation {
                 if (q.status === 'open')
                   throw new DomainError('Сначала дождитесь ответа пользователя на вопрос', 409);
               }
+              if (
+                v.refs?.productRevision !== undefined &&
+                !c.product.some((r) => r.number === v.refs!.productRevision)
+              )
+                throw new DomainError('Редакции постановки нет: ' + v.refs.productRevision, 404);
               if (v.refs?.boardId && !s.boards.some((b) => b.id === v.refs!.boardId))
                 throw new DomainError('Доска не найдена: ' + v.refs.boardId, 404);
               const missing = (v.refs?.taskIds ?? []).filter(
@@ -1498,6 +1519,15 @@ export class Preparation {
         q = c.questions.find((item) => item.id === v.questionId);
       if (!q) throw new DomainError('Вопрос не найден', 404);
       if (q.status !== 'open') throw new DomainError('Вопрос уже закрыт', 409);
+      if (v.expectedVersion !== undefined && v.expectedVersion !== questionVersion(q))
+        throw new DomainError(
+          'Вопрос уточнён после показа: перечитайте его и ответьте заново',
+          409,
+          {
+            code: 'question-stale',
+            version: questionVersion(q),
+          },
+        );
       const choices = choicesOf(q);
       if (v.choice !== undefined && v.choice >= choices.length)
         throw new DomainError('Такого варианта у вопроса нет', 400);

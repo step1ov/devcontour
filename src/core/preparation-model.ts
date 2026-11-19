@@ -542,6 +542,12 @@ export const preparationAnswer = z
     changeId: id,
     questionId: id,
     text: z.string().trim().min(1).max(3000).optional(),
+    // Version of the question the owner saw (`version` in preparation_status):
+    // a revised question refuses the answer instead of mapping the index anew.
+    expectedVersion: z
+      .string()
+      .regex(/^[a-f0-9]{32}$/)
+      .optional(),
     // Index of the chosen option; the text then may be left out.
     choice: z
       .number()

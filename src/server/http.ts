@@ -469,7 +469,11 @@ export async function serve(
             store.snapshot(() => ({
               revision: store.revision(),
               generatedAt: new Date().toISOString(),
-              sections: questionSummary(store.read(), hrefs.preparation),
+              sections: questionSummary(
+                store.read(),
+                hrefs.preparation,
+                attentionOf(store).redactor(),
+              ),
             })),
           );
           return;
