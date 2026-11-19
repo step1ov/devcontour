@@ -893,7 +893,7 @@ test('F84: a contract change that repinned the context invalidates the jobs of e
     assert.notEqual(ctx.digest(), before, 'the operation repinned the context');
     assert.ok(done.config?.after);
     assert.ok(!done.boards.includes(other.id));
-    assert.ok(done.staleBefore?.includes(oldJob.key), 'stale before the operation');
+    assert.ok(s.changes().get(id).staleBefore?.includes(oldJob.key), 'stale before the operation');
     // The completion record: the entries board job and its ChangeSet job,
     // not the job stale before it, not the job started after the repin.
     assert.ok(done.invalidated?.boards.some((j) => j.key === otherJob.key));
@@ -982,4 +982,63 @@ test('F84: invalidates — a job started after the operation, or stale at its st
   );
   assert.equal(invalidates(op, ['B-1'], { ...live, key: 'K-old' }), false, 'stale at its start');
   assert.equal(invalidates({ ...op, status: 'failed' as const }, ['B-1'], live), false);
+});
+
+test('F84 r2: staleBefore keeps a closed stale job whose input returned, stays out of the view; the newest live job of a board is the stale one; a continuation inherits the repin', async () => {
+  const s = await stage();
+  try {
+    const lead = new LeadWorkflow(s.h);
+    const other = s.h.createBoard('Reverted');
+    s.h.addTask(other.id, input('Reverted task'));
+    s.h.approve(other.id);
+    const job = lead.start({ kind: 'board', id: other.id, authorRuntime: 'codex' });
+    const describe = (text: string) =>
+      s.store.change('fixture.edit', (st) => {
+        st.boards.find((b) => b.id === other.id)!.description = text;
+      });
+    const original = s.store.read().boards.find((b) => b.id === other.id)!.description;
+    describe('Changed');
+    assert.equal(lead.claim(job.key, job.owner), undefined, 'the queue closes it stale');
+    describe(original);
+    // Two live jobs of the catalog board: the newer one is the stale one
+    // whichever the storage order.
+    const a = lead.start({ kind: 'board', id: s.board.id, authorRuntime: 'codex' });
+    s.store.change('fixture.edit', (st) => {
+      st.boards.find((x) => x.id === s.board.id)!.description = 'Second input';
+    });
+    const b = lead.start({ kind: 'board', id: s.board.id, authorRuntime: 'claude' });
+    assert.notEqual(a.key, b.key);
+    const started = await s.changes().start(s.proposal, 'codex');
+    const op = (started as { operation: ContractChange }).operation;
+    assert.ok(s.changes().get(op.id).staleBefore?.includes(job.key));
+    assert.equal(
+      (s.changes().view(s.changes().get(op.id)) as Record<string, unknown>).staleBefore,
+      undefined,
+    );
+    const newest = b;
+    void a;
+    const done = await s.changes().advance(op.id);
+    assert.equal(done.status, 'completed', done.error);
+    assert.equal(lead.staleBoards().get(s.board.id)?.key, newest.key);
+    assert.ok(!done.invalidated?.boards.some((j) => j.key === job.key), 'closed before the start');
+    assert.ok(done.invalidated?.boards.some((j) => j.key === newest.key));
+  } finally {
+    await s.remove();
+  }
+  const op = {
+    status: 'completed' as const,
+    startedAt: '2026-01-01T10:00:00.000Z',
+    finishedAt: '2026-01-01T10:05:00.000Z',
+    boards: [],
+  };
+  const live = { key: 'K-1', startedAt: '2026-01-01T09:00:00.000Z' };
+  assert.equal(
+    invalidates({ ...op, inherited: { repinned: true, boards: [] } }, ['B-9'], live),
+    true,
+  );
+  assert.equal(
+    invalidates({ ...op, inherited: { repinned: false, boards: ['B-9'] } }, ['B-9'], live),
+    true,
+  );
+  assert.equal(invalidates(op, ['B-9'], live), false);
 });

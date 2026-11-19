@@ -179,6 +179,13 @@ export type ContractChange = {
    */
   staleBefore?: string[];
   /**
+   * Действие прежних редакций той же операции (`previous`, F84):
+   * перезакрепила ли контекст какая-нибудь из них и какие доски
+   * перепривязала. Продолжение относит к себе и устаревание от них:
+   * прежняя редакция заменена (`superseded`) и сама его не называет.
+   */
+  inherited?: { repinned: boolean; boards: string[] };
+  /**
    * Задания ведущего, которые операция сделала устаревшими (F84),
    * записанные в транзакции её завершения: задания досок и ChangeSet,
    * начатые до её окончания, вход которых сменила её перепривязка или
@@ -330,14 +337,15 @@ export const openCorrections = (op: Pick<ContractChange, 'status' | 'correctionD
 export function invalidates(
   op: Pick<
     ContractChange,
-    'status' | 'startedAt' | 'finishedAt' | 'boards' | 'config' | 'staleBefore'
+    'status' | 'startedAt' | 'finishedAt' | 'boards' | 'config' | 'staleBefore' | 'inherited'
   >,
   boardIds: readonly string[],
   job: { key?: string; startedAt: string },
 ) {
   if (op.status !== 'completed' || !op.finishedAt || job.startedAt > op.finishedAt) return false;
   if (job.key && op.staleBefore?.includes(job.key)) return false;
-  return !!op.config?.after || boardIds.some((b) => op.boards.includes(b));
+  if (op.config?.after || op.inherited?.repinned) return true;
+  return boardIds.some((b) => op.boards.includes(b) || !!op.inherited?.boards.includes(b));
 }
 
 /**
@@ -441,9 +449,12 @@ export class ContractChanges {
   }
   /** Внешнее представление: без token и lease. */
   view(op: ContractChange): ContractChangeView {
-    const { token, leaseUntil, ...rest } = op;
+    // `staleBefore` — внутренний учёт (F84): список растёт с числом
+    // устаревших заданий workspace и наружу не идёт.
+    const { token, leaseUntil, staleBefore, ...rest } = op;
     void token;
     void leaseUntil;
+    void staleBefore;
     const mapping = this.reviewsOf(op)
       .filter((a) => a.merged?.length || a.demoted?.length)
       .map((a) => ({
@@ -521,14 +532,29 @@ export class ContractChanges {
     return { boards, changesets };
   }
 
-  /** Задания ведущего с устаревшим входом к началу операции (`staleBefore`). */
+  /**
+   * Задания ведущего с устаревшим входом к началу операции (`staleBefore`):
+   * последнее задание каждой доски и каждого набора, если оно уже закрыто
+   * `stale` (каким бы ни был вход сейчас: вход мог вернуться к прежнему), и
+   * действующее по прежнему входу.
+   */
   private staleAtStart() {
     const s = this.h.store.read();
     const lead = new LeadWorkflow(this.h);
-    // И уже закрытые `stale` последние задания: их закрыла не эта операция.
+    const latest = new Map<string, { key: string; status: string; startedAt: string }>();
+    for (const owner of [undefined, ...repositories(this.h.config).map((r) => r.id)])
+      for (const job of lead.list(owner)) {
+        const id = `${job.kind}:${job.id}`;
+        const seen = latest.get(id);
+        if (!seen || job.startedAt > seen.startedAt) latest.set(id, job);
+      }
+    const closed = [...latest.values()].filter((j) => j.status === 'stale').map((j) => j.key);
     return [
-      ...lead.invalidated(undefined, s, () => true).map((j) => j.key),
-      ...lead.invalidatedChangesets(s, () => true).map((j) => j.key),
+      ...new Set([
+        ...closed,
+        ...lead.invalidated(undefined, s).map((j) => j.key),
+        ...lead.invalidatedChangesets(s).map((j) => j.key),
+      ]),
     ];
   }
 
@@ -1033,6 +1059,11 @@ export class ContractChanges {
         corrections: [],
         // Продолжение той же операции: устаревшее к началу первой редакции.
         ...(current.staleBefore ? { staleBefore: current.staleBefore } : {}),
+        // И действие прежних редакций: их перепривязка и перезакрепление.
+        inherited: {
+          repinned: !!current.config?.after || !!current.inherited?.repinned,
+          boards: [...new Set([...(current.inherited?.boards ?? []), ...current.boards])],
+        },
         history: [],
         previous: current.id,
         ...((include ?? current.include)?.length ? { include: include ?? current.include } : {}),

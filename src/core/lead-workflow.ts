@@ -409,6 +409,7 @@ export class LeadWorkflow {
    */
   staleBoards(s: DevContourState = this.h.store.read()) {
     const stale = new Map<string, { key: string; reason: string; hint: string }>();
+    const starts = new Map<string, string>();
     const fresh = new Set<string>();
     const inputs = new Map<string, { digest: string; owner?: string } | undefined>();
     const bound = (id: string) => {
@@ -427,13 +428,17 @@ export class LeadWorkflow {
         const input = bound(job.id);
         if (!input) continue;
         if (input.digest === job.inputDigest && input.owner === job.owner) fresh.add(job.id);
-        else
+        // Из нескольких действующих заданий доски — последнее по старту, а
+        // не по порядку хранения (F84): по нему сверяется `invalidated`.
+        else if (!stale.has(job.id) || job.startedAt > (starts.get(job.id) ?? '')) {
+          starts.set(job.id, job.startedAt);
           stale.set(job.id, {
             key: job.key,
             reason:
               'Задание доски начато по прежнему входу: после него изменились политика исполнения (роли, ревьюеры, gates), постановка или контракт',
             hint: `Начните новое задание доски ${job.id} (workflow_start, kind board); прежнее закроется как stale, а план при другой политике утверждает review-plan`,
           });
+        }
       }
     for (const id of fresh) stale.delete(id);
     return stale;
