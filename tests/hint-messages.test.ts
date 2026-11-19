@@ -721,8 +721,12 @@ test('Подсказки шага: новая конфигурация setup п�
  * workflow_close); прежние образцы байтово прежние.
  * Намеренное изменение (вопросы владельцу): новые коды owner-answer и owner-question-pending
  * и образец plan-unapproved с plan.questions (вопросы владельцу); тексты прежних образцов байтово прежние.
+ * Сборка 0.4.0-alpha.51: образцы F82, F84, F86 и вопросов владельцу вместе
+ * (новые коды contract-change-required, changeset-restart, owner-answer,
+ * owner-question-pending, образцы closable и plan.questions); тексты прежних
+ * образцов байтово прежние.
  */
-const ENGLISH_SAMPLES_SHA256 = 'ffdccb601de4fcd1f5f1f4b88c42da91e75ba4ffa6b6046d831f7a7cb8cc172a';
+const ENGLISH_SAMPLES_SHA256 = '24e67e66b80e8edac26c874cbbee20245b339500fc0ce515d1d48f6031f16aa8';
 
 test('Подсказки шага: английские тексты образцов закреплены', () => {
   assert.equal(

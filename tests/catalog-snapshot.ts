@@ -257,5 +257,9 @@
 // preparation_resolve и session_handoff называют разделы, удержание
 // черновиков (QUESTION_PENDING), host.questions и шаги owner-answer и
 // owner-question-pending; прочие операции байтово прежние.
-export const CATALOG_DIGEST = 'b6ef4f820432baedcfcf0cc1f86eb2d1d51ac1bd4d480c8dc3ab0c21767abf42';
+// Сборка 0.4.0-alpha.51 объединяет изменения каталога F82, F84, F86 и
+// вопросов владельцу по разделам (описание session_handoff называет и
+// host.parked, и host.questions); главная панели (/api/home) и простой
+// сервера (F83) каталог не меняют.
+export const CATALOG_DIGEST = '4f13c831b2791fa3842047c2ac1fefd1bfd0af6f64dbffeefca160c010ff617e';
 export const SNAPSHOT_VERSION = '0.4.0-alpha.7';
