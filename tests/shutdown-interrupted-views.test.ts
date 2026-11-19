@@ -137,6 +137,36 @@ test('F62: пакет передачи — счёт отброшенных пр�
   }
 });
 
+test('F62: десять прерываний новее настоящего провала не вытесняют его из пакета передачи', async () => {
+  const f = fixture();
+  try {
+    const b = f.h.createBoard('Board');
+    f.h.addTask(b.id, input('Failing task'));
+    f.h.addTask(b.id, input('Interrupted task'));
+    f.h.approve(b.id);
+    f.h.pause(false);
+    const first = f.h.claim('test')!;
+    f.h.fail(first.id, first.token, 'gate failed', false, 'gate');
+    // Прерванная попытка не засчитана: та же задача выдаётся снова.
+    for (let i = 0; i < 10; i++) {
+      await new Promise((resolve) => setTimeout(resolve, 3));
+      const run = f.h.claim('test')!;
+      assert.ok(run, 'задача снова выдаётся после прерывания');
+      interrupt(f, run);
+    }
+    const pack = devcontourHandoff(f.h).pack;
+    assert.deepEqual(
+      pack.failures.map((x) => x.runId),
+      [first.id],
+      'настоящий провал в списке',
+    );
+    assert.equal(pack.truncated.failures, 0);
+    assert.equal(pack.interruptions, 10);
+  } finally {
+    f.cleanup();
+  }
+});
+
 test('F62: история внимания — настоящий сбой, затем прерывание и принятие: в истории настоящий сбой', () => {
   const f = fixture();
   try {

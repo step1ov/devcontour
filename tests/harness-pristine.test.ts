@@ -21,9 +21,15 @@ import { policyFromConfig } from '../src/harness/policy.ts';
 type Fixture = ReturnType<typeof fixture>;
 
 /** Завершённый вызов модели задачи с известной стоимостью (запись DevContour). */
-const call = (id: string, taskId: string, costUsd: number): UsageRecord => ({
+const call = (
+  id: string,
+  taskId: string | undefined,
+  costUsd: number,
+  runId?: string,
+): UsageRecord => ({
   id,
-  taskId,
+  ...(taskId ? { taskId } : {}),
+  ...(runId ? { runId } : {}),
   stage: 'implementation',
   runtime: 'codex',
   model: 'EXAMPLE_MODEL',
@@ -90,8 +96,14 @@ function idleBoard(history: number) {
     for (let i = 0; i < history; i++) s.runs.push(pastRun('R-old-' + i, tasks[i % 2], digest));
   });
   f.store.atomic(() => {
+    // Нечётные записи — прежней формы, без задачи: движок узнаёт её по попытке.
     for (let i = 0; i < history; i++)
-      f.store.saveLocal('usage', undefined, 'U-old-' + i, call('U-old-' + i, tasks[i % 2], 0));
+      f.store.saveLocal(
+        'usage',
+        undefined,
+        'U-old-' + i,
+        i % 2 ? call('U-old-' + i, undefined, 0, 'R-old-' + i) : call('U-old-' + i, tasks[0], 0),
+      );
     // Расход каждой задачи — ровно предел: обе удержаны бюджетом.
     for (const id of tasks)
       f.store.saveLocal('usage', undefined, 'U-' + id, call('U-' + id, id, 0.05));
@@ -106,7 +118,21 @@ function idleBoard(history: number) {
   });
   assert.ok(engine.lead('controller'));
   engine.resume();
-  return { f, store, engine, tasks, counters };
+  // Эталон: тот же хост без кэша (pristine всегда false). Его выдача после
+  // выдачи с кэшем не должна ничего записать — иначе кэш дал другой учёт.
+  const plain = new DevContourExecutionStore(f.h.store, projectionOptions(f.h));
+  spy(plain, { attempts: 0, usage: 0, views: 0, pristine: [] }, false);
+  const reference = new Engine({
+    host: devcontourHost(f.h, plain),
+    policy: policyFromConfig(f.h.config),
+    policyIdentity: loadedDigest(f.h.config),
+  });
+  const agrees = (label: string) => {
+    const revision = f.store.revision();
+    assert.equal(reference.claim('controller'), undefined, label);
+    assert.equal(f.store.revision(), revision, label + ': учёт без кэша тот же');
+  };
+  return { f, store, engine, tasks, counters, agrees, history };
 }
 
 /**
@@ -117,6 +143,7 @@ function idleBoard(history: number) {
 function spy(
   store: DevContourExecutionStore,
   counters: { attempts: number; usage: number; views: number; pristine: boolean[] },
+  cache = true,
 ) {
   const target = store as unknown as { view: (...args: unknown[]) => ExecutionView };
   const original = target.view.bind(store);
@@ -149,7 +176,7 @@ function spy(
     }) as ExecutionView['local'];
     const pristine = view.pristine!.bind(view);
     view.pristine = () => {
-      const out = pristine();
+      const out = cache && pristine();
       counters.pristine.push(out);
       return out;
     };
@@ -177,7 +204,9 @@ test('выдача на простое через хост DevContour не чи�
       const first = claim();
       assert.deepEqual(b.counters.pristine, [true], 'выдача — нетронутая внешняя транзакция');
       const held = blocks(b.f);
-      for (const id of b.tasks) assert.match(held[id] ?? '', /исчерпан/, id);
+      assert.match(held[b.tasks[0]] ?? '', /исчерпан/);
+      assert.match(held[b.tasks[1]] ?? '', /исчерпан/);
+      b.agrees('первая выдача');
       // Первая выдача записала удержания — ревизия данных сменилась, и
       // следующая выдача читает историю ещё раз, уже ничего не записывая.
       const revision = b.f.store.revision();
@@ -190,6 +219,7 @@ test('выдача на простое через хост DevContour не чи�
       }
       assert.equal(b.f.store.revision(), revision, 'выдачи на простое ничего не записали');
       assert.deepEqual(blocks(b.f), held);
+      b.agrees('на простое');
 
       // Новый расход задачи A (запись вызова, как её пишет движок) — первая
       // же выдача видит его и пишет новую причину.
@@ -200,6 +230,7 @@ test('выдача на простое через хост DevContour не чи�
       const next = blocks(b.f);
       assert.match(next[b.tasks[0]]!, /сообщено \$0\.0700/, 'новый расход A виден');
       assert.equal(next[b.tasks[1]], held[b.tasks[1]], 'расход B прежний');
+      b.agrees('после новой записи');
       // Расход, записанный другим соединением с тем же файлом (другой
       // процесс), тоже виден первой выдаче.
       const other = new Store(join(b.f.root, 'state.sqlite'));
@@ -212,6 +243,18 @@ test('выдача на простое через хост DevContour не чи�
       }
       claim();
       assert.match(blocks(b.f)[b.tasks[1]]!, /сообщено \$0\.0800/, 'расход другого процесса виден');
+      b.agrees('после записи другого процесса');
+      // Прежняя попытка становится попыткой без учёта вызовов (кандидат есть,
+      // вызовы не записаны): бюджет её задачи не определён со следующей выдачи.
+      b.f.store.change('test.uncovered', (s) => {
+        const run = s.runs.find((r) => r.id === 'R-old-0')!;
+        delete run.callsRecorded;
+        run.candidateSha = 'c'.repeat(40);
+      });
+      claim();
+      const owner = b.f.store.read().runs.find((r) => r.id === 'R-old-0')!.taskId;
+      assert.match(blocks(b.f)[owner]!, /попыток без учёта вызовов 1/, 'попытка без учёта видна');
+      b.agrees('после попытки без учёта');
       return { first, settle, steady, after };
     } finally {
       b.f.cleanup();
@@ -224,10 +267,12 @@ test('выдача на простое через хост DevContour не чи�
   assert.deepEqual(large.steady, { attempts: 0, usage: 0 });
   // Первая выдача и первая после изменения читают историю (один раз, а не
   // на каждое поручение и область бюджета): цена растёт с историей.
-  for (const r of [large.first, large.settle, large.after]) {
-    assert.ok(r.attempts >= 60 && r.attempts <= 2 * 60 + 4, JSON.stringify(r));
-    assert.ok(r.usage >= 60 + 2 && r.usage <= 2 * (60 + 3), JSON.stringify(r));
-  }
+  // Записи вызовов — один проход (60 прежних и 2 записи предела, после
+  // новой записи — 63); попытки — проход истории и поиск задачи 30 записей
+  // прежней формы по попытке.
+  assert.deepEqual(large.first, { attempts: 60 + 30, usage: 62 });
+  assert.deepEqual(large.settle, large.first);
+  assert.deepEqual(large.after, { attempts: 60 + 30, usage: 63 });
 });
 
 test('pristine: только внешняя транзакция адаптера без записей', () => {
@@ -245,16 +290,18 @@ test('pristine: только внешняя транзакция адаптер�
       // Вид вложенной части и после её конца не становится «внешним».
       const kept = store.transact('task.retry', (inner) => inner);
       assert.equal(pristine(kept), false, 'вид закончившейся вложенной части');
-      assert.throws(() =>
-        store.transact('task.retry', (inner) => {
-          inner.putLocal(
-            'usage',
-            WORKSPACE_OWNER,
-            'U-rolled',
-            callOf(call('U-rolled', b.tasks[0], 1)),
-          );
-          throw new Error('откат вложенной части');
-        }),
+      assert.throws(
+        () =>
+          store.transact('task.retry', (inner) => {
+            inner.putLocal(
+              'usage',
+              WORKSPACE_OWNER,
+              'U-rolled',
+              callOf(call('U-rolled', b.tasks[0], 1)),
+            );
+            throw new Error('откат вложенной части');
+          }),
+        { message: 'откат вложенной части' },
       );
       assert.equal(pristine(tx), false, 'после отката писавшей вложенной части');
     });
@@ -297,11 +344,13 @@ test('pristine: только внешняя транзакция адаптер�
     store.read((v) => assert.equal(pristine(v), false, 'вид чтения'));
     // Внешняя транзакция откатилась: ревизия и данные прежние, следующая — нетронута.
     const revision = b.f.store.revision();
-    assert.throws(() =>
-      store.transact('task.retry', (tx) => {
-        tx.putLocal('usage', WORKSPACE_OWNER, 'U-gone', callOf(call('U-gone', b.tasks[0], 1)));
-        throw new Error('откат');
-      }),
+    assert.throws(
+      () =>
+        store.transact('task.retry', (tx) => {
+          tx.putLocal('usage', WORKSPACE_OWNER, 'U-gone', callOf(call('U-gone', b.tasks[0], 1)));
+          throw new Error('откат');
+        }),
+      { message: 'откат' },
     );
     assert.equal(b.f.store.revision(), revision);
     store.transact('task.retry', (tx) => {
@@ -347,8 +396,14 @@ test('pristine: попытка со сроком в документе (преж
 
     // Запись модели под видом heartbeat (договор хранилища её допускает).
     const before = f.store.revision();
-    store.transact('heartbeat', (tx) => tx.setController(tx.controller()));
+    // Продление роли controller — не данные.
+    const until = f.store.read().leader!.leaseUntil;
+    assert.ok(b.engine.lead('controller'));
+    assert.ok(f.store.read().leader!.leaseUntil >= until);
     assert.equal(f.store.revision(), before, 'продление роли — не данные');
+    // Правка документа хостом под видом heartbeat (продление поставки) — тоже.
+    store.host('heartbeat', (ht) => void ht.state.changeSets);
+    assert.equal(f.store.revision(), before, 'правка хоста в heartbeat — продление');
     store.transact('heartbeat', (tx) =>
       tx.putWork({
         ...tx.work(tasks[0])!,
@@ -356,6 +411,45 @@ test('pristine: попытка со сроком в документе (преж
       }),
     );
     assert.ok(f.store.revision() > before, 'запись модели в heartbeat поднимает ревизию данных');
+  } finally {
+    b.f.cleanup();
+  }
+});
+
+test('pristine: транзакция внутри Store.atomic вызывающего — false; откаченный расход не попадает в кэш', () => {
+  const b = idleBoard(4);
+  try {
+    const { f, engine, store, tasks } = b;
+    assert.equal(engine.claim('controller'), undefined);
+    assert.equal(engine.claim('controller'), undefined);
+    const revision = f.store.revision();
+    // Вызывающий открыл транзакцию, обнулил расход A и выдал внутри неё —
+    // затем откатился. Ревизия внутри (revision + 1) освободилась.
+    assert.throws(
+      () =>
+        f.store.atomic(() => {
+          f.store.saveLocal(
+            'usage',
+            undefined,
+            'U-' + tasks[0],
+            call('U-' + tasks[0], tasks[0], 0),
+          );
+          store.transact('task.retry', (tx) =>
+            assert.equal(tx.pristine?.(), false, 'внутри транзакции вызывающего'),
+          );
+          assert.ok(engine.claim('controller'), 'A в пределах бюджета внутри транзакции');
+          throw new Error('откат вызывающего');
+        }),
+      { message: 'откат вызывающего' },
+    );
+    assert.equal(f.store.revision(), revision);
+    // Другая фиксация получает ту же ревизию с другими данными: расход A прежний.
+    f.store.atomic(() =>
+      f.store.saveLocal('usage', undefined, 'U-other', call('U-other', tasks[1], 0)),
+    );
+    assert.equal(f.store.revision(), revision + 1);
+    assert.equal(engine.claim('controller'), undefined, 'A по-прежнему исчерпал бюджет');
+    b.agrees('после отката вызывающего');
   } finally {
     b.f.cleanup();
   }

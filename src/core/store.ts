@@ -1845,6 +1845,10 @@ export class Store {
    * Поднять ревизию данных в открытой транзакции: изменение, которое Store
    * по виду считает продлением сроков (`heartbeat`), изменило данные.
    */
+  /** Открыта ли транзакция записи (`atomic`) этого соединения. */
+  get inTransaction() {
+    return this.transaction;
+  }
   markDataChanged() {
     if (!this.transaction) throw new Error('Store.markDataChanged требует открытой транзакции');
     this.bump('data');

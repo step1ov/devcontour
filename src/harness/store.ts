@@ -99,8 +99,14 @@ interface Frame {
    * отката её части остаётся `false`.
    */
   wrote: boolean;
-  /** Записаны записи модели (документ) — у транзакции `heartbeat` поднимает ревизию данных. */
+  /** Записаны записи модели движка — у транзакции `heartbeat` поднимает ревизию данных. */
   modelWrote: boolean;
+  /**
+   * Транзакция открыта внутри уже идущей транзакции Store (`Store.atomic`
+   * вызывающего): та могла записать до неё и откатиться после — видимые
+   * данные не обязательно зафиксированы при текущей ревизии.
+   */
+  enclosed: boolean;
 }
 
 /**
@@ -152,8 +158,10 @@ export class DevContourExecutionStore implements ExecutionStore {
     const run = (frame: Frame) =>
       fn({
         // Продуктовые поля хост меняет прямо в документе: копия для записи.
+        // Правка хоста — не запись модели движка: продление сроков поставки
+        // под видом heartbeat остаётся продлением (ревизия данных прежняя).
         get state() {
-          frame.wrote = frame.modelWrote = true;
+          frame.wrote = true;
           return frame.draft.edit();
         },
         journal: (data) => (frame.legacy = data),
@@ -205,6 +213,7 @@ export class DevContourExecutionStore implements ExecutionStore {
     let data: unknown = null;
     let drafts: RunEventDraft[] = [];
     let written: Frame | undefined;
+    const enclosed = this.store.inTransaction;
     this.store.atomic(() => {
       const before = this.store.lastEventId();
       this.store.lazyUpdate(kind, (draft) => {
@@ -218,6 +227,7 @@ export class DevContourExecutionStore implements ExecutionStore {
           depth: 0,
           wrote: false,
           modelWrote: false,
+          enclosed,
         };
         this.frame = frame;
         written = frame;
@@ -296,6 +306,7 @@ export class DevContourExecutionStore implements ExecutionStore {
         depth: 0,
         wrote: false,
         modelWrote: false,
+        enclosed: false,
       };
       const view = this.view(frame, false);
       this.reading = view;
@@ -449,6 +460,7 @@ export class DevContourExecutionStore implements ExecutionStore {
         this.frame === frame &&
         depth === 0 &&
         frame.depth === 0 &&
+        !frame.enclosed &&
         !frame.wrote &&
         frame.drafts.length === 0 &&
         // Попытка со сроком в документе (её ведёт версия до D53, или её
