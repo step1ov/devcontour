@@ -124,11 +124,14 @@ test('F62: пакет передачи — счёт отброшенных пр�
     );
     // 12 настоящих провалов, показано 10.
     assert.equal(whole.truncated.failures, 2);
+    // Прерывания пакет harness считает отдельно (0.1.0-alpha.52).
+    assert.equal(whole.interruptions, 2);
 
     const scoped = devcontourHandoff(f.h, { boardId: a.id }).pack;
     assert.equal(scoped.failures.length, 10);
     // Прерывание на доске B не уменьшает счёт пакета доски A.
     assert.equal(scoped.truncated.failures, 2);
+    assert.equal(scoped.interruptions, 1);
   } finally {
     f.cleanup();
   }

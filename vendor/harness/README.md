@@ -8,4 +8,4 @@ integrity опубликованных байтов; при закреплени
 
 | Версия         | Integrity опубликованного пакета                                                                  | Исходный commit harness                    |
 | -------------- | ------------------------------------------------------------------------------------------------- | ------------------------------------------ |
-| 0.1.0-alpha.50 | `sha512-G1VxtxWeMpnIXUMVC028UlOLA2qE7WAXZQKi5ycKsCuSlS7Xj8gGmIm3N/2eIMQ7JflYYJ6aGuO4+NWK7i6uKw==` | `64fa64e79d1cbe2159df8b9556bbd2358d3ac980` |
+| 0.1.0-alpha.53 | `sha512-BtaOIj/XE7LRkGmcQZiL0mXnWYlopTO9VEaDZOFyb7vN8AG+YqlSSPvSg2ZuFQGGZRVN6XKDSBLG0watnzQd1g==` | `885e0ac95f6f5d4c9bb7c2fc069f029adcff7f66` |
