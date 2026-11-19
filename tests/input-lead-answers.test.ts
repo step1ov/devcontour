@@ -242,6 +242,21 @@ test('a lead answer saved before the rule on a question the owner decides is not
       ),
       '403:OPERATOR_ANSWERS',
     );
+    // Замена перенесла бы ответ ведущего: отказ и оператору, пока он не ответил.
+    assert.equal(
+      codeOf(() =>
+        f.service.supersede(
+          {
+            requestId,
+            expectedVersion: held.version,
+            reason: 'respecified',
+            successorTaskId: taskId,
+          },
+          'operator',
+        ),
+      ),
+      '403:OPERATOR_ANSWERS',
+    );
     // Карточка владельца с формой ответа.
     const items = (await new AttentionService(f.store, f.h, { root: f.root }).active()).items;
     const card = byKey(items, `input:${requestId}`)!;

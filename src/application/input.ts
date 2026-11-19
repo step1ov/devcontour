@@ -1017,7 +1017,12 @@ export class InputService {
     // Заменённый вопрос ждёт переноса ответа. Выдачу он не держит (правило
     // движка), поэтому шаг называет порядок: перенос в черновике, затем
     // утверждение — оно сохраняет перенесённый ответ (F14).
-    if (state === 'superseded' && request.closed?.carry && !request.target)
+    if (
+      state === 'superseded' &&
+      request.closed?.carry &&
+      !request.target &&
+      !this.leadAnswerHeld(request)
+    )
       return {
         actor: 'lead' as const,
         next: carryStep(task, !!task && !!this.unreleasedBoard(task)),
@@ -1232,6 +1237,8 @@ export class InputService {
         const context = this.summaryContext();
         return requests.flatMap((request) => {
           if (request.kind !== 'question' || !request.blocking || request.target) return [];
+          // Ответ ведущего на вопрос владельца не переносится (`leadAnswerHeld`).
+          if (this.leadAnswerHeld(request)) return [];
           // Переносить некуда: задача снята или принята (движок откажет).
           const task = context.tasks.get(request.workId);
           if (!task || task.status === 'cancelled' || task.status === 'done') return [];
@@ -1532,8 +1539,21 @@ export class InputService {
       throw refuse(
         'OPERATOR_ANSWERS',
         `Вопрос ${request.id} заменяет оператор: ${
-          request.floors.length ? 'вопрос критический' : 'approvalMode operator'
+          request.floors.length
+            ? 'вопрос критический'
+            : this.h.config.approvalMode === 'operator'
+              ? 'approvalMode operator'
+              : 'вопрос меняет результат для пользователя'
         }`,
+        403,
+      );
+    // Замена перенесла бы ответ ведущего на вопрос владельца, который не
+    // применяется: сначала отвечает владелец (или снимает вопрос).
+    const held = open ? this.leadAnswerHeld(request) : undefined;
+    if (held)
+      throw refuse(
+        'OPERATOR_ANSWERS',
+        held + '; замените вопрос после ответа владельца или снимите его',
         403,
       );
     // Пока исходная остановка держится (постановка задачи прежняя, задача на
@@ -2057,7 +2077,12 @@ export class InputService {
     const reviewSubjectId = inputReviewSubject(request.id);
     try {
       // Решения владельца по находкам после эскалации — этим раундом (alpha.54).
-      const dispositions = pendingReviewDecisions(this.h.store, 'plan', reviewSubjectId);
+      const dispositions = pendingReviewDecisions(
+        this.h.store,
+        'plan',
+        reviewSubjectId,
+        engine.reviews('plan', reviewSubjectId).at(-1)?.findings,
+      );
       const record = await technicalReview(
         engine,
         engine.policy,
@@ -2084,7 +2109,7 @@ export class InputService {
             : AbortSignal.timeout(this.h.config.runTimeoutMs),
         },
       );
-      clearReviewDecisions(this.h.store, 'plan', reviewSubjectId);
+      clearReviewDecisions(this.h.store, 'plan', reviewSubjectId, dispositions, record);
       // Маршрут, признанный на постановке, которую ревью читало (F85): позже
       // задача может закрепить и другие контракты, основание — этот снимок.
       const routed = record.approved

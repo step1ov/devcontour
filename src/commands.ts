@@ -109,6 +109,7 @@ import { evaluateVisualRun } from './runner/visual.ts';
 import { brokerAddress, httpBroker } from './runner/visual-broker.ts';
 import { VISUAL_RUN_DEADLINE_MS, visualRun } from './runner/visual-run.ts';
 import { recordReviewDecision } from './core/review-decisions.ts';
+import { reviewExecutionOf } from './harness/execution.ts';
 const args = process.argv.slice(2),
   operation = args[0] ?? 'serve';
 /** Причина отказа проверки файла по-русски: частые коды zod, иначе текст zod. */
@@ -1350,16 +1351,24 @@ async function main() {
           throw new Error(
             'Решение по находке после эскалации — решение оператора; --by host не допускается',
           );
-        result = recordReviewDecision(h.store, {
-          kind: option('--kind', ''),
-          subject: option('--subject', ''),
-          findings: option('--findings', '')
-            .split(',')
-            .map((x) => x.trim())
-            .filter(Boolean),
-          decision: option('--decision', ''),
-          reason: option('--reason', ''),
-        });
+        const kind = option('--kind', '');
+        const subject = option('--subject', '');
+        result = recordReviewDecision(
+          h.store,
+          {
+            kind,
+            subject,
+            findings: option('--findings', '')
+              .split(',')
+              .map((x) => x.trim())
+              .filter(Boolean),
+            decision: option('--decision', ''),
+            reason: option('--reason', ''),
+          },
+          kind === 'plan' || kind === 'contract'
+            ? reviewExecutionOf(h).engine.reviews(kind, subject).at(-1)?.findings
+            : undefined,
+        );
       } else if (operation === 'changeset-budget-reset') {
         // Решение человека с причиной: ведущий агент сброс не выполняет —
         // в каталоге агента и MCP этой операции нет, `--by host` отклоняется.

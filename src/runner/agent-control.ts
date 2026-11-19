@@ -527,7 +527,12 @@ async function review(
     ? reviewSubject(kind, 'consolidation:' + title, repositoryId)
     : reviewSubject(kind, title, repositoryId, subjectId);
   // Решения владельца по находкам после эскалации — этим раундом (alpha.54).
-  const dispositions = pendingReviewDecisions(h.store, kind, harnessSubject);
+  const dispositions = pendingReviewDecisions(
+    h.store,
+    kind,
+    harnessSubject,
+    engine.reviews(kind, harnessSubject).at(-1)?.findings,
+  );
   const record = await technicalReview(
     engine,
     engine.policy,
@@ -569,7 +574,7 @@ async function review(
   ).catch((error: unknown) => {
     throw escalationRefusal(error, kind, harnessSubject) ?? toDomain(error);
   });
-  clearReviewDecisions(h.store, kind, harnessSubject);
+  clearReviewDecisions(h.store, kind, harnessSubject, dispositions, record);
   const opened = record.findings.filter((f) => f.status === 'open' && f.openedIn === record.round);
   recordContractAttempt(h, {
     id: artifact.split('/').at(-1) ?? artifact,

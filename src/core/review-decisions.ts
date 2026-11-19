@@ -8,7 +8,7 @@
 // Записывает только человек (CLI без `--by host`): ведущему такое решение
 // движок не разрешает.
 import { z } from 'zod';
-import { HarnessError, type ReviewDisposition } from 'devcontour-harness';
+import { HarnessError, type ReviewDisposition, type ReviewRecord } from 'devcontour-harness';
 import { DomainError } from './model.ts';
 import type { Store } from './store.ts';
 
@@ -34,16 +34,42 @@ interface Stored {
 
 const keyOf = (kind: string, subject: string) => `${kind}:${subject}`;
 
-/** Записать решение оператора; следующий раунд предмета передаст его движку. */
-export function recordReviewDecision(store: Store, raw: unknown) {
+type Finding = ReviewRecord['findings'][number];
+
+const stored = (store: Store, key: string) =>
+  store.localEntries<Stored>(REVIEW_DECISIONS).find((e) => e.owner === undefined && e.key === key)
+    ?.value;
+
+/**
+ * Записать решение оператора; следующий раунд предмета передаст его движку.
+ * `last` — находки последнего раунда предмета: решение — только по открытой
+ * находке этого предмета (иначе отказ, а не отравленный следующий раунд).
+ */
+export function recordReviewDecision(
+  store: Store,
+  raw: unknown,
+  last: readonly Finding[] | undefined,
+) {
   const input = reviewDecisionInput.parse(raw);
+  if (!last)
+    throw new DomainError(
+      `Ревью ${input.kind} ${input.subject}: раундов нет — проверьте предмет (как в отказе эскалации)`,
+      404,
+    );
+  for (const id of input.findings) {
+    const f = last.find((x) => x.id === id);
+    if (!f || f.status !== 'open')
+      throw new DomainError(
+        `Находка ${id} ${f ? `не открыта (${f.status})` : 'не найдена'} в последнем раунде ревью ${input.kind} ${input.subject}`,
+        409,
+      );
+  }
   const key = keyOf(input.kind, input.subject);
   return store.atomic(() => {
-    const previous = store
-      .localEntries<Stored>(REVIEW_DECISIONS)
-      .find((e) => e.owner === undefined && e.key === key)?.value;
     // Новое решение по той же находке заменяет прежнее.
-    const kept = (previous?.dispositions ?? []).filter((d) => !input.findings.includes(d.finding));
+    const kept = (stored(store, key)?.dispositions ?? []).filter(
+      (d) => !input.findings.includes(d.finding),
+    );
     const value: Stored = {
       kind: input.kind,
       subject: input.subject,
@@ -63,24 +89,54 @@ export function recordReviewDecision(store: Store, raw: unknown) {
   });
 }
 
-/** Решения оператора, ждущие следующего раунда предмета. */
+/**
+ * Решения оператора, ждущие следующего раунда предмета: только по находкам,
+ * открытым в его последнем раунде (`last`) — решение по закрытой или чужой
+ * находке движок отклонил бы, и оно не должно останавливать ревью.
+ */
 export function pendingReviewDecisions(
   store: Store,
   kind: 'plan' | 'contract',
   subject: string,
+  last: readonly Finding[] | undefined,
 ): ReviewDisposition[] {
-  const key = keyOf(kind, subject);
-  return (
-    store.localEntries<Stored>(REVIEW_DECISIONS).find((e) => e.owner === undefined && e.key === key)
-      ?.value.dispositions ?? []
+  const open = new Set((last ?? []).filter((f) => f.status === 'open').map((f) => f.id));
+  return (stored(store, keyOf(kind, subject))?.dispositions ?? []).filter((d) =>
+    open.has(d.finding),
   );
 }
 
-/** Раунд записан: решения применены движком и хранятся в его истории. */
-export function clearReviewDecisions(store: Store, kind: 'plan' | 'contract', subject: string) {
+const same = (a: ReviewDisposition, b: ReviewDisposition) =>
+  a.finding === b.finding && a.decision === b.decision && a.reason === b.reason;
+
+/**
+ * Раунд записан: снять те решения, которые он применил (у находки раунда —
+ * `disposition` этого раунда). Раунд с ответом вне протокола решений не
+ * применяет — они остаются; решение, записанное оператором во время раунда
+ * (другое содержание), тоже остаётся. Сверка — в транзакции.
+ */
+export function clearReviewDecisions(
+  store: Store,
+  kind: 'plan' | 'contract',
+  subject: string,
+  used: readonly ReviewDisposition[],
+  record: Pick<ReviewRecord, 'round' | 'findings'>,
+) {
+  if (!used.length) return;
+  const applied = used.filter(
+    (d) => record.findings.find((f) => f.id === d.finding)?.disposition?.round === record.round,
+  );
+  if (!applied.length) return;
   const key = keyOf(kind, subject);
-  if (!pendingReviewDecisions(store, kind, subject).length) return;
-  store.atomic(() => store.deleteLocal(REVIEW_DECISIONS, undefined, key));
+  store.atomic(() => {
+    const current = stored(store, key);
+    if (!current) return;
+    const rest = current.dispositions.filter((d) => !applied.some((a) => same(a, d)));
+    if (rest.length === current.dispositions.length) return;
+    if (rest.length)
+      store.saveLocal(REVIEW_DECISIONS, undefined, key, { ...current, dispositions: rest });
+    else store.deleteLocal(REVIEW_DECISIONS, undefined, key);
+  });
 }
 
 /**
