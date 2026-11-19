@@ -18,7 +18,13 @@ import { executionOf } from '../src/harness/execution.ts';
 import { repositories } from '../src/core/repositories.ts';
 import { specDigest } from '../src/core/task-digest.ts';
 import type { ContractChangeTrace } from '../src/application/input-rebound.ts';
-import type { ContractChange } from '../src/runner/contract-change.ts';
+import { ContractChanges, type ContractChange } from '../src/runner/contract-change.ts';
+import { reviewContract } from '../src/runner/agent-control.ts';
+import { reviewers } from './contract-change-fixture.ts';
+import { updateBase } from '../src/runner/base-update.ts';
+import { execFileSync } from 'node:child_process';
+import { mkdirSync, writeFileSync } from 'node:fs';
+import { join } from 'node:path';
 import {
   RESUME,
   RESUME_DRIVER,
@@ -176,6 +182,8 @@ function operation(
   status: ContractChange['status'],
   id = 'CC-route',
   file = source,
+  /** Момент шага rebind операции (без него — её конец). */
+  rebindAt?: string,
 ) {
   const all = repositories(f.h.config);
   const owner = all.some((r) => r.id === 'main') ? 'main' : all[0].id;
@@ -189,7 +197,7 @@ function operation(
     rebound: contractId ? [taskId] : [],
     held: [taskId],
     boards: [],
-    history: [],
+    history: rebindAt ? [{ at: rebindAt, step: 'rebind', event: 'done' }] : [],
     step: 0,
     startedAt: new Date().toISOString(),
     ...(['completed', 'abandoned', 'stale'].includes(status)
@@ -721,9 +729,10 @@ test('F85: a spec edit forced by the route operation does not make the critical 
     await review(f, requestId);
     assert.equal(f.service.show({ requestId }).state, 'contract-change-required');
     const v2 = rebind(f, taskId, v1.id, pins);
+    const rebindAt = new Date().toISOString();
     respecify(f, taskId);
     f.h.approve(boardId, [taskId]);
-    operation(f, taskId, v2.id, 'completed');
+    operation(f, taskId, v2.id, 'completed', 'CC-route', source, rebindAt);
 
     // До нового ревью: ход ведущего (ревью того же ответа), не оператора.
     const saved = f.service.show({ requestId });
@@ -776,9 +785,10 @@ test('F85: with a running server the pass reviews and carries the same answer in
     await ticks(3);
     assert.equal(f.service.show({ requestId }).state, 'contract-change-required');
     const v2 = rebind(f, taskId, v1.id, pins);
+    const rebindAt = new Date().toISOString();
     respecify(f, taskId);
     f.h.approve(boardId, [taskId]);
-    operation(f, taskId, v2.id, 'completed');
+    operation(f, taskId, v2.id, 'completed', 'CC-route', source, rebindAt);
     await ticks(3);
     assert.equal(prompts.length, 2, 'проход проверил тот же ответ на правленой постановке');
     const applied = f.store
@@ -794,9 +804,19 @@ test('F85: with a running server the pass reviews and carries the same answer in
   }
 });
 
-test('F85: without a completed route operation, with a new answer or with a rejection on the edited spec the question stays the operator’s; the card supersedes it in one click', async () => {
-  const cases = ['no-route', 'running', 'new-answer', 'rejected'] as const;
+test('F85: the carry needs the validated route and its own completed operation; otherwise the question stays the operator’s and the card supersedes it in one click', async () => {
+  const cases = [
+    'no-route',
+    'running',
+    'new-answer',
+    'rejected',
+    'manual-rebind',
+    'later-operation',
+    'edit-before',
+    'unpinned-contract',
+  ] as const;
   for (const name of cases) {
+    let other = '';
     const { f, pins, boardId, taskId, v1, requestId } = await answered({
       ...(name === 'no-route'
         ? { decide: () => () => ({ approve: true, findings: [] }) }
@@ -812,14 +832,67 @@ test('F85: without a completed route operation, with a new answer or with a reje
                     }
                   : routeWhileBound(p)(prompt),
             }
-          : {}),
+          : name === 'unpinned-contract'
+            ? {
+                // Раунд называет закреплённый A и существующий, но не
+                // закреплённый B: обычное отклонение, не маршрут.
+                decide: (p: Pins) => (prompt: string) =>
+                  prompt.includes(`"contracts":["${p.v1}"]`)
+                    ? {
+                        approve: false,
+                        findings: [
+                          {
+                            severity: 'blocking' as const,
+                            message: 'Amends A',
+                            rule: `contract-change:${p.v1}`,
+                          },
+                          {
+                            severity: 'blocking' as const,
+                            message: 'Amends B',
+                            rule: `contract-change:${other}`,
+                          },
+                        ],
+                      }
+                    : { approve: true, findings: [] },
+              }
+            : {}),
     });
     try {
+      if (name === 'unpinned-contract')
+        other = f.h.contract('Other format', 'Other.', undefined, undefined, 'docs/other.md').id;
       if (name !== 'no-route') await review(f, requestId);
+      if (name === 'edit-before') {
+        // Постановку правили до операции: это не правка, которой потребовало
+        // её ревью плана.
+        f.h.reopen(taskId, 'respecify before the contract change');
+        respecify(f, taskId);
+      }
       const v2 = rebind(f, taskId, v1.id, pins);
-      respecify(f, taskId);
+      const rebindAt = new Date().toISOString();
+      if (name !== 'edit-before') respecify(f, taskId);
       f.h.approve(boardId, [taskId]);
-      operation(f, taskId, v2.id, name === 'running' ? 'running' : 'completed');
+      operation(
+        f,
+        taskId,
+        v2.id,
+        name === 'running' ? 'running' : 'completed',
+        'CC-route',
+        source,
+        rebindAt,
+      );
+      if (name === 'manual-rebind') {
+        // После операции задачу вручную перепривязали к A-v3: основание
+        // переноса — уже не редакция, которую провела операция маршрута.
+        const v3 = f.h.contract('Artifact format', 'Version three.', undefined, undefined, source);
+        assert.deepEqual(f.h.rebind([taskId], [v2.id], v3.id), [taskId]);
+        f.h.approve(boardId, [taskId]);
+        pins.next = v3.id;
+      }
+      if (name === 'later-operation') {
+        // Позже задачу перепривязала операция другого контракта.
+        await new Promise((r) => setTimeout(r, 5));
+        operation(f, taskId, v2.id, 'completed', 'CC-later', 'docs/contracts/other.md');
+      }
       if (name === 'new-answer') {
         const current = f.service.show({ requestId });
         f.service.answer(
@@ -833,13 +906,10 @@ test('F85: without a completed route operation, with a new answer or with a reje
         );
       }
       const again = await review(f, requestId);
+      assert.equal(again.result.approved, name !== 'rejected', name);
       const shown = f.service.show({ requestId });
       assert.equal(shown.actor, 'operator', name);
-      if (name === 'rejected') {
-        assert.equal(again.result.approved, false, name);
-        assert.equal(shown.state, 'review-rejected', name);
-        continue;
-      }
+      if (name === 'rejected') assert.equal(shown.state, 'review-rejected', name);
       assert.equal((shown as { moved?: true }).moved, true, name);
       assert.ok(
         f.service
@@ -890,3 +960,135 @@ test('F85: without a completed route operation, with a new answer or with a reje
     }
   }
 });
+
+/** Ревьюеры операции: ревью плана отвергает постановку без названной поправки контракта. */
+function planDemandsEdit(calls: string[]) {
+  const base = reviewers(calls);
+  const make = (adapter: AgentAdapter): AgentAdapter => ({
+    ...adapter,
+    execute(r) {
+      const kind = /Independently review this ([a-z /]+)\./.exec(r.prompt)?.[1] ?? '?';
+      if (!kind.includes('plan')) return adapter.execute(r);
+      calls.push(kind);
+      const edited = r.prompt.includes('The amended contract wording is named');
+      const block = r.prompt.split('\n\n').find((p) => p.startsWith('Previous open findings'));
+      const previous = block
+        ? (JSON.parse(block.slice(block.indexOf('['))) as { id: string }[]).map((x) => ({
+            id: x.id,
+            status: 'closed' as const,
+            basis: 'Fixture: the spec names the amended wording',
+          }))
+        : [];
+      return Promise.resolve({
+        data: {
+          approved: edited,
+          summary: edited ? 'Fixture' : 'Fixture: the spec must name the amended wording',
+          findings: edited
+            ? []
+            : [{ severity: 'blocking', message: 'Name the amended contract wording' }],
+          previous,
+          discoveries: [],
+        },
+        log: 'Fixture only; no provider called',
+        command: ['fixture'],
+      });
+    },
+  });
+  return { codex: make(base.codex), claude: make(base.claude) };
+}
+
+test('F85: a real contract-change whose plan review demands a spec edit lets the lead carry the same approved answer', async () => {
+  const prompts: string[] = [];
+  const pins: Pins = { v1: '' };
+  const runtimes = reviewer(routeWhileBound(pins), prompts, ['contract', 'acceptance']);
+  const f = await inputFixture(runtimes);
+  try {
+    const repo = f.h.config.repository;
+    const sh = (...args: string[]) =>
+      execFileSync('git', ['-c', 'user.name=t', '-c', 'user.email=t@e', ...args], { cwd: repo })
+        .toString()
+        .trim();
+    const write = (text: string) => {
+      mkdirSync(join(repo, 'docs/contracts'), { recursive: true });
+      writeFileSync(join(repo, source), `# Artifact format\n\n${text}\n`);
+      sh('add', source);
+      sh('commit', '-qm', text);
+    };
+    const local = async <T>(run: () => Promise<T>) => {
+      f.h.config.mode = 'local';
+      try {
+        return await run();
+      } finally {
+        f.h.config.mode = 'demo';
+      }
+    };
+    write('Version one.');
+    const proposal = { title: 'Artifact format', file: source };
+    const calls: string[] = [];
+    await local(() => reviewContract(f.h, f.root, proposal, 'codex', reviewers(calls)));
+    const v1 = f.store.read().contracts.at(-1)!;
+    pins.v1 = v1.id;
+    const boardId = f.h.createBoard('Contract route board').id;
+    const taskId = f.h.addTask(boardId, {
+      title: 'Task bound to a contract asks',
+      description: `An observable outcome that needs a decision ${DEMO_ASK}.`,
+      role: f.store.read().tasks[0].role,
+      acceptance: ['The artifact exists.'],
+      contracts: [v1.id],
+    }).id;
+    f.h.approve(boardId);
+    await updateBase(f.h.config, f.root);
+    f.h.pause(false);
+    await f.scheduler.drain();
+    f.h.pause(true);
+    const [summary] = f.service.list({ taskId }).requests;
+    assert.ok(summary.floors.length > 0, 'критический вопрос');
+    const requestId = summary.requestId;
+    f.service.answer(
+      {
+        requestId,
+        text: 'Use the second option; the contract wording is amended.',
+        optionId: 'json',
+        expectedVersion: summary.version,
+      },
+      'operator',
+    );
+    await review(f, requestId);
+    assert.equal(f.service.show({ requestId }).state, 'contract-change-required');
+
+    write('Version two.');
+    const changes = new ContractChanges(f.h, f.root, planDemandsEdit(calls));
+    const started = (await changes.start(proposal, 'codex')) as { operation: ContractChange };
+    assert.ok(started.operation, JSON.stringify(started));
+    const failed = await local(() => changes.advance(started.operation.id));
+    assert.equal(failed.status, 'failed', JSON.stringify(failed.history.slice(-3)));
+    assert.equal(stepsAt(failed), 'plan');
+    assert.deepEqual(failed.rebound, [taskId]);
+    // Ведущий правит постановку, которой потребовало ревью плана операции.
+    respecify(f, taskId);
+    const done = await local(() => changes.advance(started.operation.id));
+    assert.equal(done.status, 'completed', done.error);
+    pins.next = done.contractId;
+    assert.deepEqual(f.store.read().tasks.find((t) => t.id === taskId)!.contracts, [
+      done.contractId,
+    ]);
+
+    const before = f.service.show({ requestId });
+    assert.equal(before.actor, 'lead');
+    assert.equal((before as { moved?: true }).moved, undefined);
+    const again = await review(f, requestId);
+    assert.equal(again.result.approved, true);
+    const { target, applied } = leadApply(f, requestId, again.context.contextDigest);
+    assert.equal((target as { rebound?: boolean }).rebound, true);
+    assert.equal(applied.applied, true);
+    const after = executionOf(f.h).engine.inputRequest(requestId);
+    assert.equal(after.answers.length, 1, 'оператор не отвечал и не заменял вопрос');
+    assert.equal(after.closed?.by, 'lead');
+    assert.match(after.closed?.reason ?? '', /F85/);
+  } finally {
+    await f.cleanup();
+  }
+});
+
+/** Шаг, на котором стоит операция (по истории: последний не-`done`). */
+const stepsAt = (op: ContractChange) => op.history.findLast((h) => h.event === 'failed')?.step;
