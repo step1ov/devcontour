@@ -533,7 +533,8 @@ test('Автор пробует проверенную версию в брау�
     const page = await browser.newPage({ viewport: { width: 390, height: 844 } });
     const errors: string[] = [];
     page.on('pageerror', (e) => errors.push(e.message));
-    await page.goto(server.url);
+    // Голый адрес открывает главную (alpha.51); обзор автора — `?tab=overview`.
+    await page.goto(server.url + '/?tab=overview');
 
     await page.getByRole('heading', { name: 'Нужно ваше решение', exact: true }).waitFor();
     const deploy = page.getByRole('button', { name: 'Выложить в preview' });
