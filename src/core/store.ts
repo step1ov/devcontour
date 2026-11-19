@@ -1146,12 +1146,16 @@ export class Store {
       const draft = () => (open ??= this.openDraft()).draft;
       let result: T;
       this.editing = true;
+      this.renewalOnly = false;
+      let renewalOnly: boolean;
       try {
         result = action(draft);
       } finally {
         this.editing = false;
+        renewalOnly = this.renewalOnly;
+        this.renewalOnly = false;
       }
-      return open ? this.closeDraft(open, type, result) : result;
+      return open ? this.closeDraft(open, type, result, renewalOnly) : result;
     });
   }
   /** Начало изменения: документ транзакции (`Draft`) со сроками и ролью из строк. */
@@ -1217,7 +1221,12 @@ export class Store {
     };
   }
   /** Конец изменения: документ с метками, строки роли и аренды, событие журнала. */
-  private closeDraft<T>(open: ReturnType<Store['openDraft']>, type: string, result: T): T {
+  private closeDraft<T>(
+    open: ReturnType<Store['openDraft']>,
+    type: string,
+    result: T,
+    renewalOnly = false,
+  ): T {
     const { draft, row, before, documentLeader, leases } = open;
     const leader = draft.leader;
     const leaderChanged = JSON.stringify(leader ?? null) !== open.leaderBefore;
@@ -1322,8 +1331,12 @@ export class Store {
     // Продление строк аренды под видом heartbeat выдачу не меняет (F79):
     // для шлюза простоя — нейтральная запись этого процесса. Документ,
     // изменённый под видом heartbeat, — нет: движок может записать в такой
-    // транзакции и то, что меняет выдачу (снятое удержание).
-    if (documentChanged) this.bump(type === 'heartbeat' ? 'lease' : 'data');
+    // транзакции и то, что меняет выдачу (снятое удержание). Документ, в
+    // котором вызывающий изменил только сроки (`markRenewalOnly`: продление
+    // срока совместной проверки), — тоже нейтральная запись.
+    if (documentChanged)
+      if (type === 'heartbeat') this.bumpAs('lease', renewalOnly);
+      else this.bump('data');
     else if (type !== 'heartbeat' || leasesChanged) this.bumpAs('lease', type === 'heartbeat');
     if (type !== 'heartbeat') {
       const at = new Date().toISOString();
@@ -1853,6 +1866,19 @@ export class Store {
       .prepare(`DELETE FROM ${schema}.local_workflow WHERE namespace=? AND owner=? AND key=?`)
       .run(namespace, owner ?? '@workspace', key);
     if (removed.changes) this.bump('data');
+  }
+  /** Изменение `heartbeat`, открытое сейчас, меняет в документе только сроки (`markRenewalOnly`). */
+  private renewalOnly = false;
+  /**
+   * Изменение `heartbeat`, открытое сейчас (действие `update`/`lazyUpdate`),
+   * меняет в документе только сроки владения: запись этого процесса, которая
+   * выдачу не меняет (учёт для `idleVersion`, F79). Без отметки документ,
+   * изменённый под видом heartbeat, шлюз простоя открывает. Вызывающий
+   * отмечает это в конце действия, когда знает все его записи.
+   */
+  markRenewalOnly() {
+    if (!this.editing) throw new Error('Store.markRenewalOnly требует открытого изменения');
+    this.renewalOnly = true;
   }
   /** Открыта ли транзакция записи (`atomic`) этого соединения. */
   get inTransaction() {

@@ -515,12 +515,34 @@ test('pristine: продление совместной проверки (jointH
     const v = f.workspace.start(f.change.id);
     assert.equal(v.status, 'active');
     const before = f.store.version();
+    const idle = f.store.idleVersion();
     const until = f.verifications().at(-1)!.leaseUntil;
     await new Promise((r) => setTimeout(r, 5));
     f.workspace.heartbeat(f.change.id, v.token);
     assert.ok(f.verifications().at(-1)!.leaseUntil > until, 'срок продлён');
     assert.ok(f.store.version().lease > before.lease, 'счётчик сроков вырос');
     assert.equal(f.store.revision(), before.revision, 'ревизия данных прежняя');
+    // Продление своего срока проверки шлюз простоя выдачи не открывает (F79).
+    assert.deepEqual(f.store.idleVersion(), idle, 'продление — нейтральная запись');
+    // Откаченное продление учёт не меняет.
+    const { store: execution } = executionOf(f.h);
+    assert.throws(() =>
+      execution.transact('heartbeat', (tx) => {
+        const current = tx.verification(v.id)!;
+        tx.putVerification({ ...current, leaseUntil: current.leaseUntil + 1 });
+        throw new Error('откат');
+      }),
+    );
+    assert.deepEqual(f.store.idleVersion(), idle, 'откат продления');
+    // Правка документа хостом под видом heartbeat — продление, но шлюз она открывает.
+    execution.host('heartbeat', (h) => {
+      h.state.changeSets = [...h.state.changeSets];
+      const current = h.tx.verification(v.id)!;
+      h.tx.putVerification({ ...current, leaseUntil: current.leaseUntil + 2 });
+    });
+    assert.equal(f.store.revision(), before.revision, 'правка хоста — продление');
+    const hostIdle = f.store.idleVersion();
+    assert.notDeepEqual(hostIdle, idle, 'правка хоста открывает шлюз');
     // Та же запись проверки, изменённая не только сроком, — запись модели.
     const { store } = executionOf(f.h);
     store.transact('heartbeat', (tx) => {
@@ -532,6 +554,10 @@ test('pristine: продление совместной проверки (jointH
       });
     });
     assert.ok(f.store.revision() > before.revision, 'запись модели поднимает ревизию данных');
+    assert.ok(
+      f.store.idleVersion().revision > hostIdle.revision,
+      'изменение данных открывает шлюз простоя',
+    );
   } finally {
     await f.cleanup();
   }

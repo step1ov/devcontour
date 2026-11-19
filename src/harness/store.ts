@@ -103,6 +103,11 @@ interface Frame {
   /** Записаны записи модели движка — у транзакции `heartbeat` поднимает ревизию данных. */
   modelWrote: boolean;
   /**
+   * Хост менял документ (`HostTransaction.state`): под видом heartbeat это
+   * продление сроков, но для шлюза простоя (F79) — не нейтральная запись.
+   */
+  hostWrote?: boolean;
+  /**
    * Транзакция открыта внутри уже идущей транзакции Store (`Store.atomic`
    * вызывающего): та могла записать до неё и откатиться после — видимые
    * данные не обязательно зафиксированы при текущей ревизии.
@@ -168,7 +173,7 @@ export class DevContourExecutionStore implements ExecutionStore {
         // Правка хоста — не запись модели движка: продление сроков поставки
         // под видом heartbeat остаётся продлением (ревизия данных прежняя).
         get state() {
-          frame.wrote = true;
+          frame.wrote = frame.hostWrote = true;
           return frame.draft.edit();
         },
         journal: (data) => (frame.legacy = data),
@@ -197,6 +202,7 @@ export class DevContourExecutionStore implements ExecutionStore {
     // `wrote` откат вложенной части не снимает (pristine остаётся false), а
     // запись модели, откаченная с ней, ревизию heartbeat не поднимает.
     const modelWrote = frame.modelWrote;
+    const hostWrote = frame.hostWrote;
     frame.depth++;
     try {
       return this.store.atomic(() => this.settled(run()));
@@ -207,6 +213,7 @@ export class DevContourExecutionStore implements ExecutionStore {
       frame.works = works;
       frame.attempts = attempts;
       frame.modelWrote = modelWrote;
+      frame.hostWrote = hostWrote;
       throw error;
     } finally {
       frame.depth--;
@@ -252,6 +259,11 @@ export class DevContourExecutionStore implements ExecutionStore {
           throw new Error('Слишком много событий в одной транзакции');
         drafts = frame.drafts;
         data = this.journalData(frame);
+        // Транзакция heartbeat без записей модели и правок хоста меняет в
+        // документе только сроки (продление совместной проверки): для шлюза
+        // простоя выдачи — нейтральная запись своего процесса (F79).
+        if (kind === 'heartbeat' && !frame.modelWrote && !frame.hostWrote)
+          this.store.markRenewalOnly();
         return data;
       });
       // Store.change не пишет событие, если документ не изменился: событие
