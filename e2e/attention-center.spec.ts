@@ -1343,3 +1343,97 @@ test('Overview: «Уже решено» with typed text points to the attention 
   await expect(status).toContainText('Ваш текст не отправлен и сохранён в центре внимания.');
   await expect(status).not.toContainText('Неотправленные ответы');
 });
+
+test('review escalation: the owner reads the stuck findings, decides with a required reason, and a lead copy of the card offers no decision', async ({
+  page,
+}) => {
+  const findings =
+    'Находки, которые ревью контракта «Catalog API v1» не снимает (раунд 3):\n1. Нет состояний ошибок (открыта раундов: 3)';
+  const review = (key: string, over: Record<string, unknown> = {}) =>
+    fakeItem(key, {
+      source: 'review',
+      section: 'architecture',
+      title: 'Ревью контракта «Catalog API v1» не сходится: нужно ваше решение',
+      reason:
+        'Независимое ревью три раунда подряд не снимает блокирующие находки (1): ведущий исправлял, ревьюер их оставил.',
+      subject: {
+        kind: 'review',
+        id: 'contract:contract-0123',
+        href: '/?view=boards&tab=contracts',
+      },
+      actions: [
+        {
+          id: 'accept-limitation',
+          kind: 'domain',
+          label: 'Принять как ограничение',
+          input: 'text',
+          prompt: findings,
+        },
+        { id: 'continue', kind: 'domain', label: 'Продолжить исправлять', input: 'text' },
+        { id: 'open', kind: 'navigate', href: '/?view=boards&tab=contracts' },
+      ],
+      ...over,
+    });
+  const owner = review('review:contract:contract-0123');
+  // Копия для ведущего с теми же действиями: панель кнопок не даёт.
+  const lead = review('review:contract:contract-lead', { actor: 'lead', category: 'technical' });
+  // Находка длиннее карточки: решения в панели нет, только команда владельца.
+  const oversized = review('review:contract:contract-huge', {
+    actions: [
+      {
+        id: 'handoff',
+        kind: 'handoff',
+        command: 'devcontour review-decide --kind contract --subject "contract-huge" …',
+      },
+      { id: 'open', kind: 'navigate', href: '/?view=boards&tab=contracts' },
+    ],
+  });
+  let items = [owner, lead, oversized];
+  await page.route(isList, (route) => route.fulfill({ json: fakeView(items) }));
+  let sent: Record<string, unknown> | undefined;
+  await page.route('**/api/attention/act', async (route) => {
+    sent = route.request().postDataJSON() as Record<string, unknown>;
+    items = [lead, oversized];
+    await route.fulfill({ json: { result: { status: 'recorded' }, resolved: true } });
+  });
+  await page.goto('/?tab=attention');
+  const card = cardOf(page, owner.sourceKey);
+  await expect(card).toContainText('не сходится: нужно ваше решение');
+  // Находки — открытым текстом, без разворачивания.
+  await expect(card.getByText('Находки ревью полностью')).toBeVisible();
+  await expect(card).toContainText('1. Нет состояний ошибок (открыта раундов: 3)');
+  await expect(card.getByRole('button', { name: 'Продолжить исправлять' })).toBeVisible();
+  await expect(card.getByRole('link', { name: 'Открыть предмет ревью' })).toBeVisible();
+  const other = cardOf(page, lead.sourceKey);
+  await expect(other).toContainText('Ведущий агент разберёт это сам');
+  await expect(other.getByRole('button', { name: 'Принять как ограничение' })).toHaveCount(0);
+  await expect(other.getByRole('button', { name: 'Продолжить исправлять' })).toHaveCount(0);
+  const huge = cardOf(page, oversized.sourceKey);
+  await expect(huge.getByRole('button', { name: 'Команда решения' })).toBeVisible();
+  await expect(huge.getByRole('button', { name: 'Принять как ограничение' })).toHaveCount(0);
+  expect(
+    (await new AxeBuilder({ page }).include('[aria-label="Центр внимания"]').analyze()).violations,
+  ).toEqual([]);
+
+  await card.getByRole('button', { name: 'Принять как ограничение' }).click();
+  const form = card.locator('form');
+  const reason = form.getByLabel('Основание решения');
+  await expect(reason).toBeFocused();
+  // Без основания решение не отправляется.
+  const submit = form.getByRole('button', { name: 'Принять как ограничение' });
+  await expect(submit).toBeDisabled();
+  expect(
+    (await new AxeBuilder({ page }).include('[aria-label="Центр внимания"]').analyze()).violations,
+  ).toEqual([]);
+  await reason.fill('Ошибки описывает следующий контракт релиза.');
+  await submit.click();
+  await expect(card).toHaveCount(0);
+  await expect(liveStatus(page)).toContainText('Находки приняты как ограничение');
+  expect(sent).toMatchObject({
+    sourceKey: owner.sourceKey,
+    occurrenceId: 'o1',
+    expectedVersion: 'v1',
+    action: 'accept-limitation',
+    input: { text: 'Ошибки описывает следующий контракт релиза.' },
+  });
+});

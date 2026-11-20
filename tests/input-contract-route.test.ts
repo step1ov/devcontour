@@ -1007,9 +1007,15 @@ test('F85: the carry needs the validated route and its own completed operation; 
         (i) => i.sourceKey === `input:${requestId}`,
       )!;
       assert.equal(card.actor, 'operator', name);
-      assert.ok(
-        card.actions.some((a) => a.id === 'supersede'),
-        name,
+      // F94: ответ оператора со сдвинувшейся остановкой — не новая форма
+      // ответа: первым действием — замена вопроса, заголовок прежний.
+      const domain = card.actions.filter((a) => a.kind === 'domain');
+      assert.equal(domain[0]?.id, 'supersede', `${name}: ${JSON.stringify(domain)}`);
+      assert.ok(!domain.some((a) => a.id === 'answer'), name);
+      assert.match(
+        card.title,
+        /^Ответ по задаче «.+»: DevContour не может продолжить сам$/,
+        `${name}: ${card.title}`,
       );
       await attention.act({
         sourceKey: card.sourceKey,

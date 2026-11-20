@@ -1,4 +1,3 @@
-import { execFileSync } from 'node:child_process';
 import { randomUUID } from 'node:crypto';
 import {
   HarnessError,
@@ -12,7 +11,7 @@ import {
 } from 'devcontour-harness';
 import { baseMovesOf, type DevContour } from '../core/service.ts';
 import type { DevContourState } from '../core/model.ts';
-import { dependsOnRepository, repositories, repository } from '../core/repositories.ts';
+import { repositories, repository } from '../core/repositories.ts';
 import { executionOf } from '../harness/execution.ts';
 import { CONSUMER_VERSION } from '../harness/host.ts';
 import { git, isAncestor } from './process.ts';
@@ -26,8 +25,15 @@ import {
   type ReviewedContractDocument,
 } from './sensitive-paths.ts';
 
-/** Локальная запись проверки базы: компонент, SHA базы, договор и исход. */
-export const BASE_CHECK = 'base-check';
+import {
+  BASE_CHECK,
+  BASE_CHECK_RETRIES,
+  baseCheckBasis,
+  baseCheckSettled,
+  sameProviders,
+  targetSha,
+} from './base-check-record.ts';
+export { BASE_CHECK, BASE_CHECK_RETRIES };
 /** Начало причины удержания переноса, который подтверждает только человек. */
 export const BASE_HELD_DETAIL = 'Перенос базы меняет приёмку или настройку контура';
 export interface BaseCheck {
@@ -88,20 +94,6 @@ export interface BaseCarry {
   /** Сведения о diff `from..sha`: шаблоны, число, первые пути, digest списка. */
   applicability: GateApplicability;
 }
-/**
- * Повторов провалившейся проверки базы. Провал gate базы бывает и сбоем среды
- * (бюджет времени под нагрузкой), поэтому один повтор — автоматически; после
- * него провал стоит до переноса базы, смены договора или `queue --start`.
- */
-export const BASE_CHECK_RETRIES = 1;
-
-/** SHA целевой ветки компонента — синхронно, внутри транзакции решения. */
-const targetSha = (path: string, branch: string) =>
-  execFileSync('git', ['-C', path, 'rev-parse', 'refs/heads/' + branch], {
-    encoding: 'utf8',
-    stdio: ['ignore', 'pipe', 'pipe'],
-    timeout: 10000,
-  }).trim();
 
 /** Что проверка базы исполняет и что переносит с прошедшей проверки предка. */
 interface BasePlan {
@@ -120,9 +112,6 @@ export const BASE_CARRY_MAX_AGE_MS = 7 * 24 * 60 * 60 * 1000;
 /** Сколько последних прошедших проверок базы просматривается в поисках предка. */
 export const BASE_CARRY_ANCHORS = 50;
 /** Базы поставщиков записи и текущие — одни и те же (нет поля — нет поставщиков). */
-const sameProviders = (r: Pick<BaseCheck, 'providers'>, providers: Record<string, string>) =>
-  JSON.stringify(Object.entries(r.providers ?? {}).sort()) ===
-  JSON.stringify(Object.entries(providers).sort());
 /**
  * План проверки базы `sha` компонента (D51). Результат gate переносится с
  * последней прошедшей проверки базы-предка, только когда harness сам не
@@ -460,21 +449,14 @@ export async function checkBase(
     const repo = repository(h.config, base.repositoryId);
     const gates = repo.gates.map((g) => g.id);
     if (!gates.length) continue;
-    const policyDigest = h.policyDigest(base.repositoryId);
     // Базы поставщиков (`dependsOn`, транзитивно) из того же снимка, что и
-    // базы решения: снимки зависимостей — вход gates компонента.
-    const dependencies = bases.filter((b) =>
-      dependsOnRepository(h.config, base.repositoryId, b.repositoryId),
-    );
-    const providers = Object.fromEntries(dependencies.map((b) => [b.repositoryId, b.sha]));
-    const previous = h.store.localRecord<BaseCheck>(BASE_CHECK, base.repositoryId, base.sha);
-    // Исход той же базы засчитывается при тех же базах поставщиков: сдвиг
-    // поставщика — тоже перенос (запись без поля — без поставщиков).
-    let record =
-      previous?.policyDigest === policyDigest && sameProviders(previous, providers)
-        ? previous
-        : undefined;
-    while (!record || (!record.passed && (record.tries ?? 1) <= BASE_CHECK_RETRIES)) {
+    // базы решения: снимки зависимостей — вход gates компонента. Исход той
+    // же базы засчитывается при том же договоре и тех же базах поставщиков —
+    // то же правило, что у подсказок (`baseCheckSpent`).
+    const basis = baseCheckBasis(h, base, bases);
+    const { policyDigest, dependencies, providers } = basis;
+    let record = basis.record;
+    while (!record || !baseCheckSettled(record)) {
       const tries = (record?.tries ?? 0) + 1;
       const runId = 'BK-' + randomUUID();
       const plan = await basePlan(

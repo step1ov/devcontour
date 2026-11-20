@@ -1,4 +1,5 @@
 import { baseMovesOf, type DevContour } from '../core/service.ts';
+import { baseCheckSpent } from '../runner/base-check-record.ts';
 import { inputHolds } from './input.ts';
 import type { AuditEvent, DevContourState } from '../core/model.ts';
 import { LeadWorkflow } from '../core/lead-workflow.ts';
@@ -38,7 +39,18 @@ export function queueStopOf(
   const view = queueStopView(state, events, {
     approvalMode: h.config.approvalMode,
     workflowActive: Boolean(live?.size),
-    ...(baseWait ? { baseRange, ...(baseRange ? { boardActive: live!.has('board') } : {}) } : {}),
+    ...(baseWait
+      ? {
+          baseRange,
+          ...(baseRange
+            ? {
+                boardActive: live!.has('board'),
+                // Повторы исчерпаны: цикл базу не проверит, выход — перенос.
+                ...(baseCheckSpent(h, state) ? { baseExhausted: true } : {}),
+              }
+            : {}),
+        }
+      : {}),
   });
   // Вопрос исполнителя очередь не останавливает (`needs-input` не держит
   // выдачу): рядом с её состоянием — сколько задач ждут ответа.
@@ -85,6 +97,8 @@ export function baseLoopChecks(
   boardActive?: boolean,
 ) {
   if (!baseMovesOf(state)) return false;
+  // Повторы проверки исчерпаны: `checkBase` gates не запустит (одно решение).
+  if (baseCheckSpent(h, state)) return false;
   return boardActive ?? boardWorkflowActive(h);
 }
 

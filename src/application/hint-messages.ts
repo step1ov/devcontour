@@ -3,6 +3,7 @@
 // `params`; текст собирается одним каталогом на язык из кода, параметров и
 // полей самого шага (доска, задание, цикл, план, вопрос). Команды, JSON, id и
 // пути входят в текст как есть на любом языке.
+import { REVIEW_ESCALATION_ROUNDS } from 'devcontour-harness';
 import type { LoopOutlook } from '../runner/lead-outlook.ts';
 import { hrefs } from './panel-links.ts';
 
@@ -120,7 +121,11 @@ export interface HintParamMap {
    * переноса, `no-board` — нет задания доски (задание ChangeSet базу не
    * проверяет).
    */
-  'pause-operator': { by?: 'lead'; reason?: string; base?: 'unchecked' | 'no-board' };
+  'pause-operator': {
+    by?: 'lead';
+    reason?: string;
+    base?: 'unchecked' | 'no-board' | 'exhausted';
+  };
   /**
    * Очередь держит одно ожидание проверки базы без диапазона этого переноса
    * (поставлено до переноса, прежней версией или диапазон устарел):
@@ -128,6 +133,26 @@ export interface HintParamMap {
    * ожидание называет проваленную проверку: базу сначала исправляют.
    */
   'base-unchecked': { failed?: true };
+  /**
+   * Проверка базы этого переноса не прошла, и её повторы исчерпаны
+   * (`baseCheckSpent` — то же решение, что у `checkBase`): цикл задания
+   * gates не запустит и ожидание не снимет. `failures` — проваленные или
+   * прерванные gates (`компонент/gate`). Выход — исправить базу и
+   * перенести её (`base-update --by host`) или подтверждение пользователя.
+   */
+  'base-exhausted': { failures: string[] };
+  /**
+   * Ревью предмета (`kind`, `subject` — как в `review-decide`) остановлено
+   * эскалацией: блокирующие находки (`findings` — сколько) открыты три
+   * раунда подряд, следующий раунд ждёт решения владельца в карточке
+   * центра внимания; `round` — последний раунд.
+   */
+  'review-escalated': {
+    kind: 'plan' | 'contract';
+    subject: string;
+    findings: number;
+    round: number;
+  };
   /**
    * Перенос базы удержан до подтверждения человека (`base.check.held`):
    * `paths` — чувствительные пути (`компонент:путь`), которые цикл задания
@@ -223,6 +248,12 @@ export interface HintParamMap {
 /** Порядок переноса ответа заменённого вопроса (`apply-carry`). */
 export type CarryOrder = 'draft' | 'unreleased' | 'now';
 export type HintCode = keyof HintParamMap;
+/** Раундов до эскалации ревью. */
+const REVIEW_ROUNDS = REVIEW_ESCALATION_ROUNDS;
+const EXHAUSTED_WAY_EN =
+  'The way out: fix the base and run devcontour base-update --by host (the new base gets a fresh check that the board workflow runs), or, once the failure is understood, ask the user to lift the wait without gates (the user starts the queue; the lead does not).';
+const EXHAUSTED_WAY_RU =
+  'Выход: исправьте базу и выполните devcontour base-update --by host (новую базу workflow доски проверит заново) или, когда провал понятен, попросите пользователя снять ожидание без gates (очередь запускает пользователь, не ведущий).';
 
 /** Поля шага, из которых текст берёт доску, задание, цикл, план и вопрос. */
 export interface HintSubject {
@@ -473,9 +504,11 @@ const en: Catalog = {
       : 'Dispatch is paused by the operator and no job loop lifts it: resume only on the user\'s decision with queue_set {"paused": false} (devcontour queue --start --by host).') +
     (p.base === 'unchecked'
       ? ' Over a base-check wait this lifts only the pause, and no job loop checks that base: the wait has no range of this base move (set before the move, by an older version, or outdated), so only the user lifts it after checking the base — the confirm-and-start action of the base move card in the attention center.'
-      : p.base === 'no-board'
-        ? ' Over a base-check wait this lifts only the pause, and no board workflow job runs to check the base (a ChangeSet job does not): register the board with workflow_start, its job loop checks the base.'
-        : ' Over a base-check wait this lifts only the pause: the board workflow checks the base.') +
+      : p.base === 'exhausted'
+        ? ` Over a base-check wait this lifts only the pause, and no job loop checks that base again: its check failed and the retries are used up. ${EXHAUSTED_WAY_EN}`
+        : p.base === 'no-board'
+          ? ' Over a base-check wait this lifts only the pause, and no board workflow job runs to check the base (a ChangeSet job does not): register the board with workflow_start, its job loop checks the base.'
+          : ' Over a base-check wait this lifts only the pause: the board workflow checks the base.') +
     (s.loop && s.boardId ? ` Meanwhile the job loop of board ${s.boardId} ${loopEn(s.loop)}.` : ''),
   'base-unchecked': (p, s) =>
     'operator: confirm the base move. Dispatch waits for a base check that no job loop runs: the wait has no range of this base move (set before the move, by an older version, or outdated), so the board workflow cannot check it with gates.' +
@@ -484,6 +517,11 @@ const en: Catalog = {
       : ' Ask the user to check the base and lift the wait with the confirm-and-start action of the base move card in the attention center of the panel;') +
     ' do not start the queue yourself (queue_set refuses while the queue holds only this wait).' +
     (s.boardId ? ` The job loop of board ${s.boardId} waits until then.` : ''),
+  'base-exhausted': (p, s) =>
+    `The base check of this move failed (${p.failures.length ? p.failures.join(', ') : 'see the wait in the attention center'}) and its retries are used up: no job loop runs the gates of that base again, so waiting for the loop or lifting a pause does not lift the wait. ${EXHAUSTED_WAY_EN}` +
+    (s.boardId ? ` The job loop of board ${s.boardId} waits until then.` : ''),
+  'review-escalated': (p) =>
+    `operator: the ${p.kind} review of ${p.subject} is stopped by escalation: ${p.findings} blocking finding(s) stayed open ${REVIEW_ROUNDS} rounds in a row, and the next round waits for the owner. Ask the user to decide in the attention center card of this review — accept the findings as a limitation or keep fixing (more rounds), with a reason (the user may also run devcontour review-decide --kind ${p.kind} --subject ${JSON.stringify(p.subject)} …). The lead does not take this decision. Once it is recorded, run the same review again.`,
   'base-held': (p, s) =>
     `operator: confirm the base move. The moved base changes acceptance or contour setup (${p.paths.length ? p.paths.join(', ') : 'see the wait in the attention center'}), and gates of that base do not prove such a change, so dispatch waits for a human: ask the user to confirm it with the confirm-and-start action of the base move card in the attention center of the panel. The lead does not lift this wait itself (no queue_set, no workflow_retry). The job loop lifts on its own only contract documents at the exact text that an independent review approved (review-contract or contract-change); acceptance files, profile, config and gates always need the user.` +
     (s.boardId ? ` The job loop of board ${s.boardId} waits until then.` : ''),
@@ -795,9 +833,11 @@ const ru: Catalog = {
       : 'Выдачу приостановил оператор, и ни один цикл задания её не снимет: возобновляйте только по решению пользователя — queue_set {"paused": false} (devcontour queue --start --by host).') +
     (p.base === 'unchecked'
       ? ' Над ожиданием проверки базы это снимает только паузу, а ту базу не проверит ни один цикл задания: у ожидания нет диапазона этого переноса (поставлено до переноса, прежней версией или устарело), поэтому его снимает только пользователь после проверки базы — «Подтвердить и запустить» в карточке переноса во «Внимании» панели.'
-      : p.base === 'no-board'
-        ? ' Над ожиданием проверки базы это снимает только паузу, а задания доски, которое проверит базу, нет (задание ChangeSet её не проверяет): зарегистрируйте доску через workflow_start — её цикл проверит базу.'
-        : ' Над ожиданием проверки базы это снимает только паузу: базу проверит workflow доски.') +
+      : p.base === 'exhausted'
+        ? ` Над ожиданием проверки базы это снимает только паузу, а ту базу ни один цикл задания снова не проверит: её проверка не прошла, и повторы исчерпаны. ${EXHAUSTED_WAY_RU}`
+        : p.base === 'no-board'
+          ? ' Над ожиданием проверки базы это снимает только паузу, а задания доски, которое проверит базу, нет (задание ChangeSet её не проверяет): зарегистрируйте доску через workflow_start — её цикл проверит базу.'
+          : ' Над ожиданием проверки базы это снимает только паузу: базу проверит workflow доски.') +
     (s.loop && s.boardId ? ` Тем временем цикл задания доски ${s.boardId} ${loopRu(s.loop)}.` : ''),
   'base-unchecked': (p, s) =>
     'operator: подтвердите перенос базы. Выдача ждёт проверки базы, которую не проведёт ни один цикл задания: у ожидания нет диапазона этого переноса (поставлено до переноса, прежней версией или устарело), и workflow доски не может проверить её gates.' +
@@ -806,6 +846,11 @@ const ru: Catalog = {
       : ' Попросите пользователя проверить базу и снять ожидание кнопкой «Подтвердить и запустить» в карточке переноса во «Внимании» панели;') +
     ' сами очередь не запускайте (queue_set откажет, пока очередь держит одно это ожидание).' +
     (s.boardId ? ` До этого цикл задания доски ${s.boardId} ждёт.` : ''),
+  'base-exhausted': (p, s) =>
+    `Проверка базы этого переноса не пройдена (${p.failures.length ? p.failures.join(', ') : 'см. ожидание в центре внимания'}), и её повторы исчерпаны: ни один цикл задания gates этой базы снова не запустит, поэтому ни ожидание цикла, ни снятие паузы ожидание не снимут. ${EXHAUSTED_WAY_RU}` +
+    (s.boardId ? ` До этого цикл задания доски ${s.boardId} ждёт.` : ''),
+  'review-escalated': (p) =>
+    `operator: ревью ${p.kind === 'plan' ? 'плана' : 'контракта'} ${p.subject} остановлено эскалацией: блокирующие находки (${p.findings}) открыты ${REVIEW_ROUNDS} раунда подряд, и следующий раунд ждёт решения владельца. Попросите пользователя решить в карточке этого ревью во «Внимании» панели — «Принять как ограничение» или «Продолжить исправлять», с основанием (или командой devcontour review-decide --kind ${p.kind} --subject ${JSON.stringify(p.subject)} …). Ведущий агент это решение не принимает. Когда решение записано, проведите то же ревью снова.`,
   'base-held': (p, s) =>
     `operator: подтвердите перенос базы. Перенесённая база меняет приёмку или настройку контура (${p.paths.length ? p.paths.join(', ') : 'см. ожидание в центре внимания'}), а gates этой базы такое изменение не доказывают, поэтому выдача ждёт человека: попросите пользователя подтвердить перенос кнопкой «Подтвердить и запустить» в «Внимании» панели. Ведущий агент это ожидание сам не снимает (ни queue_set, ни workflow_retry). Цикл задания сам снимает только документы контрактов в редакции, одобренной независимым ревью (review-contract или contract-change); файлы приёмки, профиль, конфигурацию и gates всегда подтверждает пользователь.` +
     (s.boardId ? ` До этого цикл задания доски ${s.boardId} ждёт.` : ''),

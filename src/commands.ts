@@ -108,8 +108,7 @@ import { propertySeed } from 'devcontour-harness';
 import { evaluateVisualRun } from './runner/visual.ts';
 import { brokerAddress, httpBroker } from './runner/visual-broker.ts';
 import { VISUAL_RUN_DEADLINE_MS, visualRun } from './runner/visual-run.ts';
-import { recordReviewDecision } from './core/review-decisions.ts';
-import { reviewExecutionOf } from './harness/execution.ts';
+import { decideReview } from './application/review-escalations.ts';
 const args = process.argv.slice(2),
   operation = args[0] ?? 'serve';
 /** Причина отказа проверки файла по-русски: частые коды zod, иначе текст zod. */
@@ -1351,13 +1350,12 @@ async function main() {
           throw new Error(
             'Решение по находке после эскалации — решение оператора; --by host не допускается',
           );
-        const kind = option('--kind', '');
-        const subject = option('--subject', '');
-        result = recordReviewDecision(
-          h.store,
+        // То же правило, что у карточки центра внимания (`decideReview`).
+        result = decideReview(
+          h,
           {
-            kind,
-            subject,
+            kind: option('--kind', ''),
+            subject: option('--subject', ''),
             findings: option('--findings', '')
               .split(',')
               .map((x) => x.trim())
@@ -1365,9 +1363,7 @@ async function main() {
             decision: option('--decision', ''),
             reason: option('--reason', ''),
           },
-          kind === 'plan' || kind === 'contract'
-            ? reviewExecutionOf(h).engine.reviews(kind, subject).at(-1)
-            : undefined,
+          'operator',
         );
       } else if (operation === 'changeset-budget-reset') {
         // Решение человека с причиной: ведущий агент сброс не выполняет —

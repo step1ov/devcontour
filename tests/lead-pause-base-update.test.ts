@@ -15,12 +15,13 @@ import { AgentService } from '../src/application/agent.ts';
 import { AttentionService } from '../src/application/attention.ts';
 import { devcontourHandoff } from '../src/application/handoff.ts';
 import { baseUpdateOperation } from '../src/runner/base-update.ts';
-import { BASE_HELD_DETAIL } from '../src/runner/base-check.ts';
+import { BASE_CHECK, BASE_HELD_DETAIL, type BaseCheck } from '../src/runner/base-check.ts';
 import { repositorySchema, type DevContourState } from '../src/core/model.ts';
 import { git } from '../src/runner/process.ts';
 import { leadLiftsPause, leadResumeOf, queueStopView } from '../src/core/work-status.ts';
 import { LeadWorkflow } from '../src/core/lead-workflow.ts';
 import { homeView } from '../src/application/home.ts';
+import { queueStopOf } from '../src/application/queue-stop.ts';
 import { Workspace } from '../src/core/workspace.ts';
 
 /** Репозиторий, рабочая ветка которого на коммит впереди базы прогонов. */
@@ -174,6 +175,16 @@ test('F93: lead pause over an unheld base check with a board job — no operator
       undefined,
     );
     assert.equal(lifted.queue.hint, 'Ведущий агент проверит базу и продолжит выдачу сам.');
+    // Причина — не команда «проверьте её гейтами», а то, что делает цикл.
+    assert.doesNotMatch(lifted.queue.reason ?? '', /проверьте её гейтами/);
+    assert.match(lifted.queue.reason ?? '', /цикл ведущего проверяет её gates/);
+    const stop = queueStopOf(h);
+    assert.match(
+      stop.stopReason ?? '',
+      /цикл ведущего проверяет её gates и продолжит очередь сам$/,
+    );
+    const card = lifted.attention.items.find((i) => i.sourceKey === 'queue');
+    if (card) assert.doesNotMatch(card.reason, /проверьте её гейтами/);
   });
 });
 
@@ -475,5 +486,119 @@ test('F93: host.next for a base wait the loop cannot check — with another boar
         assert.match(next.detail, /fix the base and run devcontour base-update --by host/);
       } else assert.deepEqual(next.params, {});
       assert.equal(await checkBase(h, { data, state: data }, () => {}), false, name);
+    });
+});
+
+/**
+ * Запись проверки базы `main` на SHA этого переноса: провал gate `test`;
+ * `tries` — прогонов (2 — повтор исчерпан), `policy` — договор записи.
+ */
+function seedBaseCheck(h: DevContour, tries: number, policy = h.policyDigest('main')) {
+  const sha = baseMovesOf(h.store.read())![0].to;
+  h.store.atomic(() =>
+    h.store.saveLocal(BASE_CHECK, 'main', sha, {
+      repositoryId: 'main',
+      sha,
+      policyDigest: policy,
+      runId: 'BK-seeded',
+      passed: false,
+      gates: ['test'],
+      failures: [{ gate: 'test', message: 'seeded failure' }],
+      evidence: [],
+      at: new Date().toISOString(),
+      tries,
+    } satisfies BaseCheck),
+  );
+  return sha;
+}
+
+test('host.next names the way out of a failed base check whose retries are used up — the same decision as checkBase, not pause-lift or job-live', async () => {
+  for (const name of ['spent, named', 'spent, fresh wait', 'retry left', 'other policy'] as const)
+    await withRepo(async ({ h, data }) => {
+      const agent = await leadPauseOverMove(h, data, 'board');
+      const sha = seedBaseCheck(
+        h,
+        name === 'retry left' ? 1 : 2,
+        name === 'other policy' ? 'p-earlier-contract' : undefined,
+      );
+      // Ожидание, которое уже назвало провал (как пишет checkBase), — кроме
+      // переноса, вернувшего базу на SHA с исчерпанной проверкой.
+      if (name !== 'spent, fresh wait')
+        h.store.change('fixture.failed', (s) => {
+          for (const w of s.waits ?? []) w.detail = 'Проверка базы не пройдена: main/test';
+        });
+      const spent = name.startsWith('spent');
+      const boardId = h.store.read().boards[0].id;
+      const steps = () => [
+        devcontourHandoff(h, {}).host.next!,
+        devcontourHandoff(h, { boardId }).host.next!,
+      ];
+      // Под своей паузой ведущего: снятие паузы ожидание не снимет.
+      for (const next of steps())
+        if (spent) {
+          assert.equal(next.action, 'base-update', `${name}: ${JSON.stringify(next)}`);
+          assert.equal(next.code, 'base-exhausted', name);
+          assert.deepEqual(next.params, { failures: ['main/test'] }, name);
+          assert.match(next.detail, /devcontour base-update --by host/, name);
+          assert.match(next.detail, /ask the user to lift the wait without gates/, name);
+          assert.doesNotMatch(next.detail, /the board workflow checks the base/, name);
+        } else assert.equal(next.code, 'pause-operator', `${name}: ${JSON.stringify(next)}`);
+      await agent.run({ operation: 'queue_set', input: { paused: false } });
+      assert.equal(h.store.read().pauseReason, 'base-check', name);
+      for (const next of steps())
+        if (spent) {
+          assert.equal(next.code, 'base-exhausted', `${name}: ${JSON.stringify(next)}`);
+          assert.equal(next.action, 'base-update', name);
+        } else {
+          // Повтор ещё есть или запись другого договора: цикл проверит базу.
+          assert.equal(next.action, 'wait', `${name}: ${JSON.stringify(next)}`);
+          assert.equal(next.code, 'pause-lift', name);
+        }
+      // Вид остановки очереди не обещает проверку циклом, когда повторы исчерпаны.
+      if (spent) {
+        const stop = queueStopOf(h);
+        assert.doesNotMatch(stop.action ?? '', /Цикл ведущего проверит базу/, name);
+        assert.match(stop.action ?? '', /base-update/, name);
+      }
+      // Центр внимания: цикл базу не проверит — снимает человек.
+      const { attention } = await views(h);
+      const card = attention.items.find((i) => i.sourceKey === 'wait:base-check');
+      if (name === 'spent, fresh wait') {
+        // Ожидание ещё не названо провалом: снимает оператор (цикл не проверит).
+        assert.equal(card?.actor, 'operator', name);
+        assert.ok(
+          card?.actions.some((a) => a.id === 'resume'),
+          name,
+        );
+      } else {
+        // Названный провал — карточка ведущего: исправить базу.
+        assert.equal(card?.actor, 'lead', name);
+        assert.equal(card?.title, 'Проверка перенесённой базы не пройдена', name);
+      }
+      if (!spent) {
+        // Повтор есть (или запись другого договора): проверка действительно
+        // исполняет gates, а после исчерпания повторов шаг — тот же выход.
+        assert.equal(await checkBase(h, { data, state: data }, () => {}), false, name);
+        assert.ok(
+          h.store.events().some((e) => e.type === 'base.check.started'),
+          `${name}: the check ran`,
+        );
+        const after = h.store.localRecord<BaseCheck>(BASE_CHECK, 'main', sha)!;
+        assert.notEqual(after.runId, 'BK-seeded', name);
+        assert.equal(after.tries, 2, name);
+        assert.equal(devcontourHandoff(h, {}).host.next!.code, 'base-exhausted', name);
+        return;
+      }
+      // Реальная проверка: gates не запускаются, запись прежняя, ожидание стоит.
+      assert.equal(await checkBase(h, { data, state: data }, () => {}), false, name);
+      const record = h.store.localRecord<BaseCheck>(BASE_CHECK, 'main', sha)!;
+      assert.equal(record.runId, 'BK-seeded', name);
+      assert.equal(record.tries, 2, name);
+      assert.equal(h.store.events().filter((e) => e.type === 'base.check.started').length, 0, name);
+      assert.match(
+        h.store.read().waits!.find((w) => w.kind === 'base-check')!.detail,
+        /^Проверка базы не пройдена: main\/test/,
+        name,
+      );
     });
 });

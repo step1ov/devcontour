@@ -50,10 +50,11 @@ import {
 } from '../core/input-labels.ts';
 import { budgetBlocks } from './context.ts';
 import { budgetCardReason } from '../core/usage.ts';
-import { InputService, inputHolds, type InputProposal } from './input.ts';
+import { InputService, inputHolds, ownerAnswersAgain, type InputProposal } from './input.ts';
 import { hrefs } from './panel-links.ts';
 import { inputReviewRounds } from '../harness/input-host.ts';
 import { DiscussionService } from './discussion.ts';
+import { decideReview, escalationSubjectText, reviewEscalations } from './review-escalations.ts';
 import { taskOwner } from '../core/sync-state.ts';
 import { baseWaitOf, queueStopOf, quietAttempts, quietOperations } from './queue-stop.ts';
 import {
@@ -651,12 +652,13 @@ const inputSource: AttentionSourceRule = {
           // отклонило ревью (как в карточке задачи).
           // В режиме agent сохранённый ответ ведущего на вопрос владельца
           // (записан до правила ответов ведущего) тоже ждёт ответа владельца.
+          // Правило — то же, что у шага `answer-operator` (`ownerAnswersAgain`):
+          // ответ со сдвинувшейся остановкой (F85) формы не получает — его
+          // выход — замена вопроса той же задачей (F94).
           const answer =
             operator &&
-            (r.state === 'awaiting-answer' ||
-              r.state === 'review-rejected' ||
-              (!operatorMode &&
-                ['answer-saved', 'context-review', 'ready-to-apply', 'stale'].includes(r.state)));
+            (ownerAnswersAgain(r) ||
+              (!r.moved && (r.state === 'awaiting-answer' || r.state === 'review-rejected')));
           // Отклонённое ревью (D03 `review-rejected`): в режиме operator ответ
           // применяют только подтверждением показанного раунда — то же правило
           // `InputService.apply`, что у панели; его находки — в карточке.
@@ -683,7 +685,7 @@ const inputSource: AttentionSourceRule = {
           // Исходная остановка не держится, а вопрос решает оператор (F39,
           // F85): выход — его замена той же задачей одним действием, затем
           // ведущий переносит тот же ответ в новую постановку.
-          const supersede = operator && !!r.moved && r.kind !== 'follow-up';
+          const supersede = operator && !!r.moved && r.kind !== 'follow-up' && !r.leadAnswerHeld;
           let findings = '';
           if (rejected)
             engine.read((v) => {
@@ -713,13 +715,15 @@ const inputSource: AttentionSourceRule = {
               ? `Решение исполнителя по задаче «${title}» ждёт ведущего`
               : answer
                 ? `Исполнитель спрашивает по задаче «${title}»`
-                : apply
-                  ? `Ответ по задаче «${title}» готов к применению`
-                  : r.state === 'contract-change-required'
-                    ? `Ответ по задаче «${title}» принят: нужно изменение контракта — ведёт ведущий`
-                    : r.resume
-                      ? `Ответ по задаче «${title}»: DevContour не может продолжить сам`
-                      : `Вопрос исполнителя по задаче «${title}»: ${inputStateLabels[r.state] ?? r.state}`,
+                : r.moved
+                  ? `Ответ по задаче «${title}»: DevContour не может продолжить сам`
+                  : apply
+                    ? `Ответ по задаче «${title}» готов к применению`
+                    : r.state === 'contract-change-required'
+                      ? `Ответ по задаче «${title}» принят: нужно изменение контракта — ведёт ведущий`
+                      : r.resume
+                        ? `Ответ по задаче «${title}»: DevContour не может продолжить сам`
+                        : `Вопрос исполнителя по задаче «${title}»: ${inputStateLabels[r.state] ?? r.state}`,
             // Следующий шаг — словами оператора: поле `next` сводки — указание
             // ведущему агенту по-английски, с операциями агентского API.
             // Повторные остановки вопросом — первой строкой: длинный вопрос
@@ -831,6 +835,121 @@ const inputSource: AttentionSourceRule = {
     );
   },
 };
+
+/**
+ * Эскалация технического ревью (harness 0.1.0-alpha.54): блокирующая
+ * находка плана, контракта или ответа исполнителю открыта три раунда
+ * подряд, и следующий раунд движок не начнёт до решения владельца — принять
+ * её ограничением или разрешить ещё раунды. Решает только оператор (то же
+ * правило, что `devcontour review-decide`); ведущему — ни кнопки, ни
+ * операции. Появление — набор эскалированных находок предмета; записанное
+ * решение снимает карточку (дальше ведущий проводит тот же раунд ревью).
+ * Раздел — по предмету: контракт — архитектура, план доски — разработка,
+ * ответ исполнителю — как его вопрос (о результате для пользователя —
+ * продукт).
+ */
+const reviewSource: AttentionSourceRule = {
+  id: 'review',
+  engine: true,
+  collect: (ctx) => {
+    const { h } = engineOf(ctx);
+    return reviewEscalations(h).map((e): Candidate => {
+      let taskId: string | undefined;
+      let section: AttentionSection = e.kind === 'contract' ? 'architecture' : 'development';
+      if (e.requestId)
+        try {
+          const request = executionOf(h).engine.inputRequest(e.requestId);
+          taskId = request.workId;
+          if (
+            request.question.impact === 'user-visible' ||
+            request.question.affects.includes('product')
+          )
+            section = 'product';
+        } catch {
+          /* Запрос не найден: карточка — по предмету ревью. */
+        }
+      const board =
+        e.kind === 'plan' && !e.requestId
+          ? ctx.state.boards.find((b) => b.id === e.subject)
+          : undefined;
+      const what =
+        escalationSubjectText(e, board?.title) +
+        (taskId ? ` по задаче «${taskTitle(ctx, taskId)}»` : '');
+      // Решение — только по находкам, показанным в тексте действия целиком
+      // (предел текста 2000 знаков): остальные ждут следующей карточки.
+      const intro = `Находки, которые ревью ${what} не снимает (раунд ${e.round}):`;
+      const outro =
+        '\n\n«Принять как ограничение» — находки остаются известным ограничением, ревью их больше не держит. «Продолжить исправлять» — ведущий получит ещё раунды на исправление. Основание обязательно: оно записывается вместе с решением.';
+      const shown: typeof e.findings = [];
+      let list = '';
+      for (const f of e.findings) {
+        // Только целиком и без маски: решение не касается текста, которого
+        // владелец не видел. Находка длиннее карточки или со скрытыми
+        // данными решается командой (причина называет её).
+        const text = one(f.message);
+        // Маска при чтении или уже записанная движком (`[REDACTED]`).
+        if (ctx.redact(text) !== text || text.includes('[REDACTED]')) break;
+        const line = `\n${shown.length + 1}. ${text} (открыта раундов: ${f.rounds})`;
+        if ((intro + list + line).length + outro.length + 120 > ATTENTION_LIMITS.prompt) break;
+        shown.push(f);
+        list += line;
+      }
+      const ids = shown.map((f) => f.id);
+      const count = e.findings.length + e.more;
+      const rest = count - shown.length;
+      const prompt =
+        intro +
+        list +
+        (rest ? `\n… и ещё находок: ${rest} — решение по ним предложит следующая карточка.` : '') +
+        outro;
+      const href = taskId ? hrefs.input(taskId) : board ? hrefs.board(board.id) : hrefs.contracts();
+      const action = (id: string, label: string, withPrompt: boolean): AttentionAction => ({
+        id,
+        kind: 'domain',
+        label,
+        input: 'text',
+        ...(withPrompt ? { prompt } : {}),
+      });
+      return {
+        sourceKey: `review:${e.kind}:${safeKey(e.subject)}`,
+        occurrenceId: d({ kind: e.kind, subject: e.subject, findings: [...ids].sort() }),
+        sourceVersion: `${e.round}:${count}:${d(ids)}`,
+        source: 'review',
+        category: 'decision',
+        actor: 'operator',
+        section,
+        title: `Ревью ${what} не сходится: нужно ваше решение`,
+        reason: ctx.redact(
+          shown.length
+            ? `Независимое ревью три раунда подряд не снимает блокирующие находки (${count}): ведущий исправлял, ревьюер их оставил. Следующий раунд ждёт вашего решения — принять их как ограничение или дать ещё раунды на исправление. Ведущий агент это решение не принимает.`
+            : 'Ревью три раунда подряд не снимает находку, которая не помещается в карточку или содержит скрытые данные. Прочитайте её в файле ответа ревью и решите командой ниже: принять как ограничение или продолжить исправлять, с основанием. Ведущий агент это решение не принимает.',
+        ),
+        since: e.at,
+        subject: { kind: 'review', id: `${e.kind}:${e.subject}`, href },
+        evidence: [{ kind: 'review', id: `${e.kind}:${e.subject}#${e.round}` }],
+        actions: shown.length
+          ? [
+              action('accept-limitation', 'Принять как ограничение', true),
+              action('continue', 'Продолжить исправлять', false),
+            ]
+          : [
+              {
+                id: 'handoff',
+                kind: 'handoff',
+                command: `devcontour review-decide --kind ${e.kind} --subject ${JSON.stringify(e.subject)} --findings ${e.findings[0]?.id ?? ''} --decision accepted-limitation|continue --reason "…" --workspace ${workspaceOf(ctx)}  # находка: ${e.findings[0]?.source ?? e.artifact}`,
+              },
+            ],
+        covered: [],
+        ...(board ? { boards: [board.id] } : {}),
+        basis: { kind: e.kind, subject: e.subject, findings: ids },
+      };
+    });
+  },
+};
+
+/** Ключ карточки из предмета ревью: недопустимые знаки — digest предмета. */
+const safeKey = (subject: string) =>
+  /^[A-Za-z0-9._#@-]{1,150}$/.test(subject) ? subject : 'd' + d(subject);
 
 /**
  * S13. Операция изменения контракта упала, устарела, прервана (lease истёк
@@ -2159,6 +2278,7 @@ const standInSource: AttentionSourceRule = {
  */
 export const engineSources: AttentionSourceRule[] = [
   inputSource,
+  reviewSource,
   contractChangeSource,
   budgetSource,
   queueSource,
@@ -2272,6 +2392,7 @@ export function sourceOfKey(key: string): AttentionSource | undefined {
     ['contract-change:', 'contract-change'],
     ['wait:', 'wait'],
     ['input:', 'input'],
+    ['review:', 'review'],
     ['changeset:', 'changeset'],
     ['preview:', 'preview'],
     ['corpus:', 'corpus'],
@@ -2303,6 +2424,25 @@ const rule = (
     'operator',
   );
   return { result: { messageId: posted.message.id, ruling, version: posted.version } };
+};
+
+/** Решение по эскалации ревью с карточки: находки показанного появления и основание. */
+const reviewDecision = (
+  ctx: AttentionContext,
+  item: Candidate,
+  input: ActContext['input'],
+  decision: 'accepted-limitation' | 'continue',
+): ActOutcome => {
+  const b = basisOf<{ kind: 'plan' | 'contract'; subject: string; findings: string[] }>(item);
+  const reason = (input.text ?? input.comment ?? '').trim();
+  if (reason.length < 3) throw new DomainError('Напишите основание решения', 400);
+  return {
+    result: decideReview(
+      ctx.h!,
+      { kind: b.kind, subject: b.subject, findings: b.findings, decision, reason },
+      'operator',
+    ),
+  };
 };
 
 const actionHandlers: Record<string, (a: ActContext) => ActOutcome> = {
@@ -2389,6 +2529,11 @@ const actionHandlers: Record<string, (a: ActContext) => ActOutcome> = {
   'stand-in/confirm': ({ ctx, item, input, key }) => rule(ctx, item, 'confirmed', input, key),
   'stand-in/reverse': ({ ctx, item, input, key }) =>
     rule(ctx, item, 'reversed', { text: textOf(input) }, key),
+  // Решение владельца по эскалированным находкам ревью: то же правило, что
+  // `devcontour review-decide` (только оператор, по последнему раунду).
+  'review/accept-limitation': ({ ctx, item, input }) =>
+    reviewDecision(ctx, item, input, 'accepted-limitation'),
+  'review/continue': ({ ctx, item, input }) => reviewDecision(ctx, item, input, 'continue'),
   'queue/resume': resume,
   'wait/resume': resume,
   'input/answer': ({ ctx, item, input, key, root }) => {
@@ -3621,7 +3766,14 @@ export class AttentionService {
       { actor: input.actor, ...(input.category ? { category: input.category } : {}) },
       new Map(),
     );
-    const items = view.items.slice(0, input.limit).map(({ state, ...item }) => (void state, item));
+    // Решение по эскалации ревью — только оператора: в списке ведущего
+    // (только чтение) у карточки нет действия, лишь переход к предмету.
+    const items = view.items.slice(0, input.limit).map(({ state, ...item }) => {
+      void state;
+      return item.source === 'review'
+        ? { ...item, actions: item.actions.filter((a) => a.kind !== 'domain') }
+        : item;
+    });
     // Ответ агентского API — до 64 KiB: список режется с конца, отрезанное
     // названо в `truncated`, а не отказом 413.
     while (items.length > 1 && !checkJsonBytes(items, AGENT_LIST_BYTES).within) items.pop();
