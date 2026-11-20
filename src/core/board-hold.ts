@@ -3,6 +3,7 @@ import type { DevContourState, Task } from './model.ts';
 import { DomainError } from './model.ts';
 import { LeadWorkflow, type WorkflowJob } from './lead-workflow.ts';
 import { boardOwner } from './sync-state.ts';
+import { compareWorkflowJobs } from 'devcontour-harness';
 
 /**
  * Решения ведущего (или оператора) о доске, которые не меняют её план и не
@@ -169,7 +170,7 @@ function boardJobs(h: DevContour, s: DevContourState, boardId: string) {
   return new LeadWorkflow(h)
     .list(boardOwner(board, s))
     .filter((j) => j.kind === 'board' && j.id === boardId)
-    .sort((a, b) => a.startedAt.localeCompare(b.startedAt));
+    .sort(compareWorkflowJobs);
 }
 
 /**

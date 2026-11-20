@@ -1917,6 +1917,39 @@ test('session_handoff: завершённая доска — без остано
   }
 });
 
+test('session_handoff: repairs — the job that continues comes first, even when a later-enqueued job of the board failed (harness 0.1.0-alpha.58 reads list() as oldest to newest)', () => {
+  // harness 0.1.0-alpha.58 reverses the pack source list and treats the last
+  // job of a graph as its newest: earlier ones are "replaced" and go after
+  // the live ones in repairs. The DevContour order (live first) must survive
+  // that: the older job that continues is not demoted below the failed one.
+  const f = fixture();
+  try {
+    const { board, at, start } = oneBoard(f.h);
+    const describe = (text: string) =>
+      f.store.change('fixture.edit', (st) => {
+        st.boards.find((x) => x.id === board)!.description = text;
+      });
+    const older = start();
+    describe('Another input');
+    const failed = start();
+    assert.notEqual(failed.key, older.key);
+    atStage(f.h, failed.key, failed.owner, 0, { status: 'failed', attempts: 1, error: 'boom' });
+    // The input is back: the older job continues, the later one stays failed.
+    describe('');
+    assert.equal(new LeadWorkflow(f.h).staleBoards().has(board), false);
+    const { pack } = at();
+    assert.deepEqual(
+      pack.repairs.map((r) => [r.key, r.status]),
+      [
+        [older.key, 'queued'],
+        [failed.key, 'failed'],
+      ],
+    );
+  } finally {
+    f.cleanup();
+  }
+});
+
 test('withoutIdleControllerStop: остановка, отброшенная пределом пакета, снимается и со счёта truncated.stops', () => {
   const f = fixture();
   try {

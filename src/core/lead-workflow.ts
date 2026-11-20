@@ -7,6 +7,7 @@ import {
   WORKSPACE_OWNER,
   WorkflowQueue,
   blocksWork,
+  compareWorkflowJobs,
   type WorkflowJob as HarnessJob,
 } from 'devcontour-harness';
 import { domain, executionOf } from '../harness/execution.ts';
@@ -128,6 +129,12 @@ export type WorkflowJob = z.infer<typeof workflowInput> & {
   token?: string;
   leaseUntil?: number;
   startedAt: string;
+  /**
+   * Номер постановки (harness 0.1.0-alpha.58): порядок заданий хранилища без
+   * часов. Задания прежних версий его не имеют — они старше любого задания с
+   * номером (`compareWorkflowJobs`).
+   */
+  seq?: number;
   finishedAt?: string;
   error?: string;
   history: { at: string; stage: number; event: string }[];
@@ -258,6 +265,7 @@ export class LeadWorkflow {
         error: job.error,
         attempts: job.attempts,
         startedAt: job.startedAt,
+        ...(job.seq !== undefined ? { seq: job.seq } : {}),
         authorRuntime: job.authorRuntime,
         // Ревью плана доски: кто его проводит по правилу вендора конфигурации.
         ...(job.kind === 'board'
@@ -350,7 +358,7 @@ export class LeadWorkflow {
       const jobs = b
         ? jobsOf(boardOwner(b, s))
             .filter((j) => j.kind === 'board' && j.id === boardId)
-            .sort((x, y) => x.startedAt.localeCompare(y.startedAt))
+            .sort(compareWorkflowJobs)
         : [];
       const live = jobs.findLast((j) => j.status === 'queued' || j.status === 'running');
       const last = live ?? jobs.at(-1);
@@ -433,7 +441,7 @@ export class LeadWorkflow {
    */
   staleBoards(s: DevContourState = this.h.store.read()) {
     const stale = new Map<string, { key: string; reason: string; hint: string }>();
-    const starts = new Map<string, string>();
+    const starts = new Map<string, WorkflowJob>();
     const fresh = new Set<string>();
     const inputs = new Map<string, { digest: string; owner?: string } | undefined>();
     const bound = (id: string) => {
@@ -452,10 +460,11 @@ export class LeadWorkflow {
         const input = bound(job.id);
         if (!input) continue;
         if (input.digest === job.inputDigest && input.owner === job.owner) fresh.add(job.id);
-        // Из нескольких действующих заданий доски — последнее по старту, а
-        // не по порядку хранения (F84): по нему сверяется `invalidated`.
-        else if (!stale.has(job.id) || job.startedAt > (starts.get(job.id) ?? '')) {
-          starts.set(job.id, job.startedAt);
+        // Из нескольких действующих заданий доски — новейшее по порядку
+        // постановки (`compareWorkflowJobs`), а не по порядку хранения (F84):
+        // по нему сверяется `invalidated`.
+        else if (!starts.has(job.id) || compareWorkflowJobs(job, starts.get(job.id)!) > 0) {
+          starts.set(job.id, job);
           stale.set(job.id, {
             key: job.key,
             reason:
@@ -501,7 +510,7 @@ export class LeadWorkflow {
       for (const job of this.list(owner)) {
         if (job.kind !== 'board' || (boardIds && !boardIds.includes(job.id))) continue;
         const seen = latest.get(job.id);
-        if (!seen || job.startedAt > seen.startedAt) latest.set(job.id, job);
+        if (!seen || compareWorkflowJobs(job, seen) > 0) latest.set(job.id, job);
         const input = bound(job.id);
         if (input && input.digest === job.inputDigest && input.owner === job.owner)
           fresh.add(job.id);
@@ -563,7 +572,7 @@ export class LeadWorkflow {
       for (const job of this.list(owner)) {
         if (job.kind !== 'changeset') continue;
         const seen = latest.get(job.id);
-        if (!seen || job.startedAt > seen.startedAt) latest.set(job.id, job);
+        if (!seen || compareWorkflowJobs(job, seen) > 0) latest.set(job.id, job);
         if (bound(job.id) === job.inputDigest) fresh.add(job.id);
       }
     return [...latest.values()]
@@ -622,12 +631,12 @@ export class LeadWorkflow {
           revision.taskIds.filter((id) => s.tasks.find((t) => t.id === id)?.status === 'draft'),
         );
     }
-    // Последнее задание предмета выбирают по `startedAt` (staleBoards,
-    // invalidated, статус работы), а хранилище упорядочивает задания по ключу
-    // — digest входа. Два старта одного предмета в одну миллисекунду дали бы
-    // равное время, и «последним» стало бы задание с меньшим digest. Новое
-    // задание начинается строго позже прежних заданий того же предмета: чтение
-    // и постановка — одной транзакцией. Время остаётся настоящим — его
+    // Новейшее задание предмета выбирают по номеру постановки `seq`
+    // (harness 0.1.0-alpha.58, `compareWorkflowJobs`), а не по часам. Время
+    // старта всё же сравнивают с другими настенными отметками (окончание
+    // операции изменения контракта), поэтому новое задание по-прежнему
+    // начинается строго позже прежних заданий того же предмета: чтение и
+    // постановка — одной транзакцией. Время остаётся настоящим — его
     // сравнивают с другими настенными отметками (окончание операции изменения
     // контракта), — поэтому старт ждёт следующей миллисекунды, а не сдвигает
     // время вперёд. Прежний старт дальше чем через START_WAIT_MS (часы

@@ -27,6 +27,7 @@ import { resumeBadge, resumeText } from '../src/core/input-labels.ts';
 import { panelSummary } from '../src/application/panel.ts';
 import { executionOf } from '../src/harness/execution.ts';
 import type { AgentAdapter } from '../src/runner/adapters.ts';
+import { fixture, input } from './helpers.ts';
 
 after(() => inputDemos.close());
 
@@ -862,5 +863,55 @@ test('F61b: idle passes with only consumed answers do not parse the stored reque
     }
   } finally {
     await f.cleanup();
+  }
+});
+
+test('Author runtime from the board job: the newest job by enqueue order (seq), not by startedAt, under an equal or rolled-back clock', async (t) => {
+  // harness 0.1.0-alpha.58 numbers every new workflow job (`seq`); the board
+  // job that decides the author is the newest by that number. Sorting by
+  // `startedAt` picked the older job here: under a stopped clock both starts
+  // tie and the storage order decides, under a clock set back the newer job
+  // starts earlier.
+  const { resumeAuthor } = await import('../src/application/input-resume.ts');
+  const f = fixture();
+  try {
+    const lead = new LeadWorkflow(f.h);
+    const board = (title: string) => {
+      const b = f.h.createBoard(title, '', 'main');
+      const { id } = f.h.addTask(b.id, input());
+      f.h.approve(b.id);
+      return { boardId: b.id, task: () => f.store.read().tasks.find((x) => x.id === id)! };
+    };
+    const describe = (boardId: string, text: string) =>
+      f.store.change('fixture.edit', (st) => {
+        st.boards.find((x) => x.id === boardId)!.description = text;
+      });
+    const real = Date.now();
+    let clock = real;
+    t.mock.method(Date, 'now', () => clock);
+    const cases = [
+      { title: 'Equal clock', second: real },
+      { title: 'Rolled-back clock', second: real - 60_000 },
+    ];
+    for (const { title, second } of cases) {
+      const { boardId, task } = board(title);
+      assert.equal(task().approval?.authorRuntime, undefined, 'the board job decides the author');
+      clock = real;
+      const first = lead.start({ kind: 'board', id: boardId, authorRuntime: 'codex' });
+      describe(boardId, 'Changed input');
+      clock = second;
+      const newer = lead.start({ kind: 'board', id: boardId, authorRuntime: 'claude' });
+      assert.notEqual(newer.key, first.key);
+      // The premise: startedAt alone does not name the newer job.
+      assert.ok(newer.startedAt <= first.startedAt, `${title}: ${newer.startedAt}`);
+      assert.ok(newer.seq! > first.seq!, `${title}: seq ${newer.seq} > ${first.seq}`);
+      assert.deepEqual(
+        resumeAuthor(f.h, task(), boardId),
+        { runtime: 'claude', source: 'board-job' },
+        title,
+      );
+    }
+  } finally {
+    f.cleanup();
   }
 });

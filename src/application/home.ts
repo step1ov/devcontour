@@ -3,6 +3,7 @@ import type { DevContour } from '../core/service.ts';
 import type { ProductChange } from '../core/preparation-model.ts';
 import { Preparation } from '../core/preparation.ts';
 import { LeadWorkflow, type WorkflowJob } from '../core/lead-workflow.ts';
+import { compareWorkflowJobs } from 'devcontour-harness';
 import { closureOf, parkedBoards, parkedHold, type BoardPark } from '../core/board-hold.ts';
 import { boardPhase, heldBaseOf, type BoardPhase } from '../core/work-status.ts';
 import { readyTasks } from '../core/graph.ts';
@@ -857,7 +858,7 @@ function development(
   for (const j of jobs) {
     const key = `${j.kind}:${j.id}`;
     const seen = latest.get(key);
-    if (!seen || seen.startedAt <= j.startedAt) latest.set(key, j);
+    if (!seen || compareWorkflowJobs(j, seen) > 0) latest.set(key, j);
   }
   // Упавшее задание принятой доски или принятого ChangeSet уже не держит
   // работу: его предмет закрыт другим путём (вручную).
@@ -880,7 +881,7 @@ function development(
     s === 'running' ? 0 : s === 'queued' ? 1 : s === 'failed' ? 2 : 3;
   const shownJobs = current
     .filter((j) => rank(j.status) < 3)
-    .sort((a, b) => rank(a.status) - rank(b.status) || b.startedAt.localeCompare(a.startedAt))
+    .sort((a, b) => rank(a.status) - rank(b.status) || compareWorkflowJobs(b, a))
     .slice(0, HOME_LIMITS.jobs);
 
   const holds = h ? inputHolds(h) : new Map<string, string>();
@@ -1528,7 +1529,9 @@ export function budgetOf(
     ...(x.durationMs !== undefined ? { spentMs: x.durationMs } : {}),
     spentUsd: x.reportedUsd + x.estimatedUsd,
     unknownCalls: x.unknownCalls,
-    ...(x.reason ? { reason: clip(russianCounts(x.reason), HOME_LIMITS.startupError) } : {}),
+    // Текст расчёта движка: с harness 0.1.0-alpha.56 он сам согласует слово с
+    // числом («у 1 попытки»), своя правка форм не нужна.
+    ...(x.reason ? { reason: clip(x.reason, HOME_LIMITS.startupError) } : {}),
   });
   const first = line(b);
   return {
@@ -1539,27 +1542,6 @@ export function budgetOf(
     scopes: sorted.slice(0, HOME_LIMITS.budgetScopes).map(line),
     asOf,
   };
-}
-
-/**
- * Склонение чисел в текстах расчёта бюджета («у 1 попыток» → «у 1 попытки»):
- * текст приходит из движка исполнения с формой множественного числа.
- */
-export function russianCounts(text: string) {
-  const forms = (n: number) =>
-    n % 10 === 1 && n % 100 !== 11
-      ? 0
-      : n % 10 >= 2 && n % 10 <= 4 && (n % 100 < 12 || n % 100 > 14)
-        ? 1
-        : 2;
-  const words: [RegExp, [string, string, string]][] = [
-    [/у (\d+) (?:попыток|попытки|попытка)(?![а-яё])/g, ['попытки', 'попыток', 'попыток']],
-    [/у (\d+) (?:вызовов|вызова|вызов)(?![а-яё])/g, ['вызова', 'вызовов', 'вызовов']],
-  ];
-  return words.reduce(
-    (t, [re, f]) => t.replace(re, (_, n: string) => `у ${n} ${f[forms(Number(n))]}`),
-    text,
-  );
 }
 
 /** Покрытие релиза по карте продукта (`IntentService.productView`). */

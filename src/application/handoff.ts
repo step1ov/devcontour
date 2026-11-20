@@ -27,6 +27,7 @@ import {
   type HandoffPack,
   type HandoffSource,
   type WorkflowJob as HarnessJob,
+  compareWorkflowJobs,
 } from 'devcontour-harness';
 import { z } from 'zod';
 import { dirname, resolve } from 'node:path';
@@ -681,17 +682,13 @@ export function harnessOf(h: DevContour) {
         .flatMap((owner) => queue.list(owner))
         .filter((job) => job.kind === 'board')
         .map((job): HarnessJob => ({ ...job, kind: 'graph' }))
-        .sort(
-          (a, b) =>
-            rank(a) - rank(b) ||
-            (a.startedAt < b.startedAt ? 1 : a.startedAt > b.startedAt ? -1 : 0),
-        );
+        .sort((a, b) => rank(a) - rank(b) || compareWorkflowJobs(b, a));
     });
   const workflows = { list, continues };
   const source: HandoffSource = { engine, policy: engine.policy, workflows };
   /**
    * Источник пакета: задания без вытесненных — тех, у доски которых есть
-   * задание, начатое позже, и которые не продолжаются. Пакет harness
+   * задание, поставленное позже (`compareWorkflowJobs`), и которые не продолжаются. Пакет harness
    * перечисляет в `repairs` незавершённые задания (ключ задания — с harness
    * 0.1.0-alpha.46, но отбор по доске остаётся здесь):
    * счётчик восстановлений прежнего задания доски выдавал бы себя за
@@ -699,6 +696,14 @@ export function harnessOf(h: DevContour) {
    * текущее задание в `repairs` не входит вовсе. Диагнозы остановок от
    * этого не меняются: действующее задание и наличие задания у доски
    * остаются в списке.
+   *
+   * Порядок: с harness 0.1.0-alpha.58 пакет читает `list()` как «от старых к
+   * новым» — разворачивает его, последнее задание графа считает новейшим, а
+   * прежние — замещёнными и ставит их в `repairs` после действующих. Список
+   * отдаётся в обратном порядке DevContour (выше: действующие, затем по
+   * текущему входу, затем новые): после разворота пакет видит тот же
+   * порядок, «новейшим» задания доски для него становится первое в нём
+   * (продолжающееся), а не последнее поставленное упавшее.
    */
   const packSource: HandoffSource = {
     ...source,
@@ -708,12 +713,14 @@ export function harnessOf(h: DevContour) {
         store.read((view) => {
           const jobs = list();
           const options = { reconfigureApplies: engine.reconfigureApplies(view) };
-          const newest = new Map<string, string>();
-          for (const job of jobs)
-            if (job.startedAt > (newest.get(job.id) ?? '')) newest.set(job.id, job.startedAt);
-          return jobs.filter(
-            (job) => job.startedAt >= newest.get(job.id)! || continues(job, view, options),
-          );
+          const newest = new Map<string, HarnessJob>();
+          for (const job of jobs) {
+            const seen = newest.get(job.id);
+            if (!seen || compareWorkflowJobs(job, seen) > 0) newest.set(job.id, job);
+          }
+          return jobs
+            .filter((job) => newest.get(job.id) === job || continues(job, view, options))
+            .reverse();
         }),
     },
   };

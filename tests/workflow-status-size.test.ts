@@ -64,7 +64,7 @@ function job(
   status: WorkflowJob['status'],
   end: number,
   events: number,
-  o: { id?: string; attempts?: number; startedAt?: string; last?: string } = {},
+  o: { id?: string; attempts?: number; startedAt?: string; last?: string; seq?: number } = {},
 ): WorkflowJob {
   return {
     key: key(name),
@@ -78,6 +78,7 @@ function job(
     status,
     repairs: 1,
     startedAt: o.startedAt ?? at(end - 30),
+    ...(o.seq !== undefined ? { seq: o.seq } : {}),
     ...(status === 'completed' ? { finishedAt: at(end) } : {}),
     ...(status === 'failed' ? { error: ERROR } : {}),
     history: Array.from({ length: events }, (_, i) => ({
@@ -382,6 +383,26 @@ test('workflow_status: упавшее задание повторяемо, то�
     assert.doesNotMatch(all.finished.hint ?? '', /retryable failed jobs are not listed/);
     // Фильтр не меняет повторяемость: она решается по всем заданиям владельца.
     assert.equal(status(f, { key: old.key }).finished.retryable, 0);
+    // Номер постановки (harness 0.1.0-alpha.58) решает, какое задание
+    // последнее, и при откатившихся часах: новое завершённое B-z начато
+    // «раньше» упавшего, но поставлено позже — упавшее не повторяемо. У B-w
+    // часы равны, последним поставлено упавшее — оно повторяемо.
+    const zOld = job('z-old', 'failed', 100, 2, { id: 'B-z', attempts: 1, seq: 1 });
+    const zNew = job('z-new', 'completed', 100, 2, { id: 'B-z', startedAt: at(10), seq: 2 });
+    const wOld = job('w-old', 'completed', 100, 2, { id: 'B-w', startedAt: at(50), seq: 3 });
+    const wNew = job('w-new', 'failed', 100, 2, {
+      id: 'B-w',
+      startedAt: at(50),
+      attempts: 1,
+      seq: 4,
+    });
+    put(f, [zOld, zNew, wOld, wNew]);
+    // Все восемь законченных заданий перечислены (компактно, с retryable).
+    const numbered = status(f, { limit: 8 });
+    assert.equal(numbered.jobs.find((j) => j.key === zOld.key)!.retryable, undefined);
+    assert.equal(numbered.jobs.find((j) => j.key === wNew.key)!.retryable, true);
+    // Повторяемы последнее упавшее B-y (выше) и B-w.
+    assert.equal(numbered.finished.retryable, 2);
   } finally {
     f.cleanup();
   }
