@@ -168,6 +168,14 @@ test('F93: lead pause over an unheld base check with a board job — no operator
       leadCard?.reason,
     );
     assert.match(leadCard?.reason ?? '', /Свою паузу ведущий снимает queue_set/);
+    // Новый перенос под той же паузой с другой причиной ожидания: появление
+    // то же, версия новая — прочитанная карточка снова видна изменённой.
+    h.baseUpdated([{ repositoryId: 'other', from: 'a', to: 'b' }]);
+    const moved = (await views(h)).attention.items.find((i) => i.sourceKey === 'queue');
+    assert.equal(h.store.read().pausedAt, paused);
+    assert.equal(moved?.id, cardBefore.id);
+    assert.notEqual(moved?.reason, leadCard?.reason);
+    assert.notEqual(moved?.sourceVersion, leadCard?.sourceVersion);
     // Ни карточки переноса базы, ни действия оператора: паузу снимает
     // ведущий, базу проверяет цикл задания (как host.next и карточка ведущего).
     assert.equal(

@@ -11,6 +11,8 @@
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
 import { Agent, request } from 'node:http';
+import { createHook } from 'node:async_hooks';
+import { setInterval as timersInterval } from 'node:timers';
 import { fixture } from './helpers.ts';
 import { serve } from '../src/server/http.ts';
 import { Scheduler } from '../src/runner/scheduler.ts';
@@ -35,49 +37,25 @@ function get(agent: Agent | false, url: string) {
 }
 
 /**
- * Таймеры, созданные за время `during` и не снятые (не сработавшие) к его
- * концу: интервалы и тайм-ауты от секунды, в том числе с `unref` — их не
- * видит `process.getActiveResourcesInfo`, а простой сервера они тратят.
+ * Таймеры, созданные за время отслеживания и ещё живые: любой `Timeout`
+ * процесса — глобальный или из `node:timers`, с `unref` или без, интервал
+ * или цепочка коротких тайм-аутов (у цепочки всегда жив следующий). Их не
+ * видит `process.getActiveResourcesInfo` (таймеры с `unref`), а простой
+ * сервера они тратят.
  */
 function trackTimers() {
-  const live = new Map<unknown, string>();
-  const g = globalThis as unknown as Record<string, (...args: unknown[]) => unknown>;
-  const original = {
-    setInterval: g.setInterval,
-    clearInterval: g.clearInterval,
-    setTimeout: g.setTimeout,
-    clearTimeout: g.clearTimeout,
-  };
-  g.setInterval = (fn: unknown, ms: unknown, ...rest: unknown[]) => {
-    const handle = original.setInterval(fn, ms, ...rest);
-    live.set(handle, `setInterval ${String(ms)}ms ${new Error().stack?.split('\n')[2]?.trim()}`);
-    return handle;
-  };
-  g.setTimeout = (fn: unknown, ms: unknown, ...rest: unknown[]) => {
-    if (typeof ms !== 'number' || ms < 1000) return original.setTimeout(fn, ms, ...rest);
-    const handle: unknown = original.setTimeout(
-      (...args: unknown[]) => {
-        live.delete(handle);
-        (fn as (...a: unknown[]) => void)(...args);
-      },
-      ms,
-      ...rest,
-    );
-    live.set(handle, `setTimeout ${ms}ms ${new Error().stack?.split('\n')[2]?.trim()}`);
-    return handle;
-  };
-  g.clearInterval = (handle: unknown) => {
-    live.delete(handle);
-    return original.clearInterval(handle);
-  };
-  g.clearTimeout = (handle: unknown) => {
-    live.delete(handle);
-    return original.clearTimeout(handle);
-  };
-  return {
-    live: () => [...live.values()],
-    restore: () => Object.assign(g, original),
-  };
+  const live = new Map<number, string>();
+  const hook = createHook({
+    init(id, type) {
+      if (type === 'Timeout')
+        live.set(id, new Error().stack?.split('\n').slice(5, 12).join(' | ') ?? '');
+    },
+    destroy(id) {
+      live.delete(id);
+    },
+  });
+  hook.enable();
+  return { live: () => [...live.values()], restore: () => hook.disable() };
 }
 
 test('F95: после закрытия клиента панели у сервера нет его соединений и таймеров, кэши проекций в пределе', async () => {
@@ -96,6 +74,21 @@ test('F95: после закрытия клиента панели у серве
     const before = await metrics();
     // Соединение самого запроса счётчиков — единственное.
     assert.equal(before.http.connections, 1);
+    // Отслеживание видит и то, что проверка «ресурсы как до клиента» не
+    // видит: интервал из `node:timers` с `unref` и цепочку коротких
+    // тайм-аутов. Без этого контроля пустой список ничего бы не доказывал.
+    {
+      const probe = trackTimers();
+      const leak = timersInterval(() => {}, 5000).unref();
+      let chain: NodeJS.Timeout | undefined;
+      const again = () => (chain = setTimeout(again, 20).unref());
+      again();
+      await new Promise((r) => setTimeout(r, 70));
+      assert.ok(probe.live().length >= 2, `контроль утечки не виден: ${probe.live().join('; ')}`);
+      clearInterval(leak);
+      clearTimeout(chain);
+      probe.restore();
+    }
     const timers = trackTimers();
     const agent = new Agent({ keepAlive: true, maxSockets: 2 });
     let polls = 0;
@@ -118,6 +111,17 @@ test('F95: после закрытия клиента панели у серве
           assert.equal(response.status, 200, `${path}: ${response.body.slice(0, 300)}`);
           polls++;
         }
+      // Областей больше предела кэша: вытеснение держит его размер.
+      for (let i = 0; i < 12; i++) {
+        const response = await get(agent, `${app.url}/api/attention?component=probe${i}`);
+        assert.equal(response.status, 200, response.body.slice(0, 300));
+        polls++;
+      }
+      assert.ok(app.projections.attentions.computations >= 12, 'каждая область посчитана');
+      assert.ok(
+        app.projections.attentions.entryCount <= 8,
+        `центр внимания хранит ${app.projections.attentions.entryCount} областей`,
+      );
       // Клиент держит открытые keep-alive соединения — счётчик их видит.
       // Без него проверка «0 после закрытия» прошла бы и при утечке.
       const during = await metrics();
@@ -126,7 +130,15 @@ test('F95: после закрытия клиента панели у серве
       // Вкладка закрыта: соединения клиента рвутся.
       agent.destroy();
       await new Promise((r) => setTimeout(r, 200));
-      assert.deepEqual(timers.live(), [], 'обработка запросов клиента оставила таймеры');
+      // `destroy` сработавшего тайм-аута (и этого ожидания) приходит после
+      // его вызова — следующим оборотом цикла.
+      await new Promise((r) => setImmediate(r));
+      await new Promise((r) => setImmediate(r));
+      assert.deepEqual(
+        timers.live(),
+        [],
+        'обработка запросов клиента оставила таймеры: ' + timers.live().join(' ;; '),
+      );
     } finally {
       timers.restore();
       agent.destroy();

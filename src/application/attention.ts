@@ -1217,7 +1217,9 @@ const queueSource: AttentionSourceRule = {
         sourceVersion: d({
           reason: s.pauseReason ?? null,
           failures: s.pauseFailures ?? [],
-          waits: (s.waits ?? []).map((w) => w.kind),
+          // Текст ожидания — тоже версия: время паузы ведущего перенос базы
+          // не меняет (появление то же), а новая причина обновляет карточку.
+          waits: (s.waits ?? []).map((w) => [w.kind, w.detail ?? null]),
           ...(base ? { base: base.detail } : {}),
           ...(pausedByLead(s) ? { by: 'lead' } : {}),
           ...(leadPauseNote(s) ? { note: leadPauseNote(s) } : {}),
