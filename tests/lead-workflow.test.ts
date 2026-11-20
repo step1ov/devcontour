@@ -80,6 +80,45 @@ test('Workflow enqueue is idempotent, expired owners are fenced and changed inpu
   }
 });
 
+test('Two board jobs started in the same millisecond: the later start is the newest one for staleBoards and invalidated', (t) => {
+  // A frozen clock: both starts get the same Date.now(). Storage orders jobs
+  // by key (an input digest), so without a strictly later start time the
+  // "newest live job" would depend on the digests.
+  const f = fixture();
+  try {
+    const b = f.h.createBoard('Same ms board', '', 'main');
+    f.h.addTask(b.id, input());
+    f.h.approve(b.id);
+    const lead = new LeadWorkflow(f.h);
+    const at = Date.now();
+    t.mock.method(Date, 'now', () => at);
+    const describe = (text: string) =>
+      f.store.change('fixture.edit', (st) => {
+        st.boards.find((x) => x.id === b.id)!.description = text;
+      });
+    const starts: string[] = [];
+    let previous: string | undefined;
+    // Several inputs so that both digest orders occur.
+    for (let i = 0; i < 6; i++) {
+      describe('Input ' + i);
+      const job = lead.start({ kind: 'board', id: b.id, authorRuntime: 'codex' });
+      if (previous) assert.ok(job.startedAt > previous, `${job.startedAt} > ${previous}`);
+      previous = job.startedAt;
+      starts.push(job.key);
+      describe('Moved ' + i);
+      assert.equal(lead.staleBoards().get(b.id)?.key, job.key, 'the later start is the stale one');
+      assert.equal(lead.invalidated([b.id])[0]?.key, job.key);
+    }
+    // A repeated start of the same input stays idempotent: same job, same time.
+    describe('Input 5');
+    const again = lead.start({ kind: 'board', id: b.id, authorRuntime: 'codex' });
+    assert.equal(again.key, starts.at(-1));
+    assert.equal(again.startedAt, previous);
+  } finally {
+    f.cleanup();
+  }
+});
+
 test('Смена политики на паузе: прогресс держит задачу (approval_stale) и называет устаревшее задание; новое задание и повторное утверждение снимают их', () => {
   // Ревьюер изменился (как после workspace-init). Утверждение плана
   // закрепило прежнюю политику: задача не выдаётся, `eligible` ложно.

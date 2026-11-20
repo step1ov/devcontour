@@ -192,9 +192,9 @@ export class LeadWorkflow {
    * правила. Здесь — только продуктовый вход задания (доска или ChangeSet) и
    * его владелец-компонент.
    */
-  queue() {
+  queue(now: () => number = Date.now) {
     const { engine, store } = executionOf(this.h);
-    return new WorkflowQueue(engine.host.store, engine.policy, Date.now, {
+    return new WorkflowQueue(engine.host.store, engine.policy, now, {
       input: (kind, id, view) => {
         try {
           const bound = this.input(kind as WorkflowJob['kind'], id, store.stateOf(view));
@@ -598,7 +598,22 @@ export class LeadWorkflow {
           revision.taskIds.filter((id) => s.tasks.find((t) => t.id === id)?.status === 'draft'),
         );
     }
-    return domain(() => this.queue().start(input)) as WorkflowJob;
+    // Последнее задание предмета выбирают по `startedAt` (staleBoards,
+    // invalidated, статус работы), а хранилище упорядочивает задания по ключу
+    // — digest входа. Два старта одного предмета в одну миллисекунду дали бы
+    // равное время, и «последним» стало бы задание с меньшим digest. Новое
+    // задание начинается строго позже прежних заданий того же предмета: чтение
+    // и постановка — одной транзакцией.
+    const { engine } = executionOf(this.h);
+    return domain(() =>
+      engine.host.store.transact('workflow.updated', () => {
+        const floor = [undefined, ...repositories(this.h.config).map((r) => r.id)]
+          .flatMap((owner) => this.list(owner))
+          .filter((j) => j.kind === input.kind && j.id === input.id)
+          .reduce((max, j) => Math.max(max, Date.parse(j.startedAt) || 0), 0);
+        return this.queue(() => Math.max(Date.now(), floor + 1)).start(input);
+      }),
+    ) as WorkflowJob;
   }
   /**
    * Пробелы областей задач досок работы (`scopeGaps`): видны при регистрации,

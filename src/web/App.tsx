@@ -2298,9 +2298,14 @@ export function App() {
             <section className="min-h-0 min-w-0 overflow-auto" aria-label="Рабочая область">
               <Suspense
                 fallback={
+                  // Заглушка не выше рабочей области: на широком экране её
+                  // высота задана сеткой, и холст высотой --canvas-height делал
+                  // область прокручиваемой без фокусируемого содержимого, пока
+                  // представление грузится. На узком экране область растёт по
+                  // содержимому, и заглушка держит место холста.
                   <p
                     role="status"
-                    className="text-muted-foreground m-0 min-h-(--canvas-height) p-6"
+                    className="text-muted-foreground m-0 h-full p-6 max-[1180px]:h-auto max-[1180px]:min-h-(--canvas-height)"
                   >
                     Загружаем представление…
                   </p>
