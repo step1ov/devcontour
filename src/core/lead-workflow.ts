@@ -132,6 +132,30 @@ export type WorkflowJob = z.infer<typeof workflowInput> & {
   error?: string;
   history: { at: string; stage: number; event: string }[];
 };
+/**
+ * Наибольшее ожидание следующей миллисекунды при старте задания. Ожидание идёт
+ * внутри транзакции записи, поэтому оно короткое: настоящим часам хватает
+ * доли миллисекунды, а стоящие или откаченные часы дают прежнюю ничью
+ * времени, а не удержание блокировки.
+ */
+const START_WAIT_MS = 2;
+/**
+ * Настоящее время строго позже `floor`, если до него не больше
+ * START_WAIT_MS; иначе (часы откатили или стоят) — текущее время как есть.
+ */
+function after(floor: number) {
+  const now = Date.now();
+  if (now > floor || floor - now >= START_WAIT_MS) return now;
+  const deadline = performance.now() + START_WAIT_MS;
+  for (;;) {
+    const at = Date.now();
+    if (at > floor) return at;
+    // Время читается после срока: процесс, снятый с процессора дольше срока,
+    // не возвращает отметку, прочитанную до паузы.
+    if (performance.now() >= deadline) return Date.now();
+  }
+}
+
 export class LeadWorkflow {
   constructor(readonly h: DevContour) {}
   input(kind: WorkflowJob['kind'], id: string, s: DevContourState = this.h.store.read()) {
@@ -192,9 +216,9 @@ export class LeadWorkflow {
    * правила. Здесь — только продуктовый вход задания (доска или ChangeSet) и
    * его владелец-компонент.
    */
-  queue() {
+  queue(now: () => number = Date.now) {
     const { engine, store } = executionOf(this.h);
-    return new WorkflowQueue(engine.host.store, engine.policy, Date.now, {
+    return new WorkflowQueue(engine.host.store, engine.policy, now, {
       input: (kind, id, view) => {
         try {
           const bound = this.input(kind as WorkflowJob['kind'], id, store.stateOf(view));
@@ -598,7 +622,26 @@ export class LeadWorkflow {
           revision.taskIds.filter((id) => s.tasks.find((t) => t.id === id)?.status === 'draft'),
         );
     }
-    return domain(() => this.queue().start(input)) as WorkflowJob;
+    // Последнее задание предмета выбирают по `startedAt` (staleBoards,
+    // invalidated, статус работы), а хранилище упорядочивает задания по ключу
+    // — digest входа. Два старта одного предмета в одну миллисекунду дали бы
+    // равное время, и «последним» стало бы задание с меньшим digest. Новое
+    // задание начинается строго позже прежних заданий того же предмета: чтение
+    // и постановка — одной транзакцией. Время остаётся настоящим — его
+    // сравнивают с другими настенными отметками (окончание операции изменения
+    // контракта), — поэтому старт ждёт следующей миллисекунды, а не сдвигает
+    // время вперёд. Прежний старт дальше чем через START_WAIT_MS (часы
+    // откатили) не ждут: время берётся как есть.
+    const { engine } = executionOf(this.h);
+    return domain(() =>
+      engine.host.store.transact('workflow.updated', () => {
+        const floor = [undefined, ...repositories(this.h.config).map((r) => r.id)]
+          .flatMap((owner) => this.list(owner))
+          .filter((j) => j.kind === input.kind && j.id === input.id)
+          .reduce((max, j) => Math.max(max, Date.parse(j.startedAt) || 0), 0);
+        return this.queue(() => after(floor)).start(input);
+      }),
+    ) as WorkflowJob;
   }
   /**
    * Пробелы областей задач досок работы (`scopeGaps`): видны при регистрации,

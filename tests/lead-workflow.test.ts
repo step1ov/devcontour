@@ -80,6 +80,61 @@ test('Workflow enqueue is idempotent, expired owners are fenced and changed inpu
   }
 });
 
+test('Two board jobs started in the same millisecond: the later start is the newest one for staleBoards and invalidated', (t) => {
+  // A virtual clock: every Date.now() or performance.now() call moves time by
+  // 10 µs, so back-to-back starts read the same millisecond whatever the
+  // machine load. Storage orders jobs by key (an
+  // input digest), so without a strictly later start time the "newest live
+  // job" would depend on the digests. The start time stays real: the start
+  // waits for the next millisecond instead of moving time forward.
+  const f = fixture();
+  try {
+    const b = f.h.createBoard('Same ms board', '', 'main');
+    f.h.addTask(b.id, input());
+    f.h.approve(b.id);
+    const lead = new LeadWorkflow(f.h);
+    const base = Date.now();
+    let virtual = 0;
+    const clock = () => base + Math.floor((virtual += 0.01));
+    // One mock per method: a second mock.method on Date.now would restore to
+    // the first mock, not to the real clock, and freeze time for later tests.
+    const now = t.mock.method(Date, 'now', clock);
+    t.mock.method(performance, 'now', () => (virtual += 0.01));
+    const describe = (text: string) =>
+      f.store.change('fixture.edit', (st) => {
+        st.boards.find((x) => x.id === b.id)!.description = text;
+      });
+    const starts: string[] = [];
+    let previous: string | undefined;
+    // Several inputs so that both digest orders occur.
+    for (let i = 0; i < 6; i++) {
+      describe('Input ' + i);
+      const job = lead.start({ kind: 'board', id: b.id, authorRuntime: 'codex' });
+      if (previous) assert.ok(job.startedAt > previous, `${job.startedAt} > ${previous}`);
+      assert.ok(Date.parse(job.startedAt) <= clock(), 'not ahead of the clock');
+      previous = job.startedAt;
+      starts.push(job.key);
+      describe('Moved ' + i);
+      assert.equal(lead.staleBoards().get(b.id)?.key, job.key, 'the later start is the stale one');
+      assert.equal(lead.invalidated([b.id])[0]?.key, job.key);
+    }
+    // A repeated start of the same input stays idempotent: same job, same time.
+    describe('Input 5');
+    const again = lead.start({ kind: 'board', id: b.id, authorRuntime: 'codex' });
+    assert.equal(again.key, starts.at(-1));
+    assert.equal(again.startedAt, previous);
+    // A stopped clock (or one set back) does not hang the start: it waits at
+    // most a few milliseconds and takes the time as it is.
+    const stopped = clock();
+    now.mock.mockImplementation(() => stopped);
+    describe('Stopped');
+    const late = lead.start({ kind: 'board', id: b.id, authorRuntime: 'codex' });
+    assert.equal(late.startedAt, new Date(stopped).toISOString());
+  } finally {
+    f.cleanup();
+  }
+});
+
 test('Смена политики на паузе: прогресс держит задачу (approval_stale) и называет устаревшее задание; новое задание и повторное утверждение снимают их', () => {
   // Ревьюер изменился (как после workspace-init). Утверждение плана
   // закрепило прежнюю политику: задача не выдаётся, `eligible` ложно.

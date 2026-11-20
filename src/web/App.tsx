@@ -2298,9 +2298,14 @@ export function App() {
             <section className="min-h-0 min-w-0 overflow-auto" aria-label="Рабочая область">
               <Suspense
                 fallback={
+                  // Заглушка не выше рабочей области: на широком экране её
+                  // высота задана сеткой, и холст высотой --canvas-height делал
+                  // область прокручиваемой без фокусируемого содержимого, пока
+                  // представление грузится. На узком экране область растёт по
+                  // содержимому, и заглушка держит место холста.
                   <p
                     role="status"
-                    className="text-muted-foreground m-0 min-h-(--canvas-height) p-6"
+                    className="text-muted-foreground m-0 h-full p-6 max-[1180px]:h-auto max-[1180px]:min-h-(--canvas-height)"
                   >
                     Загружаем представление…
                   </p>
@@ -2353,8 +2358,13 @@ export function App() {
                   />
                 )}
                 {tab === 'kanban' && (
+                  // Высота — рабочей области на широком экране (как у
+                  // заглушки загрузки): пустые колонки высотой холста делали
+                  // область прокручиваемой без единой карточки для фокуса.
+                  // Высокие колонки с карточками прокручивают область, как
+                  // прежде; на узком экране колонки держат место холста.
                   <div
-                    className="grid h-full min-h-(--canvas-height) grid-flow-col gap-3 overflow-x-auto px-8 py-4 max-[760px]:px-4"
+                    className="grid h-full grid-flow-col gap-3 overflow-x-auto px-8 py-4 max-[1180px]:min-h-(--canvas-height) max-[760px]:px-4"
                     // Пустая колонка уже, чем занятая: пятая колонка не уходит
                     // за край, пока в ней нечего показать.
                     style={{
@@ -2366,6 +2376,11 @@ export function App() {
                         )
                         .join(' '),
                     }}
+                    // Шесть колонок шире рабочей области прокручиваются по
+                    // горизонтали и на пустой доске: контейнер — область,
+                    // доступная с клавиатуры.
+                    role="region"
+                    tabIndex={0}
                     aria-label="Колонки задач"
                   >
                     {kanbanColumns.map((column) => {

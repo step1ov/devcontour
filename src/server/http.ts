@@ -49,7 +49,7 @@ import {
 import { CheckCorpus } from '../core/check-store.ts';
 import { taskProgress } from '../application/context.ts';
 import { createServer, type IncomingMessage, type ServerResponse } from 'node:http';
-import type { AddressInfo } from 'node:net';
+import type { AddressInfo, Socket } from 'node:net';
 import { readFile, realpath } from 'node:fs/promises';
 import { fileURLToPath } from 'node:url';
 import { resolve, join, extname, sep, basename, relative, isAbsolute } from 'node:path';
@@ -408,7 +408,13 @@ export async function serve(
       },
     );
   };
+  // Клиенты панели (F95): открытые соединения и счёт запросов — в
+  // `GET /api/metrics`. Закрытая вкладка не оставляет сервера ни соединения,
+  // ни таймера: простой после неё — тот же, что до неё.
+  const sockets = new Set<Socket>();
+  let requests = 0;
   const handleRequest = async (req: IncomingMessage, res: ServerResponse) => {
+    requests++;
     try {
       if (
         ![new URL(origin).host, `localhost:${new URL(origin).port}`].includes(
@@ -444,7 +450,15 @@ export async function serve(
         // документа, шлюз выдачи и пробуждения цикла ведущего. Без чтения
         // документа — опрос сам по себе ничего не разбирает.
         if (req.method === 'GET' && path === '/api/metrics') {
-          json(res, 200, serverMetrics(h, scheduler, lead));
+          json(
+            res,
+            200,
+            serverMetrics(h, scheduler, lead, {
+              connections: sockets.size,
+              requests,
+              projections: Object.values(projections).reduce((n, c) => n + c.entryCount, 0),
+            }),
+          );
           return;
         }
         const preparationStore = h?.store ?? options.bootstrap?.store;
@@ -1258,12 +1272,26 @@ export async function serve(
       });
     }
   };
+  const projections = {
+    summaries,
+    overviews,
+    attentions,
+    preparations,
+    products,
+    homes,
+    homeSlows,
+    questionSummaries,
+  };
   const server = createServer((req, res) => {
     // Node's HTTP server does not await listener promises. Also catch failures
     // while writing an error response, e.g. after the connection has closed.
     void handleRequest(req, res).catch((error: unknown) => {
       res.destroy(error instanceof Error ? error : new Error(String(error)));
     });
+  });
+  server.on('connection', (socket: Socket) => {
+    sockets.add(socket);
+    socket.once('close', () => sockets.delete(socket));
   });
   await new Promise<void>((r, reject) => {
     server.once('error', reject);
@@ -1284,16 +1312,7 @@ export async function serve(
     server,
     url: origin,
     /** Кэши проекций опроса панели: счётчики вычислений для диагностики и тестов. */
-    projections: {
-      summaries,
-      overviews,
-      attentions,
-      preparations,
-      products,
-      homes,
-      homeSlows,
-      questionSummaries,
-    },
+    projections,
     close: async () => {
       stopping = true;
       // Ведущий цикл прерывается первым — до отметки остановки: его стадия не
@@ -1336,6 +1355,12 @@ export function serverMetrics(
   h: DevContour | undefined,
   scheduler: Scheduler | undefined,
   lead: LeadRunner | undefined,
+  /**
+   * Клиенты сервера (F95): открытые соединения (включая соединение этого
+   * запроса), запросы с запуска и области кэшей проекций панели (их число
+   * ограничено размером кэшей и после ухода клиента не растёт).
+   */
+  http?: { connections: number; requests: number; projections: number },
 ) {
   const cpu = process.cpuUsage();
   const memory = process.memoryUsage();
@@ -1350,5 +1375,11 @@ export function serverMetrics(
       : null,
     idleClaims: gate ? { skipped: gate.skipped, passed: gate.passed, maxMs: gate.maxMs } : null,
     lead: lead ? { ...lead.stats } : null,
+    ...(http ? { http } : {}),
+    // Ресурсы цикла событий, которые держат процесс (сокеты, таймеры без
+    // unref, запросы файловой системы): по виду и числу.
+    resources: process
+      .getActiveResourcesInfo()
+      .reduce<Record<string, number>>((a, k) => ((a[k] = (a[k] ?? 0) + 1), a), {}),
   };
 }

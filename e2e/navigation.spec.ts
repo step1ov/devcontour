@@ -1,4 +1,5 @@
 import { test, expect } from '@playwright/test';
+import AxeBuilder from '@axe-core/playwright';
 
 // Адрес панели: вид, доска и задача. Ссылка должна вести туда, куда
 // указывает, а «Назад» — уходить со страницы, а не ходить по кругу.
@@ -122,4 +123,52 @@ test('A link to a cancelled task shows that task, not the first one of the board
   ).toBeVisible();
   await expect(page.getByLabel(/Показать отменённые/)).toBeChecked();
   await expect(page).toHaveURL(new RegExp(`[?&]task=${cancelled.id}`));
+});
+
+test('While a view is still loading, the work area does not scroll without keyboard access', async ({
+  page,
+}) => {
+  // A slow machine loads the graph chunk after the panel around it: the
+  // placeholder alone must fit the work area, or axe sees a scrollable region
+  // with nothing to focus (scrollable-region-focusable).
+  let release!: () => void;
+  const held = new Promise<void>((resolve) => (release = resolve));
+  await page.route(/\/GraphPanel-[^/]*\.js$/, async (route) => {
+    await held;
+    await route.continue();
+  });
+  await page.goto('/?tab=graph');
+  const area = page.getByRole('region', { name: 'Рабочая область' });
+  await expect(area.getByRole('status')).toHaveText('Загружаем представление…');
+  expect(
+    await area.evaluate((e) => e.scrollHeight <= e.clientHeight && e.scrollWidth <= e.clientWidth),
+  ).toBe(true);
+  expect(
+    (await new AxeBuilder({ page }).include('section[aria-label="Рабочая область"]').analyze())
+      .violations,
+  ).toEqual([]);
+  release();
+  await expect(area.getByRole('application')).toBeVisible();
+});
+
+test('The kanban of an empty board fits the work area on a wide screen', async ({
+  page,
+  request,
+}) => {
+  // No cards — nothing to focus: the columns must not make the work area
+  // scrollable (scrollable-region-focusable).
+  const { board } = await boardWith(request, 'Empty kanban board', []);
+  await page.goto(`/?tab=kanban&board=${board}`);
+  const area = page.getByRole('region', { name: 'Рабочая область' });
+  await expect(
+    area.getByRole('region', { name: 'Колонки задач' }).locator('> section'),
+  ).not.toHaveCount(0);
+  await expect(area.locator('[aria-label="Колонки задач"] button')).toHaveCount(0);
+  expect(
+    await area.evaluate((e) => e.scrollHeight <= e.clientHeight && e.scrollWidth <= e.clientWidth),
+  ).toBe(true);
+  expect(
+    (await new AxeBuilder({ page }).include('section[aria-label="Рабочая область"]').analyze())
+      .violations,
+  ).toEqual([]);
 });
