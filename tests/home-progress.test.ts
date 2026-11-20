@@ -16,7 +16,6 @@ import {
   gateTrendOf,
   homeSlowView,
   spendOf,
-  russianCounts,
   operatorQueue,
   LEAD_COMMAND,
   homeView,
@@ -1372,11 +1371,7 @@ test('Home queue text: who resumes depends on the lead workflow and the approval
     assert.doesNotMatch(text, LEAD_COMMAND, text);
 });
 
-test('Home budget: a line per scope, holding first; engine text gets Russian counts', () => {
-  assert.equal(
-    russianCounts('у 1 попыток вызовы не записаны, у 21 вызовов неизвестна, у 3 попыток'),
-    'у 1 попытки вызовы не записаны, у 21 вызова неизвестна, у 3 попыток',
-  );
+test('Home budget: a line per scope, holding first; the engine text passes as is', () => {
   const b = (
     kind: 'task' | 'board' | 'workspace',
     state: 'within' | 'exceeded' | 'undetermined',
@@ -1389,7 +1384,8 @@ test('Home budget: a line per scope, holding first; engine text gets Russian cou
     estimatedUsd: 0,
     unknownCalls: state === 'undetermined' ? 1 : 0,
     unfinishedCalls: 0,
-    reason: state === 'within' ? undefined : 'у 1 попыток вызовы не записаны',
+    // Форма движка с harness 0.1.0-alpha.56: слово согласовано с числом.
+    reason: state === 'within' ? undefined : 'у 1 попытки вызовы не записаны',
   });
   const budget = budgetOf(
     {

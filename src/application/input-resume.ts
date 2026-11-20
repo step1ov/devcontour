@@ -3,7 +3,7 @@
 // `input_target` → `input_apply`, который ведёт сервер (`InputResumer`,
 // src/runner/input-resume.ts). Здесь — общие записи и проекция для сводки
 // вопроса, панели, центра внимания и пакета передачи; вызовов модели нет.
-import { latestAnswer, type InputRequest } from 'devcontour-harness';
+import { latestAnswer, newestWorkflowJob, type InputRequest } from 'devcontour-harness';
 import type { DevContour } from '../core/service.ts';
 import type { Task } from '../core/model.ts';
 import { LeadWorkflow } from '../core/lead-workflow.ts';
@@ -142,7 +142,9 @@ export function resumeAuthor(
         return [];
       }
     });
-    const newest = jobs.sort((a, b) => b.startedAt.localeCompare(a.startedAt))[0];
+    // Новейшее — по номеру постановки (harness 0.1.0-alpha.58), а не по
+    // `startedAt`: равные или откатившиеся часы не выбирают задание по ключу.
+    const newest = newestWorkflowJob(jobs);
     if (newest) return { runtime: newest.authorRuntime, source: 'board-job' };
   }
   return h.config.mode === 'demo' ? { runtime: 'codex', source: 'demo' } : undefined;

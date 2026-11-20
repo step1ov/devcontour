@@ -80,7 +80,7 @@ test('Workflow enqueue is idempotent, expired owners are fenced and changed inpu
   }
 });
 
-test('Two board jobs started in the same millisecond: the later start is the newest one for staleBoards and invalidated', (t) => {
+test('Two board jobs started in the same millisecond, under a stopped or rolled-back clock: the later enqueue is the newest one for staleBoards and invalidated', (t) => {
   // A virtual clock: every Date.now() or performance.now() call moves time by
   // 10 µs, so back-to-back starts read the same millisecond whatever the
   // machine load. Storage orders jobs by key (an
@@ -130,6 +130,23 @@ test('Two board jobs started in the same millisecond: the later start is the new
     describe('Stopped');
     const late = lead.start({ kind: 'board', id: b.id, authorRuntime: 'codex' });
     assert.equal(late.startedAt, new Date(stopped).toISOString());
+    // The tie and a clock set back no longer decide the newest job: harness
+    // 0.1.0-alpha.58 numbers jobs on enqueue (`seq`, compareWorkflowJobs).
+    describe('Stopped moved');
+    assert.equal(lead.staleBoards().get(b.id)?.key, late.key, 'stopped clock: the later enqueue');
+    assert.equal(lead.invalidated([b.id])[0]?.key, late.key);
+    now.mock.mockImplementation(() => stopped - 60_000);
+    describe('Rolled back');
+    const back = lead.start({ kind: 'board', id: b.id, authorRuntime: 'codex' });
+    assert.ok(back.startedAt < late.startedAt, 'the clock was set back');
+    assert.ok(back.seq! > late.seq!);
+    describe('Rolled back moved');
+    assert.equal(
+      lead.staleBoards().get(b.id)?.key,
+      back.key,
+      'rolled-back clock: the later enqueue',
+    );
+    assert.equal(lead.invalidated([b.id])[0]?.key, back.key);
   } finally {
     f.cleanup();
   }

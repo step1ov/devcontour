@@ -1,4 +1,5 @@
 import type { DevContour } from '../core/service.ts';
+import { compareWorkflowJobs } from 'devcontour-harness';
 import type { ChangeSet, DevContourState, Task } from '../core/model.ts';
 import { boardPhase } from '../core/work-status.ts';
 import { BUDGET_RESET_ASK, gatelessJoint, interruptedJoint } from '../core/joint-budget.ts';
@@ -131,6 +132,7 @@ export function stoppedWorkflows<
     status: string;
     error?: string;
     startedAt: string;
+    seq?: number;
   },
 >(s: DevContourState, jobs: readonly W[]): W[] {
   const tasks = s.tasks.filter((t: Task) => t.status !== 'cancelled');
@@ -142,7 +144,7 @@ export function stoppedWorkflows<
     // Решение относится к последнему workflow доски или ChangeSet: прежний,
     // упавший раньше, — история, даже если упал и новый. Иначе панель
     // показывала устаревший отказ рядом с актуальным.
-    if (jobs.some((x) => x.id === w.id && x.key !== w.key && x.startedAt > w.startedAt))
+    if (jobs.some((x) => x.id === w.id && x.key !== w.key && compareWorkflowJobs(x, w) > 0))
       return true;
     if (w.kind === 'board') {
       const board = s.boards.find((b) => b.id === w.id);

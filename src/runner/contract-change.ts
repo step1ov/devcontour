@@ -5,7 +5,7 @@ import { readFile, writeFile } from 'node:fs/promises';
 import { readFileSync, renameSync, rmSync } from 'node:fs';
 import { join } from 'node:path';
 import { z } from 'zod';
-import { fencedRefMove } from 'devcontour-harness';
+import { compareWorkflowJobs, fencedRefMove } from 'devcontour-harness';
 import { executionOf } from '../harness/execution.ts';
 import { LeadWorkflow } from '../core/lead-workflow.ts';
 import { DomainError, unverifiedFinding, type Contract } from '../core/model.ts';
@@ -555,12 +555,15 @@ export class ContractChanges {
   private staleAtStart() {
     const s = this.h.store.read();
     const lead = new LeadWorkflow(this.h);
-    const latest = new Map<string, { key: string; status: string; startedAt: string }>();
+    const latest = new Map<
+      string,
+      { key: string; status: string; startedAt: string; seq?: number }
+    >();
     for (const owner of [undefined, ...repositories(this.h.config).map((r) => r.id)])
       for (const job of lead.list(owner)) {
         const id = `${job.kind}:${job.id}`;
         const seen = latest.get(id);
-        if (!seen || job.startedAt > seen.startedAt) latest.set(id, job);
+        if (!seen || compareWorkflowJobs(job, seen) > 0) latest.set(id, job);
       }
     const closed = [...latest.values()].filter((j) => j.status === 'stale').map((j) => j.key);
     return [

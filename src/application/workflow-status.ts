@@ -22,7 +22,7 @@
  *   `key`, не уходит никогда. Отказ остаётся только для того, что сузить нечем.
  */
 import { z } from 'zod';
-import { checkJsonBytes, jsonBytes } from 'devcontour-harness';
+import { checkJsonBytes, compareWorkflowJobs, jsonBytes } from 'devcontour-harness';
 import { LeadWorkflow, type WorkflowJob } from '../core/lead-workflow.ts';
 import type { DevContour } from '../core/service.ts';
 import { DomainError } from '../core/model.ts';
@@ -74,12 +74,7 @@ function retryableKeys(jobs: WorkflowJob[]) {
   for (const j of jobs) {
     const subject = `${j.kind}:${j.id}`;
     const seen = newest.get(subject);
-    if (
-      !seen ||
-      j.startedAt > seen.startedAt ||
-      (j.startedAt === seen.startedAt && j.key > seen.key)
-    )
-      newest.set(subject, j);
+    if (!seen || compareWorkflowJobs(j, seen) > 0) newest.set(subject, j);
   }
   return new Set(
     [...newest.values()]
