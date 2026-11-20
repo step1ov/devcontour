@@ -312,7 +312,7 @@ test('Потеря аренды перегруженным сервером по
     lose(w, 'server-a', true);
     const three = repairDecision(w.h, [{ id: task }], options);
     assert.equal(three?.action, 'stop');
-    assert.match(three.reason, /отказов окружения/);
+    assert.match(three.reason, /3 отказа окружения/);
   } finally {
     w.cleanup();
   }
