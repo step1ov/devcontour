@@ -1411,6 +1411,13 @@ test('Home budget: a line per scope, holding first; the engine text passes as is
   assert.equal(budget.scopes.length, HOME_LIMITS.budgetScopes);
   assert.equal(budget.total, 5);
   assert.equal(budget.scopes[1].reason, 'у 1 попытки вызовы не записаны');
+  // Главная не переписывает текст движка: формы согласует сам движок.
+  const raw = 'у 1 попыток вызовы не записаны, у 21 вызовов неизвестна стоимость';
+  assert.equal(
+    budgetOf({ budgets: [{ ...b('workspace', 'undetermined'), reason: raw }] }, at(0))!.scopes[0]
+      .reason,
+    raw,
+  );
   // Подпись — название задачи или доски, а не UUID; без названия — id.
   assert.equal(budget.scopes[1].label, undefined, 'workspace has no title');
   const named = budgetOf(
