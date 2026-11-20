@@ -40,6 +40,10 @@ export class ProjectionCache<T> {
   private now() {
     return (this.options.now ?? Date.now)();
   }
+  /** Сколько областей хранится сейчас (диагностика: не больше `size`). */
+  get entryCount() {
+    return this.entries.size;
+  }
   get(
     scope: string,
     stamp: string,

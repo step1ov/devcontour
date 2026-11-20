@@ -146,10 +146,28 @@ test('F93: lead pause over an unheld base check with a board job — no operator
     const agent = new AgentService(h, data);
     const reason = 'Guides refresh and the change record commit';
     await agent.run({ operation: 'queue_set', input: { paused: true, reason } });
+    const paused = h.store.read().pausedAt;
+    const cardBefore = (await views(h)).attention.items.find((i) => i.sourceKey === 'queue');
+    assert.ok(paused && cardBefore);
     await baseUpdateOperation(h, data, { by: 'host' });
     const state = h.store.read();
     assert.equal(leadResumeOf(state), 'keeps-base-check');
     const { attention, queue } = await views(h);
+    // Владелец и причина паузы не сменились: перенос базы оставляет её время
+    // и карточку паузы той же (новое появление — только у новой паузы).
+    assert.equal(state.pausedAt, paused);
+    assert.equal(state.pauseActor?.at, paused);
+    const leadCard = attention.items.find((i) => i.sourceKey === 'queue');
+    assert.equal(leadCard?.id, cardBefore.id);
+    assert.equal(leadCard?.since, paused);
+    // Проверку базы циклом карточка называет один раз, а не причиной и
+    // действием в двух формулировках.
+    assert.equal(
+      (leadCard?.reason.match(/[Цц]икл ведущего (проверяет|проверит)/g) ?? []).length,
+      1,
+      leadCard?.reason,
+    );
+    assert.match(leadCard?.reason ?? '', /Свою паузу ведущий снимает queue_set/);
     // Ни карточки переноса базы, ни действия оператора: паузу снимает
     // ведущий, базу проверяет цикл задания (как host.next и карточка ведущего).
     assert.equal(
