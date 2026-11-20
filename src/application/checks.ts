@@ -5,7 +5,13 @@ import { obligationOf, effectiveChecks } from '../core/checks.ts';
 import { CheckCorpus } from '../core/check-store.ts';
 import { LeadWorkflow } from '../core/lead-workflow.ts';
 import { clip } from './bounded.ts';
-import { nextAction, type Actor, type NextStep, type NextView } from 'devcontour-harness';
+import {
+  newestWorkflowJob,
+  nextAction,
+  type Actor,
+  type NextStep,
+  type NextView,
+} from 'devcontour-harness';
 
 /**
  * Чтение договора проверки задачи: действующая версия, свойства и
@@ -148,16 +154,19 @@ export function taskChecks(h: DevContour, raw: unknown) {
         at: r.finishedAt ?? null,
         summary: (r.error ?? '').slice(0, 300),
       });
-  const job = new LeadWorkflow(h)
-    .list(task.scope === 'workspace' ? undefined : task.repositoryId)
-    .find(
+  // Счётчик восстановлений — у новейшего задания доски задачи (порядок
+  // постановки, harness 0.1.0-alpha.58): прежнее задание с израсходованным
+  // бюджетом не выдаёт себя за текущее.
+  const job = newestWorkflowJob(
+    new LeadWorkflow(h).list(task.scope === 'workspace' ? undefined : task.repositoryId).filter(
       (j) =>
         j.kind === 'board' &&
         s.boards
           .find((b) => b.id === j.id)
           ?.revisions.at(-1)
           ?.taskIds.includes(task.id),
-    );
+    ),
+  );
   const page = <T>(items: T[]) => ({
     total: items.length,
     cursor: q.cursor,

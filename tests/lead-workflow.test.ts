@@ -152,6 +152,35 @@ test('Two board jobs started in the same millisecond, under a stopped or rolled-
   }
 });
 
+test('Task checks budget: repairs of the newest board job by enqueue order, not of an older job of the board', async () => {
+  const { taskChecks } = await import('../src/application/checks.ts');
+  const f = fixture();
+  try {
+    const b = f.h.createBoard('Repairs board', '', 'main');
+    const task = f.h.addTask(b.id, input());
+    f.h.approve(b.id);
+    const lead = new LeadWorkflow(f.h);
+    const older = lead.start({ kind: 'board', id: b.id, authorRuntime: 'codex' });
+    // The older job spent its repairs; the list orders it first (seq 1).
+    f.store.atomic(() =>
+      f.store.saveLocal('lead', older.owner, older.key, {
+        ...lead.get(older.key, older.owner),
+        repairs: 3,
+      }),
+    );
+    f.store.change('fixture.edit', (st) => {
+      st.boards.find((x) => x.id === b.id)!.description = 'Another input';
+    });
+    const newer = lead.start({ kind: 'board', id: b.id, authorRuntime: 'codex' });
+    assert.ok(newer.seq! > older.seq!);
+    assert.equal(lead.list(older.owner)[0].key, older.key, 'list() is oldest first');
+    const checks = taskChecks(f.h, { taskId: task.id, limit: 1, cursor: 0 });
+    assert.equal(checks.budget.repairsUsed, 0);
+  } finally {
+    f.cleanup();
+  }
+});
+
 test('Смена политики на паузе: прогресс держит задачу (approval_stale) и называет устаревшее задание; новое задание и повторное утверждение снимают их', () => {
   // Ревьюер изменился (как после workspace-init). Утверждение плана
   // закрепило прежнюю политику: задача не выдаётся, `eligible` ложно.
