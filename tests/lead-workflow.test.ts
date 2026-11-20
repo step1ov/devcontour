@@ -81,17 +81,21 @@ test('Workflow enqueue is idempotent, expired owners are fenced and changed inpu
 });
 
 test('Two board jobs started in the same millisecond: the later start is the newest one for staleBoards and invalidated', (t) => {
-  // A frozen clock: both starts get the same Date.now(). Storage orders jobs
-  // by key (an input digest), so without a strictly later start time the
-  // "newest live job" would depend on the digests.
+  // A coarse clock: Date.now() moves in steps of 4 ms of real time, so
+  // back-to-back starts read the same time. Storage orders jobs by key (an
+  // input digest), so without a strictly later start time the "newest live
+  // job" would depend on the digests. The start time stays real: the start
+  // waits for the next millisecond instead of moving time forward.
   const f = fixture();
   try {
     const b = f.h.createBoard('Same ms board', '', 'main');
     f.h.addTask(b.id, input());
     f.h.approve(b.id);
     const lead = new LeadWorkflow(f.h);
-    const at = Date.now();
-    t.mock.method(Date, 'now', () => at);
+    const base = Date.now();
+    const zero = performance.now();
+    const clock = () => base + 4 * Math.floor((performance.now() - zero) / 4);
+    t.mock.method(Date, 'now', clock);
     const describe = (text: string) =>
       f.store.change('fixture.edit', (st) => {
         st.boards.find((x) => x.id === b.id)!.description = text;
@@ -103,6 +107,7 @@ test('Two board jobs started in the same millisecond: the later start is the new
       describe('Input ' + i);
       const job = lead.start({ kind: 'board', id: b.id, authorRuntime: 'codex' });
       if (previous) assert.ok(job.startedAt > previous, `${job.startedAt} > ${previous}`);
+      assert.ok(Date.parse(job.startedAt) <= clock(), 'not ahead of the clock');
       previous = job.startedAt;
       starts.push(job.key);
       describe('Moved ' + i);
@@ -114,6 +119,13 @@ test('Two board jobs started in the same millisecond: the later start is the new
     const again = lead.start({ kind: 'board', id: b.id, authorRuntime: 'codex' });
     assert.equal(again.key, starts.at(-1));
     assert.equal(again.startedAt, previous);
+    // A stopped clock (or one set back) does not hang the start: it waits at
+    // most a few milliseconds and takes the time as it is.
+    const stopped = clock();
+    t.mock.method(Date, 'now', () => stopped);
+    describe('Stopped');
+    const late = lead.start({ kind: 'board', id: b.id, authorRuntime: 'codex' });
+    assert.equal(late.startedAt, new Date(stopped).toISOString());
   } finally {
     f.cleanup();
   }
