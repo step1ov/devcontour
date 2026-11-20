@@ -47,8 +47,11 @@ function trackTimers() {
   const live = new Map<number, string>();
   const hook = createHook({
     init(id, type) {
-      if (type === 'Timeout')
-        live.set(id, new Error().stack?.split('\n').slice(5, 12).join(' | ') ?? '');
+      if (type !== 'Timeout') return;
+      const stack = new Error().stack?.split('\n').slice(5, 12).join(' | ') ?? '';
+      // Кэш заголовка Date модуля http Node: одноразовый тайм-аут на секунду
+      // после ответа, не работа сервера.
+      if (!stack.includes('utcDate')) live.set(id, stack);
     },
     destroy(id) {
       live.delete(id);
@@ -84,7 +87,20 @@ test('F95: после закрытия клиента панели у серве
       const again = () => (chain = setTimeout(again, 20).unref());
       again();
       await new Promise((r) => setTimeout(r, 70));
-      assert.ok(probe.live().length >= 2, `контроль утечки не виден: ${probe.live().join('; ')}`);
+      // Само ожидание снимается следующим оборотом: живы ровно интервал и
+      // текущее звено цепочки — каждый виден отдельно.
+      await new Promise((r) => setImmediate(r));
+      await new Promise((r) => setImmediate(r));
+      const seen = probe.live();
+      assert.equal(seen.length, 2, `контроль утечки: ${seen.join('; ')}`);
+      assert.ok(
+        seen.some((t) => t.includes('setInterval')),
+        seen.join('; '),
+      );
+      assert.ok(
+        seen.some((t) => t.includes('again')),
+        seen.join('; '),
+      );
       clearInterval(leak);
       clearTimeout(chain);
       probe.restore();

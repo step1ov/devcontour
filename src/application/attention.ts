@@ -1219,7 +1219,9 @@ const queueSource: AttentionSourceRule = {
           failures: s.pauseFailures ?? [],
           // Текст ожидания — тоже версия: время паузы ведущего перенос базы
           // не меняет (появление то же), а новая причина обновляет карточку.
-          waits: (s.waits ?? []).map((w) => [w.kind, w.detail ?? null]),
+          // Момент ожидания — тоже: два переноса того же компонента дают тот
+          // же текст, а прежняя карточка не должна подтверждать новый перенос.
+          waits: (s.waits ?? []).map((w) => [w.kind, w.at ?? null, w.detail ?? null]),
           ...(base ? { base: base.detail } : {}),
           ...(pausedByLead(s) ? { by: 'lead' } : {}),
           ...(leadPauseNote(s) ? { note: leadPauseNote(s) } : {}),
