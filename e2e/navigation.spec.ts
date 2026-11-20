@@ -150,3 +150,25 @@ test('While a view is still loading, the work area does not scroll without keybo
   release();
   await expect(area.getByRole('application')).toBeVisible();
 });
+
+test('The kanban of an empty board fits the work area on a wide screen', async ({
+  page,
+  request,
+}) => {
+  // No cards — nothing to focus: the columns must not make the work area
+  // scrollable (scrollable-region-focusable).
+  const { board } = await boardWith(request, 'Empty kanban board', []);
+  await page.goto(`/?tab=kanban&board=${board}`);
+  const area = page.getByRole('region', { name: 'Рабочая область' });
+  await expect(
+    area.getByRole('region', { name: 'Колонки задач' }).locator('> section'),
+  ).not.toHaveCount(0);
+  await expect(area.locator('[aria-label="Колонки задач"] button')).toHaveCount(0);
+  expect(
+    await area.evaluate((e) => e.scrollHeight <= e.clientHeight && e.scrollWidth <= e.clientWidth),
+  ).toBe(true);
+  expect(
+    (await new AxeBuilder({ page }).include('section[aria-label="Рабочая область"]').analyze())
+      .violations,
+  ).toEqual([]);
+});

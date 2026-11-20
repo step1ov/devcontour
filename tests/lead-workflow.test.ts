@@ -81,8 +81,9 @@ test('Workflow enqueue is idempotent, expired owners are fenced and changed inpu
 });
 
 test('Two board jobs started in the same millisecond: the later start is the newest one for staleBoards and invalidated', (t) => {
-  // A coarse clock: Date.now() moves in steps of 4 ms of real time, so
-  // back-to-back starts read the same time. Storage orders jobs by key (an
+  // A virtual clock: every Date.now() or performance.now() call moves time by
+  // 10 µs, so back-to-back starts read the same millisecond whatever the
+  // machine load. Storage orders jobs by key (an
   // input digest), so without a strictly later start time the "newest live
   // job" would depend on the digests. The start time stays real: the start
   // waits for the next millisecond instead of moving time forward.
@@ -93,9 +94,12 @@ test('Two board jobs started in the same millisecond: the later start is the new
     f.h.approve(b.id);
     const lead = new LeadWorkflow(f.h);
     const base = Date.now();
-    const zero = performance.now();
-    const clock = () => base + 4 * Math.floor((performance.now() - zero) / 4);
-    t.mock.method(Date, 'now', clock);
+    let virtual = 0;
+    const clock = () => base + Math.floor((virtual += 0.01));
+    // One mock per method: a second mock.method on Date.now would restore to
+    // the first mock, not to the real clock, and freeze time for later tests.
+    const now = t.mock.method(Date, 'now', clock);
+    t.mock.method(performance, 'now', () => (virtual += 0.01));
     const describe = (text: string) =>
       f.store.change('fixture.edit', (st) => {
         st.boards.find((x) => x.id === b.id)!.description = text;
@@ -122,7 +126,7 @@ test('Two board jobs started in the same millisecond: the later start is the new
     // A stopped clock (or one set back) does not hang the start: it waits at
     // most a few milliseconds and takes the time as it is.
     const stopped = clock();
-    t.mock.method(Date, 'now', () => stopped);
+    now.mock.mockImplementation(() => stopped);
     describe('Stopped');
     const late = lead.start({ kind: 'board', id: b.id, authorRuntime: 'codex' });
     assert.equal(late.startedAt, new Date(stopped).toISOString());
